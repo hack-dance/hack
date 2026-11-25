@@ -431,6 +431,14 @@ fn run() -> Result<(), CandidateError> {
         }
     }
     let requested = resolve_candidate_root(Path::new(&arguments[1]))?;
+    // `runtime down [--force] [--json]`, plain or forced (HACK-2477).
+    if let Some(live) = runtime_down_form(command.as_slice()) {
+        let candidate = discover_candidate(&requested)?;
+        let result = runtime_down(&candidate, live)?;
+        report_interrupted_runs(&result);
+        print_json(&result)?;
+        return Ok(());
+    }
     match command.as_slice() {
         [] | ["--help"] | ["help"] => {
             println!(
@@ -1500,7 +1508,6 @@ fn run() -> Result<(), CandidateError> {
             let result = match *action {
                 "up" => hack_runtime_core::provider::up(&candidate),
                 "status" => hack_runtime_core::provider::status(&candidate),
-                "down" => runtime_down(&candidate, LiveRuns::Refuse),
                 "recover" => hack_runtime_core::provider::recover(&candidate),
                 _ => return Err(CandidateError::new("unsupported_command", HELP)),
             }?;
@@ -1508,14 +1515,6 @@ fn run() -> Result<(), CandidateError> {
             if *action == "up" {
                 sweep_running_pool(&result.phase, result.process_alive);
             }
-            print_json(&result)?;
-        }
-        ["runtime", "down", "--force"]
-        | ["runtime", "down", "--force", "--json"]
-        | ["runtime", "down", "--json", "--force"] => {
-            let candidate = discover_candidate(&requested)?;
-            let result = runtime_down(&candidate, LiveRuns::Interrupt)?;
-            report_interrupted_runs(&result);
             print_json(&result)?;
         }
         _ => return Err(CandidateError::new("unsupported_command", HELP)),
@@ -1528,17 +1527,38 @@ fn run() -> Result<(), CandidateError> {
 /// follows as usual.
 fn runtime_down(candidate: &Candidate, live: LiveRuns) -> Result<RuntimeStatus, CandidateError> {
     hack_runtime_core::provider::down(candidate, live).inspect_err(|error| {
-        if error.code == "runtime_down_live_runs" {
-            let runs = error
-                .refusals
-                .as_ref()
-                .map(|refusals| refusals.live_runs.join(", "))
-                .unwrap_or_default();
-            eprintln!(
-                "Did not stop the native runtime: project runs are running in it ({runs}). Run hack down in each project first, or runtime down --force to stop it under them."
-            );
+        if let Some(line) = live_runs_refusal_line(error) {
+            eprintln!("{line}");
         }
     })
+}
+
+/// The stderr line of a `runtime down` refused over live runs (HACK-2477); `None` for
+/// any other error. The ids are the `live_runs` of `runtime status`.
+fn live_runs_refusal_line(error: &CandidateError) -> Option<String> {
+    if error.code != "runtime_down_live_runs" {
+        return None;
+    }
+    let runs = error
+        .refusals
+        .as_ref()
+        .map(|refusals| refusals.live_runs.join(", "))
+        .unwrap_or_default();
+    Some(format!(
+        "Did not stop the native runtime: project runs are running in it ({runs}). Run hack down in each project first (hack down --recover for a run whose hack up has exited), or runtime down --force to stop it under them."
+    ))
+}
+
+/// What a `runtime down` command does with live runs: refuse (plain) or stop the pool
+/// under them (`--force`, before or after `--json`). `None` for any other command.
+fn runtime_down_form(arguments: &[&str]) -> Option<LiveRuns> {
+    match arguments {
+        ["runtime", "down"] | ["runtime", "down", "--json"] => Some(LiveRuns::Refuse),
+        ["runtime", "down", "--force"]
+        | ["runtime", "down", "--force", "--json"]
+        | ["runtime", "down", "--json", "--force"] => Some(LiveRuns::Interrupt),
+        _ => None,
+    }
 }
 
 /// Typed by hand: say what stopped with the pool and what brings it back (HACK-2456).
@@ -2247,5 +2267,55 @@ mod usage_tests {
         assert!(
             super::HELP.contains("hack-local graph serve|serve-restore ... [--report-started]")
         );
+    }
+    /// HACK-2477: every `runtime down` form, in either flag order, and nothing else.
+    #[test]
+    fn runtime_down_is_plain_or_forced_in_either_flag_order() {
+        use super::{LiveRuns, runtime_down_form};
+        for (arguments, expected) in [
+            (&["runtime", "down"][..], Some(LiveRuns::Refuse)),
+            (&["runtime", "down", "--json"][..], Some(LiveRuns::Refuse)),
+            (
+                &["runtime", "down", "--force"][..],
+                Some(LiveRuns::Interrupt),
+            ),
+            (
+                &["runtime", "down", "--force", "--json"][..],
+                Some(LiveRuns::Interrupt),
+            ),
+            (
+                &["runtime", "down", "--json", "--force"][..],
+                Some(LiveRuns::Interrupt),
+            ),
+            (&["runtime", "down", "--force", "--force"][..], None),
+            (&["runtime", "down", "--json", "--json"][..], None),
+            (&["runtime", "down", "--forced"][..], None),
+            (&["runtime", "down", "--json", "--force", "x"][..], None),
+            (&["runtime", "up", "--force"][..], None),
+            (&["runtime", "status", "--json"][..], None),
+        ] {
+            assert_eq!(runtime_down_form(arguments), expected, "{arguments:?}");
+        }
+        assert!(super::HELP.contains("hack-local runtime down --force [--json]"));
+    }
+
+    /// HACK-2477: the stderr line of a refusal names every live run, the plain and the
+    /// `--recover` way out, and `--force`; other errors print nothing of it.
+    #[test]
+    fn a_live_runs_refusal_names_its_runs_and_the_ways_out() {
+        use super::{CandidateError, live_runs_refusal_line};
+        let runs = vec!["a".repeat(32), "b".repeat(32)];
+        let refused = CandidateError::new("runtime_down_live_runs", "x").with_live_runs(runs);
+        let line = live_runs_refusal_line(&refused).unwrap();
+        assert!(line.contains(&format!("({}, {})", "a".repeat(32), "b".repeat(32))));
+        for named in ["hack down", "hack down --recover", "runtime down --force"] {
+            assert!(line.contains(named), "{named}");
+        }
+        for other in [
+            "runtime_down_runs_unreadable",
+            "process_identity_unavailable",
+        ] {
+            assert!(live_runs_refusal_line(&CandidateError::new(other, "x")).is_none());
+        }
     }
 }

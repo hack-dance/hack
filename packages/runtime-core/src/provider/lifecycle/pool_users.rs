@@ -214,8 +214,8 @@ pub(super) const DOWN_RUNS_UNREAD: &str = "runtime_down_runs_unreadable";
 /// the provider lease, and graph starts take that lease before they write a live
 /// receipt, so no run turns live between this check and the stop.
 pub(super) fn refuse_live_runs(state_root: &Path) -> Result<(), CandidateError> {
-    const LIVE: &str = "Native project runs are running in this pool (listed in live_runs), so runtime down stopped nothing. Run hack down in each project first, or runtime down --force to stop the pool under them; hack up then recovers each run with its data kept.";
-    const UNREAD: &str = "The native pool's project runs could not be read, so runtime down stopped nothing. Inspect runtime status, or run runtime down --force to stop the pool anyway; hack up then recovers each run with its data kept.";
+    const LIVE: &str = "Native project runs are running in this pool (listed in live_runs, the same ids as runtime status live_runs), so runtime down stopped nothing. Run hack down in each project first (hack down --recover for a run whose hack up has exited), or runtime down --force to stop the pool under them; hack up then recovers each run with its data kept.";
+    const UNREAD: &str = "The native pool's project runs could not be read, so runtime down stopped nothing. Usually a run directory under run/graphs or run/native-graphs of this home has no readable state.json, for example after a start crashed before its first save; runtime status then counts it in graph_runs and omits live_runs. Run runtime down --force to stop the pool anyway; hack up then recovers each run with its data kept.";
     match live_graph_runs(state_root) {
         None => Err(CandidateError::new(DOWN_RUNS_UNREAD, UNREAD)),
         Some(runs) if !runs.is_empty() => {

@@ -763,6 +763,26 @@ every `runtime down` did before. The refusal is checked under the provider lease
 graph starts take before they write a live receipt, so the check and the stop are one
 step. `NoDownOverLiveRun` says a plain down never stopped the pool under a live run.
 
+What this part of the model does and does not prove:
+
+- `NoDownOverLiveRun` restates the `RuntimeDown` guard (`DownRefuses => ~LiveRun`).
+  The `down-no-refusal` control shows that the guard is what keeps it, nothing more.
+- Its freedom from races rests on the lease assumption above, which is stated here,
+  not modeled: check and stop are one atomic step. In the code, a graph start holds
+  the provider lease (`OwnedGuest`'s mutation lease) through receipt creation, and
+  `down_observed` holds the provider lock from the check through the stop. The idle
+  restart is modeled as two steps (`RestartCheck`, then `RestartStop`) because its second
+  check exists to guard that gap.
+- Every `runtime down` action is guarded by `pool = "running"`. A `crashed` pool
+  (provider dead, record still `running`) and a stop stalled in `quiescing` have no
+  down action here. The code matches that guard: it refuses only when the owner
+  record says `running` and the recorded provider is alive, observed under the lease
+  (`lifecycle.rs::refuses_live_runs`). A dead provider still gets
+  `process_identity_unavailable` and a stalled quiesce resumes. The unit test
+  `only_a_plain_down_of_a_really_running_pool_checks_the_live_runs` and the macOS
+  fixture test `runtime_down_does_not_refuse_a_dead_provider_or_a_stalled_stop` pin
+  this, not the model.
+
 `NoDeadEnd` says that from every reachable state some named command can act, or
 the owner is still noticing its guest is gone. `Recovers` (`[]<>Settled` under weak
 fairness of the user commands) says the project keeps reaching up or down. Up means

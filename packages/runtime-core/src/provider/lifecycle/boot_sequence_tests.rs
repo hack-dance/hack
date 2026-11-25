@@ -407,6 +407,37 @@ fn a_reading_is_kept_only_after_a_successful_stop_and_never_changes_its_result()
     let _ = fs::remove_dir_all(&root);
 }
 
+/// HACK-2477: only a plain down of a pool that really runs checks the live runs. A
+/// provider that died under a running pool (`process-exited`) and a down that stalled
+/// in `quiescing` get the down they had before, and the provider is probed only for a
+/// plain down of a `running` pool.
+#[test]
+fn only_a_plain_down_of_a_really_running_pool_checks_the_live_runs() {
+    let alive = || Ok(true);
+    let gone = || Ok(false);
+    assert!(refuses_live_runs(LiveRuns::Refuse, "running", alive).unwrap());
+    assert!(!refuses_live_runs(LiveRuns::Refuse, "running", gone).unwrap());
+    assert!(!refuses_live_runs(LiveRuns::Interrupt, "running", alive).unwrap());
+    let unasked = || -> Result<bool, CandidateError> { panic!("provider probed") };
+    for phase in STOPPED_PHASES.iter().copied().chain([
+        "quiescing",
+        "stopping",
+        "booting",
+        "failed-boot-stopped",
+    ]) {
+        assert!(!refuses_live_runs(LiveRuns::Refuse, phase, unasked).unwrap());
+    }
+    assert!(!refuses_live_runs(LiveRuns::Interrupt, "running", unasked).unwrap());
+    // A probe that cannot tell refuses nothing on its own: its error is the down's.
+    let failed = || Err(CandidateError::new("process_identity_unavailable", "x"));
+    assert_eq!(
+        refuses_live_runs(LiveRuns::Refuse, "running", failed)
+            .unwrap_err()
+            .code,
+        "process_identity_unavailable"
+    );
+}
+
 #[test]
 fn down_reads_the_memory_peak_before_the_stop_and_keeps_it_only_after() {
     let source = include_str!("../lifecycle.rs");
@@ -439,7 +470,7 @@ fn down_reads_the_memory_peak_before_the_stop_and_keeps_it_only_after() {
     // HACK-2477: a plain down refuses live runs of a running pool under the lease, after
     // the build check and before the stop sample, any release or the guest stop.
     let refuse = body
-        .find("if !stopped && on_live == LiveRuns::Refuse {\n        pool_users::refuse_live_runs(&candidate.state_root)?;")
+        .find("if refuses_live_runs(on_live, &owner.phase, || provider_running(&owner))? {\n        pool_users::refuse_live_runs(&candidate.state_root)?;")
         .unwrap();
     let sample = body
         .find("admission::opening::StopSample::beside(")

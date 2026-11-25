@@ -970,10 +970,21 @@ outside this repair path.
 (Compose or native-authored) is running when its receipt is live: running, starting,
 restoring, stopping, or a failed start that kept its started services. The refusal
 stops and releases nothing, exits non-zero with code `runtime_down_live_runs`, lists the
-run ids in `live_runs`, and writes one line on stderr naming them. When the receipts
-cannot be read it refuses with `runtime_down_runs_unreadable` instead. Run `hack down` in
-each project first. A stopped pool is never refused, and nor are retained runs, which
-hold no containers.
+run ids in `live_runs`, and writes one line on stderr naming them. The ids are the same
+as `live_runs` in `runtime status`; a project records the runs it owns in its Hack
+directory (usually `.hack/`), under `.internal/native-runs/` (Compose) or
+`.internal/native-authored-runs/` (native-authored). Run `hack down` in each project first, or `hack down --recover` for
+a run whose `hack up` has exited. When the receipts cannot be read it refuses with
+`runtime_down_runs_unreadable` instead. Usually a run directory under `run/graphs/` or
+`run/native-graphs/` of the home has no readable `state.json`, for example after a start
+crashed before its first save; `runtime status` then counts it in `graph_runs` and omits
+`live_runs`. `runtime down --force` stops the pool in that case too.
+
+Only a pool that really runs is refused: its record says `running` and its recorded
+provider is alive. A stopped pool is never refused, and nor are retained runs, which
+hold no containers. A pool whose provider died under it (`process-exited`, below) and
+a down that stalled in `quiescing` get the same `runtime down` as before, whatever
+their receipts say.
 
 `runtime down --force` stops the pool anyway, as a crash or a host reboot would. The
 projects' containers stop with the guest and their data is kept. Its JSON lists the
@@ -981,7 +992,7 @@ runs that were live in `interrupted_runs`, or sets `interrupted_runs_unknown` wh
 could not be read. It also writes one line on stderr saying how many it stopped.
 `hack up` in each of those projects starts the pool again and recovers its run. Hack's
 own scripts pass `--force` only where they stop a pool on purpose, such as test
-disposal and the host watchdog.
+disposal, the host watchdog and the qualification run's emergency stop.
 
 How a run moves across a pool stop. It is checked as the TLA+ model
 `tests/models/tla/native-pool-stop`. A run left from a boot older than the previous
@@ -1032,6 +1043,8 @@ stateDiagram-v2
         Receipt still ready-observed,
         owner dead, publication left.
         Pool stopped or in a new boot.
+        hack down needs --recover while
+        the owner's frontend is left.
     end note
     note right of recover
         runtime up first, then the

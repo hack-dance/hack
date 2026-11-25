@@ -1871,7 +1871,12 @@ export class Qualification {
     return [this.main, this.aux, this.isolated];
   }
 
-  /** Ask every pool of this run to stop: the project first, then each home's pool. */
+  /**
+   * Ask every pool of this run to stop: the project first, then each home's pool. This is
+   * the cleanup after a failed step and at the end, so the pool stop is forced
+   * (HACK-2477): a failed `hack down` can leave a live run (a lost foreground, an unclean
+   * stop), and a plain `runtime down` would then refuse and leave the VM running.
+   */
   stopAll(name: string): void {
     this.hack(`down-${name}`, ["down", "--path", this.project], 300, true);
     for (const home of this.homes()) {
@@ -1884,6 +1889,7 @@ export class Qualification {
             home,
             "runtime",
             "down",
+            "--force",
             "--json",
           ],
           { timeout: 300, allowFailure: true }
@@ -2465,7 +2471,7 @@ export class Qualification {
     );
     console.log(`FAIL ${this.step}: ${message}`);
     console.log(
-      `Nothing was stopped or removed. Stop the pools with: ${this.options.native} --candidate-root <home> runtime down --json for ${this.main}, ${this.aux} and ${this.isolated}; the dependency listener is PID ${this.dependencyServer?.pid ?? "none"}; foregrounds of this run: ${[...this.strays, ...(this.foreground ? [this.foreground] : [])].map((child) => child.pid).join(", ") || "none"}.`
+      `Nothing was stopped or removed. Stop the pools with: ${this.options.native} --candidate-root <home> runtime down --force --json for ${this.main}, ${this.aux} and ${this.isolated}; the dependency listener is PID ${this.dependencyServer?.pid ?? "none"}; foregrounds of this run: ${[...this.strays, ...(this.foreground ? [this.foreground] : [])].map((child) => child.pid).join(", ") || "none"}.`
     );
     return 1;
   }

@@ -521,6 +521,46 @@ mod live {
         assert!(live.child.try_wait().unwrap().is_none());
     }
 
+    /// HACK-2477: a pool that does not really run is not refused, whatever its receipts
+    /// say. A provider that died under a running pool (`process-exited`) and a down that
+    /// stalled in `quiescing` get exactly the down a forced one gets, as before the
+    /// refusal. In this fixture both stop at the replaced provider binary; on a real pool
+    /// a dead provider stops at its identity check and a stalled quiesce resumes.
+    #[test]
+    fn runtime_down_does_not_refuse_a_dead_provider_or_a_stalled_stop() {
+        fn live_receipt(candidate: &Candidate) {
+            let receipt = candidate.state_root.join("run/graphs").join("c".repeat(32));
+            state::private_directory(&receipt).unwrap();
+            state::write(
+                &receipt.join("state.json"),
+                &json!({ "phase": "ready-observed" }),
+            )
+            .unwrap();
+        }
+        let mut dead = running("down-dead");
+        let candidate = &dead.home.candidate;
+        live_receipt(candidate);
+        let _ = dead.child.kill();
+        let _ = dead.child.wait();
+        assert_eq!(status(candidate).unwrap().phase, "process-exited");
+        let plain = down(candidate, LiveRuns::Refuse).unwrap_err();
+        let forced = down(candidate, LiveRuns::Interrupt).unwrap_err();
+        assert_ne!(plain.code, "runtime_down_live_runs");
+        assert_eq!(plain.code, forced.code);
+
+        let mut stalled = running("down-stalled");
+        let candidate = &stalled.home.candidate;
+        live_receipt(candidate);
+        let mut owner = Owner::load(candidate).unwrap();
+        owner.phase = "quiescing".into();
+        owner.save(candidate).unwrap();
+        let plain = down(candidate, LiveRuns::Refuse).unwrap_err();
+        let forced = down(candidate, LiveRuns::Interrupt).unwrap_err();
+        assert_ne!(plain.code, "runtime_down_live_runs");
+        assert_eq!(plain.code, forced.code);
+        assert!(stalled.child.try_wait().unwrap().is_none());
+    }
+
     fn no_request() -> StartRequest<'static> {
         StartRequest {
             bridges: super::super::super::super::bridge::Request::Exact(None),

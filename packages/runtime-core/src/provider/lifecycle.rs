@@ -2803,6 +2803,31 @@ pub enum LiveRuns {
     Interrupt,
 }
 
+/// Whether `runtime down` checks the live runs before it acts (HACK-2477): only a plain
+/// down of a pool that is really running, its owner record `running` and its recorded
+/// provider alive. Nothing of the pool runs otherwise, so there is nothing to stop under
+/// a run: a provider that died under a running pool (`process-exited` in `runtime
+/// status`) gets the same down as before (`process_identity_unavailable`), and a down
+/// that stalled in `quiescing` or `stopping` resumes on the next plain down.
+/// `provider_running` is asked only for a plain down of a `running` pool.
+fn refuses_live_runs(
+    on_live: LiveRuns,
+    phase: &str,
+    provider_running: impl FnOnce() -> Result<bool, CandidateError>,
+) -> Result<bool, CandidateError> {
+    Ok(on_live == LiveRuns::Refuse && phase == "running" && provider_running()?)
+}
+
+/// Whether the owner's recorded provider process is still running, by its identity
+/// (a reaped, zombie or reused pid is gone, HACK-2579). No recorded provider is not
+/// running.
+fn provider_running(owner: &Owner) -> Result<bool, CandidateError> {
+    match &owner.process {
+        Some(process) => Ok(!identity::provider_gone(process)?),
+        None => Ok(false),
+    }
+}
+
 pub fn down(candidate: &Candidate, on_live: LiveRuns) -> Result<RuntimeStatus, CandidateError> {
     crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
         down_observed(candidate, None, on_live)
@@ -2835,8 +2860,9 @@ pub(super) fn stop_idle_pool(candidate: &Candidate) -> Result<RuntimeStatus, Can
 ///
 /// With [`LiveRuns::Refuse`] a running pool with a live graph run (or receipts that
 /// cannot be read) is refused under the lease, after the build check and before any
-/// effect: no sample, no release, no stop (HACK-2477). A stopped pool is not refused:
-/// nothing of it runs, and its down only releases the host side, as before.
+/// effect: no sample, no release, no stop (HACK-2477). Only a pool that really runs is
+/// refused ([`refuses_live_runs`]): a stopped pool's down only releases the host side,
+/// and a dead provider or a stalled stop is handled as before.
 fn down_observed(
     candidate: &Candidate,
     idle: Option<&dyn Fn() -> Result<(), CandidateError>>,
@@ -2855,7 +2881,9 @@ fn down_observed(
     }
     let mut owner = Owner::load(candidate)?;
     let stopped = provider_stopped(&owner.phase, initial.process_alive);
-    if !stopped && on_live == LiveRuns::Refuse {
+    // Liveness is observed again under the lease: a start that booted the pool after
+    // the lease-free `status` above has finished by now and may have left a live run.
+    if refuses_live_runs(on_live, &owner.phase, || provider_running(&owner))? {
         pool_users::refuse_live_runs(&candidate.state_root)?;
     }
     // When there is a pool to stop, one host sample is taken beside the stop, on its own

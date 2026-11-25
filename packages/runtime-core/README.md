@@ -657,12 +657,17 @@ pool and a stalled `quiescing` stop get the down they had before. `runtime down 
 and reports them in `interrupted_runs` (HACK-2477). In code, `provider::down` takes
 `LiveRuns::Refuse` or `LiveRuns::Interrupt` explicitly. Both the refusal's stderr line and
 the forced stop's name, per run, what recovers it (`provider::after_forced_stop`, HACK-2715):
-`hack up` for a Compose run; `hack down --recover`, then `hack up`, for a native-authored
-graph2 run, whose dead-owner recovery accepts a run of an ended boot of the pool
-(`journal::load_for_recovery`); and nothing for a native run with persistent data, a live
-source, a custom topology or a managed environment, which refuses with
-`native_graph_ended_boot_unsupported`, data kept. Graph admission counts an ended boot's native
-run by its present stopped containers instead of refusing it.
+`hack up` for a ready Compose run, the explicit `graph recover-cleanup` for one caught starting or
+stopping; `hack down`, then `hack up`, for a native-authored graph2 run in any phase, whose own
+live owner's stop or dead-owner recovery accepts a run of an ended boot of the pool
+(`runtime::cleanup_journal`, `journal::load_for_recovery`; a start caught mid-way only from an
+ended boot); and nothing for a native run with persistent data, a live source, a custom topology
+or a managed environment, which refuses with `native_graph_ended_boot_unsupported`, data kept,
+before any recovery state is written. `graph native boot --run-id RUN --json` reports, read-only
+and without a running pool, whether a run's receipt belongs to an ended boot and whether that
+cleanup admits it. Graph admission counts an ended boot's native run by its present containers
+(by recorded id or exact name) instead of refusing it, the storage checks read every boot, and
+such a run is not live for `runtime down` or the idle check.
 
 SmolVM seeds a machine's disks during its first start (`machine create` makes none) from expanded
 `*-template.ext4` files that it creates from the verified compressed templates and then reuses.

@@ -1576,16 +1576,22 @@ fn forced_stop_plan(runs: &[String], kind: impl Fn(&str) -> AfterForcedStop) -> 
             "hack up in its project recovers {up} (Compose) with its data kept"
         ));
     }
-    let native = group(AfterForcedStop::DownRecoverThenUp);
+    let cleanup = group(AfterForcedStop::ExplicitCleanup);
+    if !cleanup.is_empty() {
+        parts.push(format!(
+            "hack up does not recover {cleanup} (a Compose run caught starting or stopping): once its owner has exited, the explicit dead-owner cleanup (graph recover-cleanup, native-candidate guide) clears it while the pool is stopped, data kept"
+        ));
+    }
+    let native = group(AfterForcedStop::HackDownThenUp);
     if !native.is_empty() {
         parts.push(format!(
-            "hack down --recover, then hack up, in its project recovers {native} (native-authored) with its data kept"
+            "hack down, then hack up, in its project recovers {native} (native-authored) with its data kept"
         ));
     }
     let stranded = group(AfterForcedStop::StopFirst);
     if !stranded.is_empty() {
         parts.push(format!(
-            "nothing recovers {stranded} from a stopped pool (a native-authored run with persistent data, a live source, a custom network or a managed environment, or an unreadable receipt): its data is kept, but stop it with hack down in its project before the pool stops"
+            "nothing recovers {stranded} from a stopped pool (a native-authored run with persistent data, a live source, a custom network or a managed environment, a Compose run caught restoring or restarting, or an unreadable receipt): its data is kept, but stop it with hack down in its project before the pool stops"
         ));
     }
     format!("{}.", parts.join("; "))
@@ -1629,7 +1635,7 @@ fn interrupted_runs_line(
         ))
     } else if result.interrupted_runs_unknown {
         Some(
-            "Stopped the native runtime. Its graph runs could not be read, so any that were running are not listed; hack up in a Compose project, or hack down --recover then hack up in a native-authored one, recovers its run when its receipt can be read."
+            "Stopped the native runtime. Its graph runs could not be read, so any that were running are not listed; hack up in a Compose project, or hack down then hack up in a native-authored one, recovers a ready run when its receipt can be read."
                 .to_owned(),
         )
     } else {
@@ -2382,29 +2388,43 @@ mod usage_tests {
         }
     }
 
-    /// HACK-2715: after `--force`, a Compose run comes back with `hack up`, a native-authored
-    /// one with `hack down --recover` then `hack up`, and a run nothing recovers from a
-    /// stopped pool is named as such instead of being promised a recovery. Each run is
-    /// named once, under its own command.
+    /// HACK-2715: after `--force`, a ready Compose run comes back with `hack up`, one caught
+    /// starting or stopping with the explicit dead-owner cleanup, a native-authored one with
+    /// `hack down` then `hack up`, and a run nothing recovers from a stopped pool is named
+    /// as such instead of being promised a recovery. Each run is named once, under its own
+    /// command.
     #[test]
     fn the_forced_stop_plan_names_the_command_that_works_for_each_run() {
         use super::{AfterForcedStop, CandidateError, forced_stop_plan, live_runs_refusal_line};
-        let (compose, native, stranded) = ("a".repeat(32), "b".repeat(32), "c".repeat(32));
+        let (compose, native, stranded, starting) = (
+            "a".repeat(32),
+            "b".repeat(32),
+            "c".repeat(32),
+            "d".repeat(32),
+        );
         let kind = |run: &str| match run.as_bytes()[0] {
             b'a' => AfterForcedStop::HackUp,
-            b'b' => AfterForcedStop::DownRecoverThenUp,
+            b'b' => AfterForcedStop::HackDownThenUp,
+            b'd' => AfterForcedStop::ExplicitCleanup,
             _ => AfterForcedStop::StopFirst,
         };
-        let runs = vec![compose.clone(), native.clone(), stranded.clone()];
+        let runs = vec![
+            compose.clone(),
+            native.clone(),
+            stranded.clone(),
+            starting.clone(),
+        ];
         let plan = forced_stop_plan(&runs, kind);
         assert!(plan.contains(&format!(
             "hack up in its project recovers {compose} (Compose)"
         )));
         assert!(plan.contains(&format!(
-            "hack down --recover, then hack up, in its project recovers {native} (native-authored)"
+            "hack down, then hack up, in its project recovers {native} (native-authored)"
         )));
         assert!(plan.contains(&format!("nothing recovers {stranded} from a stopped pool")));
-        for run in [&compose, &native, &stranded] {
+        assert!(plan.contains(&format!("hack up does not recover {starting}")));
+        assert!(plan.contains("graph recover-cleanup"));
+        for run in [&compose, &native, &stranded, &starting] {
             assert_eq!(plan.matches(run.as_str()).count(), 1, "{run}");
         }
         // A native-authored run is never promised that hack up alone recovers it.

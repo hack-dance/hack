@@ -5,6 +5,13 @@ import type {
 } from "./native-runtime-client.ts";
 
 /**
+ * Shown after a down started the pool to recover its run (HACK-2456), and after
+ * a native-authored recovery that started the pool did not complete (HACK-2715).
+ */
+export const NATIVE_RECOVERY_RUNTIME_STARTED_NOTE =
+  "The native runtime was started to recover this run and is still running; run `runtime down` to stop it.";
+
+/**
  * The `runtime up` arguments every native project start sends: the
  * Development profile with this project's direct share. A start appends its
  * retained, capacity, network and platform flags, then `--json`.

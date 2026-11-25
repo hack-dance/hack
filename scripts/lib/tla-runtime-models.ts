@@ -3218,26 +3218,63 @@ const contracts: readonly ModelContract[] = [
       // before the fix for one part: admission refused the native run of the
       // ended boot, so the Compose start was refused for good; the native
       // recovery accepted only its own boot; its down --recover did not start a
-      // stopped pool.
-      { name: "two-projects", negative: false, states: 2197 },
+      // stopped pool. The review of HACK-2715 adds a native start in progress
+      // (`preparing`), a run with boot-bound state that is refused by name
+      // (`NativeStranded`), and an owner that outlives the pool (seen on a real
+      // VM). Its controls: a start caught mid-way refused by admission and
+      // recovery; the live owner's stop same-boot only; `hack down` starting a
+      // stopped pool without checking the receipt first.
+      { name: "two-projects", negative: false, states: 5705 },
       {
         name: "admission-ended-boot",
         negative: true,
         invariant: "CanComeUp",
-        fields: ['nrun = "ready"', "nrunBoot = 1"],
-        alternativeWitnesses: [['nrun = "ready"', "nrunBoot = 2"]],
+        fields: ['nrun = "preparing"', "nrunBoot = 1"],
+        alternativeWitnesses: [
+          ['nrun = "ready"', "nrunBoot = 1"],
+          ['nrun = "preparing"', "nrunBoot = 2"],
+          ['nrun = "ready"', "nrunBoot = 2"],
+        ],
       },
       {
         name: "native-same-boot",
         negative: true,
         invariant: "NativeCanComeUp",
-        fields: ['pool = "running"', 'nrun = "ready"', 'nowner = "dead"'],
+        fields: ['pool = "running"', 'nrun = "preparing"', 'nowner = "dead"'],
+        alternativeWitnesses: [
+          ['pool = "running"', 'nrun = "ready"', 'nowner = "dead"'],
+        ],
       },
       {
         name: "native-stopped-pool",
         negative: true,
         invariant: "NativeCanComeUp",
-        fields: ['pool = "stopped"', 'nrun = "ready"', 'nowner = "dead"'],
+        fields: ['pool = "stopped"', 'nrun = "preparing"', 'nowner = "dead"'],
+        alternativeWitnesses: [
+          ['pool = "stopped"', 'nrun = "ready"', 'nowner = "dead"'],
+          ['pool = "stopped"', 'nrun = "ready"', 'nowner = "live"'],
+        ],
+      },
+      {
+        name: "native-mid-start",
+        negative: true,
+        invariant: "CanComeUp",
+        fields: ['nrun = "preparing"', 'nowner = "dead"', "nbound = FALSE"],
+        alternativeWitnesses: [
+          ['nrun = "preparing"', 'nowner = "dead"', "nbound = TRUE"],
+        ],
+      },
+      {
+        name: "native-live-owner",
+        negative: true,
+        invariant: "NativeCanComeUp",
+        fields: ['pool = "running"', 'nrun = "ready"', 'nowner = "live"'],
+      },
+      {
+        name: "native-start-unchecked",
+        negative: true,
+        invariant: "NoWastedPoolStart",
+        fields: ["nwasted = TRUE", "nbound = TRUE", 'pool = "running"'],
       },
     ],
   },

@@ -22,17 +22,20 @@ stateDiagram-v2
     recover --> stranded : [boot not known]
     finalizing --> retained : lease released or archived
 
+    state "native starting" as nstarting
     state "native ready" as nready
     state "native orphaned" as norphaned
     state "native removed" as nremoved
     state "native refused" as nrefused
-    [*] --> nready : native-authored hack up
-    nready --> norphaned : forced down, owner dies
-    norphaned --> nrecover : hack down, recover
+    [*] --> nstarting : native-authored hack up
+    nstarting --> nready : start completes
+    nstarting --> norphaned : forced down, starting
+    nready --> norphaned : forced down, owner lives
+    norphaned --> nrecover : hack down
     state nrecover <<choice>>
     nrecover --> nremoved : [graph2, no env]
     nrecover --> nrefused : [data, source or env]
-    nremoved --> nready : hack up
+    nremoved --> nstarting : hack up
 
     note right of ready
         runtime down refuses a live
@@ -70,24 +73,29 @@ stateDiagram-v2
         INV CanComeUp: hack up starts
         it even when another
         project's native run of an
-        ended boot is left: its
-        stopped containers reserve
-        their limits.
+        ended boot is left, mid-start
+        too: its present containers
+        reserve their limits.
         PROP Recovers.
     end note
     note right of norphaned
-        Receipt names the ended boot.
-        hack down --recover starts a
-        stopped pool, then removes
-        the stopped containers in
-        the new boot, data kept.
-        INV NativeCanComeUp.
+        Receipt names the ended boot,
+        ready or mid-start; its owner
+        may still run. hack down checks
+        the receipt, starts a stopped
+        pool, then the owner's stop or
+        the dead-owner recovery removes
+        the stopped containers, data
+        kept. Not live in the new boot.
+        INV NativeCanComeUp,
+        NoWastedPoolStart.
     end note
     note right of nrefused
         Data, source, custom network
         or managed env: refused by
-        name, data kept. runtime
-        down names it before --force.
+        name before any pool start or
+        recovery state, data kept.
+        Blocks no other project.
     end note
 
     class ready ok

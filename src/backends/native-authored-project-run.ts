@@ -883,6 +883,35 @@ export async function withNativeAuthoredProjectStatus<T>(
   });
 }
 /**
+ * The run id this scope selects, read-only (HACK-2715): the saved Ready
+ * mapping's run, else the start intent's, else null. Nothing is created,
+ * locked or repaired, and it grants no authority; a caller uses it only to ask
+ * the runtime a read-only question about that run.
+ */
+export async function nativeAuthoredSelectedRun(
+  opts: NativeAuthoredProjectRunScope
+): Promise<string | null> {
+  const scope = { ...opts };
+  const ready = await loadNativeAuthoredProjectRun(scope);
+  if (ready) {
+    return ready.record.receipt.review.provenance.run;
+  }
+  return await storage(scope, false, async (store) => {
+    if (!store) {
+      return null;
+    }
+    try {
+      return (await readRecord(store, store.startFile, started)).record.review
+        .provenance.run;
+    } catch (error) {
+      if (hasCode(error, "ENOENT")) {
+        return null;
+      }
+      throw error;
+    }
+  });
+}
+/**
  * Read-only selection for explicit `down --recover` (HACK-1312): true only when
  * this scope retains nothing a recovery owner could act on. That means no saved
  * Ready mapping, startup intent, unfinished frontend recovery intent, live-stop or hook

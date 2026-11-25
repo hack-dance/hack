@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -308,6 +308,91 @@ macTest(
       })
     ).toBe(0);
     expect(order).toEqual([]);
+  }
+);
+
+macTest(
+  "HACK-2715 review: plain down starts the pool before the owner's stop, and a failure after a started pool says it still runs",
+  async () => {
+    const selected = await fixture();
+    const options = { ...selected.options, operation: "down" as const };
+    const { logger } = await import("../src/ui/logger.ts");
+    const { NATIVE_RECOVERY_RUNTIME_STARTED_NOTE } = await import(
+      "../src/backends/native-project-runtime-up.ts"
+    );
+    const order: string[] = [];
+    const run = (opts: {
+      readonly started: boolean;
+      readonly stop: () => Promise<void>;
+      readonly recover?: () => Promise<unknown>;
+    }) =>
+      tryNativeAuthoredCommand({
+        ...selected,
+        options,
+        serve: () => {
+          throw new Error("A stop cannot invoke startup.");
+        },
+        unreservedSelected: () => Promise.resolve(false),
+        nothingToRecover: () => Promise.resolve(false),
+        startStoppedPool: (value) => {
+          order.push(`pool:${value.projectRoot}`);
+          return Promise.resolve(opts.started);
+        },
+        stop: () => {
+          order.push("stop");
+          return opts.stop();
+        },
+        recover: () => {
+          order.push("recover");
+          return (opts.recover ?? (() => Promise.resolve({})))() as ReturnType<
+            typeof recoverNativeAuthoredProject
+          >;
+        },
+      }).catch((error: unknown) => error);
+    const info = spyOn(logger, "info");
+    try {
+      const notes = () =>
+        info.mock.calls.filter(
+          ([input]) => input.message === NATIVE_RECOVERY_RUNTIME_STARTED_NOTE
+        ).length;
+      // The run's own live owner stops it once the pool runs.
+      expect(await run({ started: true, stop: () => Promise.resolve() })).toBe(
+        0
+      );
+      expect(order).toEqual([`pool:${selected.root}`, "stop"]);
+      expect(notes()).toBe(0);
+      // An owner that is gone falls back to the recovery, which does not start
+      // the pool a second time and reports the started pool when it fails.
+      order.length = 0;
+      const failed = await run({
+        started: true,
+        stop: () => Promise.reject(new NativeAuthoredStopUnavailableError()),
+        recover: () => Promise.reject(new Error("refused")),
+      });
+      expect(failed).toBeInstanceOf(HackCliError);
+      expect(order).toEqual([
+        `pool:${selected.root}`,
+        "stop",
+        `pool:${selected.root}`,
+        "recover",
+      ]);
+      expect(notes()).toBe(1);
+      // A stop that fails after this command started the pool says so too.
+      order.length = 0;
+      await run({
+        started: true,
+        stop: () => Promise.reject(new Error("refused")),
+      });
+      expect(notes()).toBe(2);
+      // Nothing is said when this command did not start the pool.
+      await run({
+        started: false,
+        stop: () => Promise.reject(new Error("refused")),
+      });
+      expect(notes()).toBe(2);
+    } finally {
+      info.mockRestore();
+    }
   }
 );
 

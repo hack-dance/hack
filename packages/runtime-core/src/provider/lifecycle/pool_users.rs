@@ -170,6 +170,7 @@ const LIVE_PHASES: [(&str, &[&str]); 2] = [
 /// or a receipt cannot be read, so the caller says it could not tell instead of naming
 /// nothing.
 pub(super) fn live_graph_runs(state_root: &Path) -> Option<Vec<String>> {
+    let current = current_boot(state_root);
     let mut live = Vec::new();
     for (directory, phases) in LIVE_PHASES {
         let parent = state_root.join(directory);
@@ -194,9 +195,19 @@ pub(super) fn live_graph_runs(state_root: &Path) -> Option<Vec<String>> {
                 continue;
             }
             let receipt: serde_json::Value = state::read(&entry.path().join("state.json")).ok()?;
-            if receipt["phase"]
-                .as_str()
-                .is_some_and(|phase| phases.contains(&phase))
+            // A native run of a boot that ended under it (`runtime down --force`, a crash
+            // or a host reboot, HACK-2715) runs nothing in this boot: its guest stopped
+            // and its containers with it. It no longer keeps the pool in use; its project
+            // clears it with `hack down` ([`after_forced_stop`]). Compose receipts name
+            // no boot here and keep their rule.
+            let ended = directory == "run/native-graphs"
+                && current
+                    .as_deref()
+                    .is_some_and(|boot| receipt["boot"].as_str() != Some(boot));
+            if !ended
+                && receipt["phase"]
+                    .as_str()
+                    .is_some_and(|phase| phases.contains(&phase))
             {
                 live.push(name);
             }
@@ -205,21 +216,39 @@ pub(super) fn live_graph_runs(state_root: &Path) -> Option<Vec<String>> {
     live.sort();
     Some(live)
 }
+/// The boot the pool's record says is running, read without a lock; `None` when the
+/// pool is not recorded running or the record cannot be read.
+fn current_boot(state_root: &Path) -> Option<String> {
+    let pool: serde_json::Value = state::read(&state_root.join("run/smolvm/owner.json")).ok()?;
+    if pool["phase"] != "running" {
+        return None;
+    }
+    pool["guest_boot_id"].as_str().map(str::to_owned)
+}
 /// What brings a run back after `runtime down --force` (or a crash) stopped the pool
-/// under it (HACK-2715), as its project names it.
+/// under it (HACK-2715), as its project names it. Classified by the run's kind and its
+/// receipt phase: a command is named only where it works from an ended boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AfterForcedStop {
-    /// A Compose run (`run/graphs`): `hack up` in its project starts the pool and
-    /// recovers the run from the ended boot, data kept.
+    /// A Compose run (`run/graphs`) that was ready, or had every service started:
+    /// `hack up` in its project starts the pool and recovers it from the ended boot
+    /// (the cross-boot dead-owner recovery), data kept.
     HackUp,
-    /// A native-authored run (`run/native-graphs`) that recovery from an ended boot
-    /// admits (a graph2 receipt: no persistent data, live source, custom network
-    /// topology or managed environment): `hack down --recover` in its project starts the
-    /// pool and recovers it, then `hack up` starts it again.
-    DownRecoverThenUp,
-    /// A native-authored run whose recovery from an ended boot is not supported
-    /// (`native_graph_ended_boot_unsupported`), or whose receipt cannot be read: stop it
-    /// with `hack down` before the pool stops. Its data is kept either way.
+    /// A Compose run caught in a start that failed or never finished (`failed-retained`,
+    /// `preparing`) or in its owner's own stop (`cleanup-intent`): `hack up` does not
+    /// recover it. Once its owner has exited, the explicit dead-owner cleanup
+    /// (`graph recover-cleanup`) clears it while the pool is stopped, data kept.
+    ExplicitCleanup,
+    /// A native-authored run (`run/native-graphs`) that the cleanup from an ended boot
+    /// admits (a graph2 receipt: no persistent data, live source, custom network topology
+    /// or managed environment), in any phase, including a start caught mid-way:
+    /// `hack down` in its project starts the pool and clears it (through its owner if
+    /// that still runs, else the dead-owner recovery), then `hack up` starts it again.
+    HackDownThenUp,
+    /// Nothing recovers it from an ended boot: a native-authored run with boot-bound
+    /// state (`native_graph_ended_boot_unsupported`), a Compose run caught restoring or
+    /// restarting, or a receipt that cannot be read. Stop it with `hack down` before the
+    /// pool stops. Its data is kept either way, and it does not block other projects.
     StopFirst,
 }
 
@@ -266,8 +295,18 @@ pub fn after_forced_stop(state_root: &Path, run: &str) -> AfterForcedStop {
     if !is_graph_run(run) {
         return AfterForcedStop::StopFirst;
     }
-    if fs::symlink_metadata(state_root.join("run/graphs").join(run)).is_ok_and(|m| m.is_dir()) {
-        return AfterForcedStop::HackUp;
+    let compose = state_root.join("run/graphs").join(run);
+    if fs::symlink_metadata(&compose).is_ok_and(|m| m.is_dir()) {
+        let Ok(receipt) = state::read::<serde_json::Value>(&compose.join("state.json")) else {
+            return AfterForcedStop::StopFirst;
+        };
+        return match receipt["phase"].as_str() {
+            Some("ready-observed" | "started-observed") => AfterForcedStop::HackUp,
+            Some("failed-retained" | "preparing" | "cleanup-intent") => {
+                AfterForcedStop::ExplicitCleanup
+            }
+            _ => AfterForcedStop::StopFirst,
+        };
     }
     let Ok(receipt) = state::read::<serde_json::Value>(
         &state_root
@@ -282,7 +321,7 @@ pub fn after_forced_stop(state_root: &Path, run: &str) -> AfterForcedStop {
             .iter()
             .all(|field| receipt.get(field).is_none());
     if graph2 && native_environment_names(state_root, run) == Some(false) {
-        AfterForcedStop::DownRecoverThenUp
+        AfterForcedStop::HackDownThenUp
     } else {
         AfterForcedStop::StopFirst
     }
@@ -300,7 +339,7 @@ pub(super) const DOWN_RUNS_UNREAD: &str = "runtime_down_runs_unreadable";
 /// the provider lease, and graph starts take that lease before they write a live
 /// receipt, so no run turns live between this check and the stop.
 pub(super) fn refuse_live_runs(state_root: &Path) -> Result<(), CandidateError> {
-    const LIVE: &str = "Native project runs are running in this pool (listed in live_runs, the same ids as runtime status live_runs), so runtime down stopped nothing. Run hack down in each project first (hack down --recover for a run whose hack up has exited), or runtime down --force to stop the pool under them. After --force, hack up recovers a Compose project's run with its data kept; a native-authored project (hack.project.json) needs hack down --recover, then hack up; a native-authored run with persistent data, a live source, a custom network or a managed environment cannot be recovered after --force, so stop it with hack down first. The stderr line names the command for each run.";
+    const LIVE: &str = "Native project runs are running in this pool (listed in live_runs, the same ids as runtime status live_runs), so runtime down stopped nothing. Run hack down in each project first (hack down --recover for a run whose hack up has exited), or runtime down --force to stop the pool under them. After --force, hack up recovers a ready Compose run with its data kept, and a Compose run caught starting or stopping needs the explicit dead-owner cleanup; a native-authored project (hack.project.json) needs hack down, then hack up; a native-authored run with persistent data, a live source, a custom network or a managed environment, or a Compose run caught restoring or restarting, cannot be recovered after --force, so stop it with hack down first. The stderr line names the command for each run.";
     const UNREAD: &str = "The native pool's project runs could not be read, so runtime down stopped nothing. Usually a run directory under run/graphs or run/native-graphs of this home has no readable state.json, for example after a start crashed before its first save; runtime status then counts it in graph_runs and omits live_runs. Run runtime down --force to stop the pool anyway; a run whose receipt cannot be read may then need inspection before it recovers.";
     match live_graph_runs(state_root) {
         None => Err(CandidateError::new(DOWN_RUNS_UNREAD, UNREAD)),
@@ -505,11 +544,14 @@ mod tests {
         );
     }
 
-    /// HACK-2715: what a refusal or a forced stop names for each run. A Compose run
-    /// comes back with `hack up`; a native-authored graph2 run without a managed
-    /// environment with `hack down --recover` then `hack up`; a native run with
-    /// boot-bound state (data, source, topology or a managed environment) or an
-    /// unreadable receipt is never promised a recovery.
+    /// HACK-2715: what a refusal or a forced stop names for each run, by kind and phase.
+    /// A ready (or all-started) Compose run comes back with `hack up`; one caught in a
+    /// start or in its owner's stop needs the explicit dead-owner cleanup; one caught
+    /// restoring or restarting has no recovery. A native-authored graph2 run without a
+    /// managed environment comes back with `hack down` then `hack up` in every phase,
+    /// including a start caught mid-way; a native run with boot-bound state (data,
+    /// source, topology or a managed environment) or an unreadable receipt is never
+    /// promised a recovery.
     #[test]
     fn after_a_forced_stop_each_run_is_named_with_the_command_that_recovers_it() {
         let home = Home::new();
@@ -554,7 +596,41 @@ mod tests {
         home.dir(&format!("run/native-graphs/{unread}"));
         let kind = |run: &str| after_forced_stop(&home.0, run);
         assert_eq!(kind(&compose), AfterForcedStop::HackUp);
-        assert_eq!(kind(&native), AfterForcedStop::DownRecoverThenUp);
+        assert_eq!(kind(&native), AfterForcedStop::HackDownThenUp);
+        for (phase, expected) in [
+            ("started-observed", AfterForcedStop::HackUp),
+            ("failed-retained", AfterForcedStop::ExplicitCleanup),
+            ("preparing", AfterForcedStop::ExplicitCleanup),
+            ("cleanup-intent", AfterForcedStop::ExplicitCleanup),
+            ("restoring", AfterForcedStop::StopFirst),
+            ("restarting", AfterForcedStop::StopFirst),
+        ] {
+            write(
+                "run/graphs",
+                &compose,
+                serde_json::json!({ "phase": phase }),
+            );
+            assert_eq!(kind(&compose), expected, "Compose {phase}");
+        }
+        // Every native phase the cleanup from an ended boot admits, a start caught
+        // mid-way included, names the same command.
+        for phase in [
+            "preparing",
+            "failed-retained",
+            "stop-intent",
+            "ready-observed",
+        ] {
+            write(
+                "run/native-graphs",
+                &native,
+                serde_json::json!({ "version": 2, "phase": phase }),
+            );
+            assert_eq!(
+                kind(&native),
+                AfterForcedStop::HackDownThenUp,
+                "native {phase}"
+            );
+        }
         for run in [&data, &topology, &environment, &unread, &absent] {
             assert_eq!(kind(run), AfterForcedStop::StopFirst, "{run}");
         }
@@ -562,6 +638,50 @@ mod tests {
         // An unreadable environment store names no command.
         fs::write(leases.join("broken.json"), b"{").unwrap();
         assert_eq!(kind(&native), AfterForcedStop::StopFirst);
+    }
+
+    /// HACK-2715 review: a native run of a boot that ended under it runs nothing in the
+    /// pool's current boot, so it no longer keeps a plain `runtime down` refused (seen on a
+    /// real VM: the leftover native run refused every later `runtime down`). A run of the
+    /// current boot, any Compose run, and every run while the pool record cannot be read
+    /// or is not running keep their old rule.
+    #[test]
+    fn a_native_run_of_an_ended_boot_is_not_live() {
+        let home = Home::new();
+        let (current, ended, compose) = ("a".repeat(32), "b".repeat(32), "c".repeat(32));
+        for (directory, run, boot) in [
+            ("run/native-graphs", &current, "boot-now"),
+            ("run/native-graphs", &ended, "boot-old"),
+            ("run/graphs", &compose, "boot-old"),
+        ] {
+            let dir = home.dir(&format!("{directory}/{run}"));
+            state::write(
+                &dir.join("state.json"),
+                &serde_json::json!({ "phase": "ready-observed", "boot": boot }),
+            )
+            .unwrap();
+        }
+        let everything = Some(vec![current.clone(), ended.clone(), compose.clone()]);
+        assert_eq!(live_graph_runs(&home.0), everything);
+        let pool = home.dir("run/smolvm");
+        let record = |phase: &str| {
+            state::write(
+                &pool.join("owner.json"),
+                &serde_json::json!({ "phase": phase, "guest_boot_id": "boot-now" }),
+            )
+            .unwrap();
+        };
+        record("stopped");
+        assert_eq!(live_graph_runs(&home.0), everything);
+        record("running");
+        assert_eq!(
+            live_graph_runs(&home.0),
+            Some(vec![current.clone(), compose.clone()])
+        );
+        assert!(require_idle(&home.0).is_err());
+        let error = refuse_live_runs(&home.0).unwrap_err();
+        let listed = serde_json::to_value(&error).unwrap()["live_runs"].clone();
+        assert_eq!(listed, serde_json::json!([current, compose]));
     }
 
     #[test]

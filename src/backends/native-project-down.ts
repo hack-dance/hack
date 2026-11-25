@@ -742,10 +742,6 @@ class RetainedRunResumed extends Error {}
  */
 class StoppedPoolStarted extends Error {}
 
-/** Shown after a down started the pool to recover its run (HACK-2456). */
-export const NATIVE_RECOVERY_RUNTIME_STARTED_NOTE =
-  "The native runtime was started to recover this run and is still running; run `runtime down` to stop it.";
-
 /**
  * Whether the lock-free `graph foreground-owner` selection (host files only;
  * it needs no running pool) shows an exited owner whose run the recovery after a

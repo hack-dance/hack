@@ -434,6 +434,81 @@ test("HACK-2715: a recovery from an ended pool boot reports same_boot false and 
   }
 });
 
+test("HACK-2715 review: only an ended-boot selection admits a start caught mid-way, bound as before", () => {
+  const start = parseNativeAuthoredReceipt(receipt()).review;
+  const admitted = parseNativeAuthoredReceipt(receipt());
+  const midway = (phase: "preparing" | "ready-observed") => {
+    const value = selection();
+    value.receipt.phase = phase;
+    if (phase === "preparing") {
+      Object.assign(value.receipt.resources["container:web"], {
+        id: null,
+        phase: "create-intent",
+      });
+    } else {
+      Object.assign(value.receipt, {
+        failure: { service: "web", observation: { state: "dead" } },
+      });
+    }
+    return value;
+  };
+  for (const phase of ["preparing", "ready-observed"] as const) {
+    // Without the runtime's ended-boot marker, both stay refused.
+    expect(() =>
+      parseNativeAuthoredRecoverySelection({ value: midway(phase), start })
+    ).toThrow();
+    const ended = { ...midway(phase), ended_boot: true };
+    const parsed = parseNativeAuthoredRecoverySelection({
+      value: ended,
+      start,
+    });
+    expect(parsed.ended_boot).toBe(true);
+    expect(parsed.receipt.phase).toBe(phase);
+    if (phase === "ready-observed") {
+      // A readied run's selection still binds to its admitted Ready.
+      expect(
+        parseNativeAuthoredRecoverySelection({ value: ended, admitted })
+          .ended_boot
+      ).toBe(true);
+    }
+    // The stored selection re-parses as the recovery's expected selection, and
+    // binds the removed result of that same run.
+    const removed = structuredClone(midway(phase).receipt);
+    removed.phase = "removed";
+    Reflect.deleteProperty(removed, "failure");
+    for (const resource of Object.values(removed.resources)) {
+      resource.phase = "removed";
+    }
+    expect(
+      parseNativeAuthoredRecoveryResult({
+        value: { ...result(), same_boot: false, receipt: removed },
+        expected: parsed,
+      }).same_boot
+    ).toBe(false);
+    for (const marker of [false, "true", null]) {
+      expect(() =>
+        parseNativeAuthoredRecoverySelection({
+          value: { ...midway(phase), ended_boot: marker },
+          start,
+        })
+      ).toThrow();
+    }
+  }
+  // Only graph2 receipts are recovered from an ended boot.
+  const graph4 = { ...midway("preparing"), ended_boot: true };
+  graph4.receipt.version = 4;
+  expect(() =>
+    parseNativeAuthoredRecoverySelection({ value: graph4, start })
+  ).toThrow();
+  // A same-boot selection keeps its bytes: no marker is added.
+  expect(
+    Object.hasOwn(
+      parseNativeAuthoredRecoverySelection({ value: selection(), start }),
+      "ended_boot"
+    )
+  ).toBe(false);
+});
+
 test("graph4 recovery mirrors enrolled data and installed tool admission without widening other receipt families", () => {
   const base = receipt();
   const namespace = base.review.provenance.namespace,

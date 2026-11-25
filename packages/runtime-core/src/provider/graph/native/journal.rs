@@ -258,6 +258,19 @@ impl Receipt {
         }
         Ok(())
     }
+    /// Cleanup admission of a receipt of an ended pool boot (HACK-2715), never readiness
+    /// evidence. Any validated phase, including a start caught mid-way: the guest that
+    /// held its pending effects stopped, so none can still land. The cleanup observes each
+    /// member by recorded id or exact name and refuses a present one with no recorded id.
+    /// Only graph2 receipts reach it ([`ended_boot_recoverable`]).
+    #[cfg(any(target_os = "macos", test))]
+    pub(super) fn require_ended_boot_settled(&self) -> Result<(), CandidateError> {
+        self.validate(self.review.scope().run, &self.owner)?;
+        if self.version != 2 {
+            return Err(refused());
+        }
+        Ok(())
+    }
     pub(super) fn preparing(
         config: &Configuration,
         owner: &str,
@@ -725,9 +738,62 @@ pub(super) fn ended_boot_recoverable(
     }
     Ok(())
 }
-/// The journal a cleanup-only recovery acts on: one of the current boot, or (with
-/// `ended_boot`) one of an ended boot of this pool owner that
-/// [`ended_boot_recoverable`] admits. Every other load stays same-boot ([`load`]).
+/// Which boot a receipt belongs to, read from the pool's own record without a lock and
+/// without a running pool (HACK-2715). `Ended` only on positive evidence: the record is
+/// this receipt's pool owner and says the pool is not running, or running another boot.
+/// An absent or unreadable record, or a record of another owner, proves nothing and
+/// returns `Current`, so the caller keeps the strict same-boot rules. Callers that act
+/// on the run re-check the boot against the connected engine before any effect.
+pub(super) fn pool_boot(candidate: &Candidate, receipt: &Receipt) -> ReceiptBoot {
+    let Ok(pool) =
+        state::read::<serde_json::Value>(&candidate.state_root.join("run/smolvm/owner.json"))
+    else {
+        return ReceiptBoot::Current;
+    };
+    if pool["token"].as_str() != Some(receipt.owner.as_str()) {
+        return ReceiptBoot::Current;
+    }
+    if pool["phase"] == "running" && pool["guest_boot_id"].as_str() == Some(receipt.boot.as_str()) {
+        ReceiptBoot::Current
+    } else {
+        ReceiptBoot::Ended
+    }
+}
+/// What `graph native boot` reports for one run (HACK-2715): its phase, whether its
+/// receipt belongs to an ended pool boot ([`pool_boot`]), and whether its own owner's
+/// stop or its dead-owner recovery can clear it from that ended boot
+/// ([`ended_boot_recoverable`]). Read-only and lock-free; it grants nothing. A frontend
+/// uses it to start a stopped pool only for a run that the started pool can then clear.
+#[derive(Serialize)]
+pub struct BootCheck {
+    version: u8,
+    kind: BootCheckKind,
+    run: String,
+    phase: Phase,
+    ended_boot: bool,
+    ended_boot_recoverable: bool,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum BootCheckKind {
+    NativeGraphBoot,
+}
+pub fn boot_check(candidate: &Candidate, run: &str) -> Result<BootCheck, CandidateError> {
+    let (receipt, _) = load_validated(candidate, run, None)?;
+    let ended_boot = pool_boot(candidate, &receipt) == ReceiptBoot::Ended;
+    Ok(BootCheck {
+        version: 1,
+        kind: BootCheckKind::NativeGraphBoot,
+        run: run.into(),
+        ended_boot_recoverable: ended_boot && ended_boot_recoverable(candidate, &receipt).is_ok(),
+        phase: receipt.phase,
+        ended_boot,
+    })
+}
+/// The journal a cleanup acts on: one of the current boot, or (with `ended_boot`) one of
+/// an ended boot of this pool owner that [`ended_boot_recoverable`] admits. Only the
+/// run's own owner (its bound receipt) and the explicit dead-owner recovery pass
+/// `ended_boot`; every other load stays same-boot ([`load`]).
 pub(super) fn load_for_recovery(
     candidate: &Candidate,
     run: &str,
@@ -745,7 +811,10 @@ pub(super) fn load_for_recovery(
     }
     Ok((receipt, root, which))
 }
-/// Old boot history releases capacity only after strict same-owner removal validation.
+/// The strict same-boot rule admission used before HACK-2715: old boot history releases
+/// capacity only after strict same-owner removal validation. Admission and the storage
+/// checks now read any boot ([`load_any_boot`]); tests keep this as the old oracle.
+#[cfg(test)]
 pub(super) fn load_admission(
     candidate: &Candidate,
     run: &str,

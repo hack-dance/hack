@@ -22,6 +22,7 @@ import {
 import {
   type NativeAuthoredProjectRunScope,
   nativeAuthoredProjectNothingToRecover,
+  nativeAuthoredSelectedRun,
   stopNativeAuthoredProject,
 } from "../backends/native-authored-project-run.ts";
 import {
@@ -42,6 +43,7 @@ import {
   retireNativeAuthoredUnreservedStart,
 } from "../backends/native-authored-unreserved-start.ts";
 import { resolveNativeAuthoredExecStaleEnvWarning } from "../backends/native-exec-stale-env.ts";
+import { NATIVE_RECOVERY_RUNTIME_STARTED_NOTE } from "../backends/native-project-runtime-up.ts";
 import { parseNativeHttpsSelection } from "../backends/native-project-start.ts";
 import {
   isNativeRuntimeNotRunning,
@@ -556,7 +558,7 @@ type Seams = {
   readonly retireUnreserved?: typeof retireNativeAuthoredUnreservedStart;
   /** Read-only empty-selection seam for repeated recovery (HACK-1312). */
   readonly nothingToRecover?: typeof nativeAuthoredProjectNothingToRecover;
-  /** Starts a stopped pool before a recovery (HACK-2715). */
+  /** Starts a stopped pool before a stop or recovery of an ended boot's run (HACK-2715). */
   readonly startStoppedPool?: typeof startStoppedPoolForAuthoredRecovery;
   readonly observe?: typeof nativeAuthoredProjectPs;
   readonly logs?: typeof nativeAuthoredProjectLogs;
@@ -601,7 +603,45 @@ async function runStatus(input: LifecycleInput): Promise<number> {
   return 0;
 }
 
-async function runRecovery(input: LifecycleInput): Promise<number> {
+/**
+ * Start a stopped pool for a run whose pool boot ended under it, only when its
+ * cleanup can then proceed (HACK-2715): see {@link startStoppedPoolForAuthoredRecovery}.
+ */
+async function startPoolForEndedBoot(input: LifecycleInput): Promise<boolean> {
+  return await (
+    input.seams.startStoppedPool ?? startStoppedPoolForAuthoredRecovery
+  )({
+    runtime: input.runtime,
+    projectRoot: input.scope.projectRoot,
+    run: () => nativeAuthoredSelectedRun(input.scope),
+  });
+}
+
+/**
+ * Run a stop or recovery that may follow a pool this command started. If it
+ * fails, the pool is left running and the note says so (HACK-2715 review M3),
+ * as the Compose recovery does (HACK-2456). It is not stopped again: other
+ * projects may already use it, and stopping a pool under them is what plain
+ * `runtime down` refuses.
+ */
+async function noteStartedPoolOnFailure<T>(
+  started: boolean,
+  action: () => Promise<T>
+): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    if (started) {
+      logger.info({ message: NATIVE_RECOVERY_RUNTIME_STARTED_NOTE });
+    }
+    throw error;
+  }
+}
+
+async function runRecovery(
+  input: LifecycleInput,
+  poolStarted = false
+): Promise<number> {
   if (
     await (
       input.seams.unreservedSelected ?? nativeAuthoredUnreservedStartSelected
@@ -646,17 +686,17 @@ async function runRecovery(input: LifecycleInput): Promise<number> {
     return 0;
   }
   // HACK-2715: a run whose pool stopped under it (runtime down --force, a crash
-  // or a host reboot) is recovered in a new boot, so a stopped pool starts first.
-  await (input.seams.startStoppedPool ?? startStoppedPoolForAuthoredRecovery)({
-    runtime: input.runtime,
-    projectRoot: input.scope.projectRoot,
-  });
-  await (input.seams.recover ?? recoverNativeAuthoredProject)({
-    runtime: input.runtime,
-    scope: input.scope,
-    timeoutMs: input.startupTimeoutMs,
-    signal: input.signal,
-  });
+  // or a host reboot) is recovered in a new boot, so a stopped pool starts
+  // first, but only when the run's receipt shows the recovery can proceed.
+  const started = (await startPoolForEndedBoot(input)) || poolStarted;
+  await noteStartedPoolOnFailure(started, () =>
+    (input.seams.recover ?? recoverNativeAuthoredProject)({
+      runtime: input.runtime,
+      scope: input.scope,
+      timeoutMs: input.startupTimeoutMs,
+      signal: input.signal,
+    })
+  );
   logger.info({
     message: "Selected native project recovered; persistent data is retained.",
   });
@@ -665,6 +705,10 @@ async function runRecovery(input: LifecycleInput): Promise<number> {
 
 async function runStop(input: LifecycleInput): Promise<number> {
   const startedAt = performance.now();
+  // HACK-2715: after the pool stopped under the run, its detached owner may
+  // still run (seen on a real VM). Its own stop clears the run in a new boot, so
+  // a stopped pool starts first when the run's receipt shows that can proceed.
+  const started = await startPoolForEndedBoot(input);
   try {
     await (input.seams.stop ?? stopNativeAuthoredProject)({
       scope: input.scope,
@@ -676,9 +720,12 @@ async function runStop(input: LifecycleInput): Promise<number> {
       input.signal.aborted ||
       !(error instanceof NativeAuthoredStopUnavailableError)
     ) {
+      if (started) {
+        logger.info({ message: NATIVE_RECOVERY_RUNTIME_STARTED_NOTE });
+      }
       throw error;
     }
-    return await runRecovery(input);
+    return await runRecovery(input, started);
   }
   writeLifecycleStopped(performance.now() - startedAt, { retained: true });
   return 0;

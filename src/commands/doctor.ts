@@ -239,6 +239,7 @@ import {
 } from "../lib/mac-ca-trust.ts";
 import { MACHINE_SCHEMAS } from "../lib/machine-output.ts";
 import {
+  proxyStartBindFailure,
   removeUnstartedProxyContainers,
   resolveManagedProxyBind,
   writeManagedProxyCompose,
@@ -324,10 +325,7 @@ import {
   scopeRuntimeHygieneToProject,
 } from "../lib/project-runtime-hygiene.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
-import {
-  looksLikePortBindFailure,
-  readProxyBindFromCompose,
-} from "../lib/proxy-bind.ts";
+import { readProxyBindFromCompose } from "../lib/proxy-bind.ts";
 import { withIngressChange } from "../lib/proxy-ingress-addresses.ts";
 import {
   inspectProxyLoopback,
@@ -982,7 +980,7 @@ async function runDoctorAudit(
   );
   results.push(
     await runCheck(s, "docker compose", () => checkComposePlugin(), {
-      timeoutMs: 10_000,
+      timeoutMs: COMPOSE_PLUGIN_CHECK_TIMEOUT_MS,
     })
   );
   results.push(
@@ -2491,6 +2489,11 @@ async function checkMutagenBinary(): Promise<CheckResult> {
   };
 }
 
+/** The doctor `docker compose` check's deadline. */
+const COMPOSE_PLUGIN_CHECK_TIMEOUT_MS = 10_000;
+/** Its `docker compose version` run, which must end before that deadline. */
+const COMPOSE_PLUGIN_RUN_TIMEOUT_MS = 8000;
+
 /**
  * `docker compose version`, not just `docker` on PATH: a Docker CLI without
  * the Compose v2 plugin passed this check before, while `hack global
@@ -2506,8 +2509,13 @@ async function checkComposePlugin(): Promise<CheckResult> {
   }
   const inspection = await inspectComposePlugin({
     deps: {
+      // Below the check's own deadline, so a hung plugin ends as the coded
+      // hung-command result rather than the generic check timeout.
       run: async (argv, timeoutMs) =>
-        await exec(argv, { stdin: "ignore", timeoutMs }),
+        await exec(argv, {
+          stdin: "ignore",
+          timeoutMs: Math.min(timeoutMs, COMPOSE_PLUGIN_RUN_TIMEOUT_MS),
+        }),
     },
   });
   return inspection.ok
@@ -5949,11 +5957,13 @@ async function maybeStartGlobalCaddyCompose(opts: {
         bindAddress: readProxyBindFromCompose(
           (await readTextFile(opts.paths.caddyCompose)) ?? ""
         ),
-        // Compose's own error was captured: blame the ports only when it
-        // names one Docker could not publish (HACK-2673).
-        bindFailure: looksLikePortBindFailure(
-          `${started.stderr}\n${started.stdout}`
-        ),
+        // Compose's own error was captured: blame the ports only when it, or
+        // a proxy container's recorded start error, names one Docker could
+        // not publish (HACK-2673).
+        bindFailure: proxyStartBindFailure({
+          cleanup,
+          composeOutput: `${started.stderr}\n${started.stdout}`,
+        }),
       }),
       "runtime repair"
     );

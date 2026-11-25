@@ -3,9 +3,10 @@
  * Linux first-run check for the Compose path, without sudo (HACK-2329).
  *
  * Runs a built `hack` the way a new Linux user would, in a fresh private HOME:
- * doctor, global install without the Compose plugin (a `docker` wrapper that
- * rejects `compose` must get the plugin's code, not a port hint), global
- * install (and the `proxy.bind_address` retry when :443 is taken), init, up/ps/logs/open/exec/run/restart/down with `--json` shape
+ * doctor, global install (and the `proxy.bind_address` retry when :443 is
+ * taken), global install again without the Compose plugin (a `docker`
+ * wrapper that rejects `compose` must get the plugin's code, not a port
+ * hint), init, up/ps/logs/open/exec/run/restart/down with `--json` shape
  * checks, routed HTTPS against Hack's CA, env and a secret (never printed),
  * host exec, a branch instance, foreground `up` with Ctrl-C in a pty, the
  * daemon, the update check and `native setup`. It prints one Markdown table
@@ -780,7 +781,13 @@ export function noComposeInstallVerdict(ran: {
   if (ran.exit === 0) {
     return { ok: false, note: "install succeeded without the Compose plugin" };
   }
-  if (text.includes("could not start on ports")) {
+  // Every port message names the setting; the conflict message also says
+  // the proxy "cannot publish ports" (see proxy-bind.ts).
+  if (
+    text.includes("could not start on ports") ||
+    text.includes("cannot publish ports") ||
+    text.includes("proxy.bind_address")
+  ) {
     return { ok: false, note: "blamed ports 80/443" };
   }
   const named =
@@ -797,11 +804,13 @@ export function noComposeInstallVerdict(ran: {
 /**
  * `hack global install` with a `docker` on PATH that has no Compose plugin
  * (see {@link noComposeDockerScript}). It refuses once the engine answers,
- * before it creates networks or starts the proxy, so it leaves nothing for
- * the real install that follows (HACK-2673).
+ * before it creates networks or writes global files (HACK-2673). It runs
+ * after the real install, so that install still starts from a fresh HOME:
+ * before the refusal, install also sets up its bundled tools (gum,
+ * mutagen) and checks DNS, which the real install must be seen doing.
  */
 async function composePluginMissingStep(run: FirstRun): Promise<void> {
-  const name = "2 global install (no Compose plugin)";
+  const name = "2 global install again (no Compose plugin)";
   const command = "hack global install  # docker without compose on PATH";
   const docker = Bun.which("docker", { PATH: run.env.PATH });
   if (docker === null) {
@@ -857,7 +866,6 @@ async function globalSetup(run: FirstRun): Promise<boolean> {
           : "not one JSON value",
     })
   );
-  await composePluginMissingStep(run);
   const install = await run.step(
     "2 global install",
     ["global", "install"],
@@ -928,6 +936,7 @@ async function globalSetup(run: FirstRun): Promise<boolean> {
       logging: "off",
     });
   }
+  await composePluginMissingStep(run);
   await run.step("2 global trust (no sudo)", ["global", "trust"], (r) => {
     const code =
       /code=([a-z_]+)/.exec(plain(r.stdout + r.stderr))?.[1] ?? "none";

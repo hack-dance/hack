@@ -155,9 +155,9 @@ import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import { childStdoutTarget } from "../lib/machine-stdout.ts";
 import {
   isHackRenderedLoggingCompose,
+  proxyStartBindFailure,
   removeUnstartedProxyContainers,
   resolveManagedProxyBind,
-  type UnstartedProxyCleanup,
   writeManagedProxyCompose,
 } from "../lib/managed-proxy-compose.ts";
 import {
@@ -191,10 +191,7 @@ import { createNativeHackLocalRouteDependencies } from "../lib/native-hack-local
 import { isLinux, isMac } from "../lib/os.ts";
 import { resolveTrustedSudo } from "../lib/privileged-sudo.ts";
 import { withProcessDeadline } from "../lib/process-deadline.ts";
-import {
-  looksLikePortBindFailure,
-  readProxyBindFromCompose,
-} from "../lib/proxy-bind.ts";
+import { readProxyBindFromCompose } from "../lib/proxy-bind.ts";
 import {
   defaultIngressAddressDeps,
   resolveIngressAddresses,
@@ -2340,7 +2337,8 @@ async function ensureHackdForGlobalUp(): Promise<void> {
  * After the proxy's `compose up` failed: a failed start can leave the proxy
  * created but never started, with no network endpoint, so remove it for the
  * next attempt to recreate (HACK-2328), then name the listeners on 80/443,
- * or, when Docker's start error names no port, say so (HACK-2673).
+ * or, when Docker's recorded start error names no port, say so (HACK-2673);
+ * see {@link proxyStartBindFailure}.
  */
 async function reportProxyStartFailure(opts: {
   readonly composeFile: string;
@@ -2354,26 +2352,11 @@ async function reportProxyStartFailure(opts: {
       bindAddress: readProxyBindFromCompose(
         (await readTextFile(opts.composeFile)) ?? ""
       ),
-      bindFailure: proxyBindFailure(cleanup),
+      // Compose streamed its output to the terminal, so only the start
+      // errors Docker recorded on the proxy containers are read.
+      bindFailure: proxyStartBindFailure({ cleanup }),
     }),
   });
-}
-
-/**
- * Whether the failed `compose up` was Docker failing to publish the proxy's
- * ports. Only `caddy` publishes ports, and Docker creates its container
- * before it publishes them: a failed publish leaves it `created`, with the
- * reason in its start error. So no never-started `caddy` means the failure
- * was elsewhere (false); a recorded error is classified; anything unread is
- * unknown (null).
- */
-function proxyBindFailure(cleanup: UnstartedProxyCleanup): boolean | null {
-  if (cleanup.kind === "none") {
-    return false;
-  }
-  return cleanup.startError === null
-    ? null
-    : looksLikePortBindFailure(cleanup.startError);
 }
 
 /**

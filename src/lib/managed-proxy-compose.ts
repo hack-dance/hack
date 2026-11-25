@@ -22,6 +22,7 @@ import {
 import { updateGlobalConfig } from "./config.ts";
 import { readTextFile, writeTextFileIfChanged } from "./fs.ts";
 import {
+  looksLikePortBindFailure,
   PROXY_BIND_CONFIG_KEY,
   parseProxyBindAddress,
   readProxyBindFromCompose,
@@ -266,7 +267,16 @@ async function copyToFreshBackup(opts: {
 
 /** Outcome of {@link removeUnstartedProxyContainers}. */
 export type UnstartedProxyCleanup =
-  | { readonly kind: "none" }
+  | {
+      readonly kind: "none";
+      /**
+       * How many of this project's `caddy` containers exist in any state
+       * (one left `exited` by a reboot, say); null when that listing failed.
+       */
+      readonly proxyContainers: number | null;
+      /** Why Docker could not start them; see {@link readStartErrors}. */
+      readonly startError: string | null;
+    }
   | {
       readonly kind: "removed";
       readonly ids: readonly string[];
@@ -285,9 +295,32 @@ export type UnstartedProxyCleanup =
 
 const DOCKER_CLEANUP_TIMEOUT_MS = 15_000;
 
+/** This Compose project's `caddy` containers, in one state or in any. */
+function proxyContainerListing(status: "created" | null): string[] {
+  return [
+    "docker",
+    "ps",
+    "--all",
+    "--quiet",
+    "--filter",
+    `label=com.docker.compose.project=${GLOBAL_CADDY_PROJECT_NAME}`,
+    "--filter",
+    "label=com.docker.compose.service=caddy",
+    ...(status === null ? [] : ["--filter", `status=${status}`]),
+  ];
+}
+
+function containerIds(stdout: string): string[] {
+  return stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => CONTAINER_ID.test(line));
+}
+
 /**
  * Removes global proxy (`caddy` service) containers that Docker created but
- * never started.
+ * never started, and reads why Docker could not start this project's
+ * `caddy` containers, for the port hint (HACK-2673).
  *
  * When `docker compose up` fails while publishing ports (for example :443 is
  * in use), the proxy container stays in `created` state with no network
@@ -297,24 +330,19 @@ const DOCKER_CLEANUP_TIMEOUT_MS = 15_000;
  * state, and named volumes are untouched. A concurrent `hack global up` may
  * hold its own container in `created` for a moment between create and start;
  * removing it then makes that start fail recoverably, which is accepted.
+ *
+ * The start error is read from every `caddy` container of the project, not
+ * only the `created` ones: after a reboot, a Docker restart or `docker stop`
+ * the proxy container is `exited`, a plain `up` with an unchanged file
+ * starts it again, and a failed publish leaves it `exited` with the reason
+ * in `.State.Error`. Those are never removed.
  * Each Docker call is bounded, and a failure is returned, not hidden.
  */
 export async function removeUnstartedProxyContainers(): Promise<UnstartedProxyCleanup> {
-  const listed = await exec(
-    [
-      "docker",
-      "ps",
-      "--all",
-      "--quiet",
-      "--filter",
-      `label=com.docker.compose.project=${GLOBAL_CADDY_PROJECT_NAME}`,
-      "--filter",
-      "label=com.docker.compose.service=caddy",
-      "--filter",
-      "status=created",
-    ],
-    { stdin: "ignore", timeoutMs: DOCKER_CLEANUP_TIMEOUT_MS }
-  );
+  const listed = await exec(proxyContainerListing("created"), {
+    stdin: "ignore",
+    timeoutMs: DOCKER_CLEANUP_TIMEOUT_MS,
+  });
   if (listed.exitCode !== 0) {
     return {
       kind: "failed",
@@ -323,14 +351,25 @@ export async function removeUnstartedProxyContainers(): Promise<UnstartedProxyCl
       startError: null,
     };
   }
-  const ids = listed.stdout
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => CONTAINER_ID.test(line));
+  const ids = containerIds(listed.stdout);
+  const all = await exec(proxyContainerListing(null), {
+    stdin: "ignore",
+    timeoutMs: DOCKER_CLEANUP_TIMEOUT_MS,
+  });
+  // The never-started ones are still read when the wider listing failed.
+  const proxyIds =
+    all.exitCode === 0
+      ? [...new Set([...ids, ...containerIds(all.stdout)])]
+      : ids;
+  const startError =
+    proxyIds.length === 0 ? null : await readStartErrors(proxyIds);
   if (ids.length === 0) {
-    return { kind: "none" };
+    return {
+      kind: "none",
+      proxyContainers: all.exitCode === 0 ? proxyIds.length : null,
+      startError,
+    };
   }
-  const startError = await readStartErrors(ids);
   const removed = await exec(["docker", "rm", ...ids], {
     stdin: "ignore",
     timeoutMs: DOCKER_CLEANUP_TIMEOUT_MS,
@@ -349,9 +388,10 @@ export async function removeUnstartedProxyContainers(): Promise<UnstartedProxyCl
 /**
  * The error Docker recorded when it could not start these containers
  * (`.State.Error`, for example a port it could not publish), one line per
- * container that has one. Null when the read failed or none recorded one,
- * so callers cannot tell why the start failed. Read before the containers
- * are removed, for the port hint (HACK-2673).
+ * container that has one. Docker clears it on a successful start, so a
+ * running or cleanly stopped container records none. Null when the read
+ * failed or none recorded one, so callers cannot tell why the start failed.
+ * Read before the containers are removed, for the port hint (HACK-2673).
  */
 async function readStartErrors(ids: readonly string[]): Promise<string | null> {
   const inspected = await exec(
@@ -366,4 +406,40 @@ async function readStartErrors(ids: readonly string[]): Promise<string | null> {
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
   return lines.length === 0 ? null : lines.join("\n");
+}
+
+/**
+ * Whether the proxy's failed `compose up` was Docker failing to publish its
+ * ports: true or false when Docker's error was read, null when it was not
+ * (the caller then prints the generic port hint, as before HACK-2673).
+ *
+ * Only `caddy` publishes ports, and Docker creates its container before it
+ * publishes them, so a failed publish leaves a `caddy` container (`created`
+ * when new, `exited` when an existing one was started again) with the
+ * reason in its start error. True when that error or Compose's captured
+ * output names a port Docker could not publish. False when Compose's
+ * captured output names none, when a container recorded an error that names
+ * none, or when no `caddy` container exists at all (Compose failed before
+ * it created one). Otherwise null: a container exists but recorded no
+ * error, or a listing failed.
+ */
+export function proxyStartBindFailure(opts: {
+  readonly cleanup: UnstartedProxyCleanup;
+  /** Compose's captured stderr and stdout, when the caller captured them. */
+  readonly composeOutput?: string;
+}): boolean | null {
+  const recorded = opts.cleanup.startError;
+  const output = opts.composeOutput?.trim() ?? "";
+  if (
+    looksLikePortBindFailure(output) ||
+    (recorded !== null && looksLikePortBindFailure(recorded))
+  ) {
+    return true;
+  }
+  if (output.length > 0 || recorded !== null) {
+    return false;
+  }
+  return opts.cleanup.kind === "none" && opts.cleanup.proxyContainers === 0
+    ? false
+    : null;
 }

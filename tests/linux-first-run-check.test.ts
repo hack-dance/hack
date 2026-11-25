@@ -54,12 +54,40 @@ test("the no-Compose install passes only when it names the plugin and not the po
       stderr: `${refusal}The proxy could not start on ports 80 and 443.\n`,
     })
   ).toEqual({ ok: false, note: "blamed ports 80/443" });
+  // The listener-naming message and the setting count as blaming the ports.
+  expect(
+    noComposeInstallVerdict({
+      exit: 1,
+      stdout: "",
+      stderr: `${refusal}The proxy cannot publish ports 80 and 443: 10.8.0.2:443 is already in use by vpn-client.\n`,
+    })
+  ).toEqual({ ok: false, note: "blamed ports 80/443" });
+  expect(
+    noComposeInstallVerdict({
+      exit: 1,
+      stdout: "",
+      stderr: `${refusal}Set proxy.bind_address to publish on one address.\n`,
+    })
+  ).toEqual({ ok: false, note: "blamed ports 80/443" });
   expect(noComposeInstallVerdict({ exit: 0, stdout: "", stderr: "" }).ok).toBe(
     false
   );
   expect(
     noComposeInstallVerdict({ exit: 1, stdout: "", stderr: "boom\n" }).note
   ).toContain("did not name the plugin");
+});
+
+test("the no-Compose install runs after the real install, so that one starts from a fresh HOME (HACK-2673)", async () => {
+  const source = await Bun.file(
+    join(import.meta.dir, "..", "scripts", "linux-first-run-check.ts")
+  ).text();
+  const body = source.slice(source.indexOf("async function globalSetup("));
+  const realInstall = body.indexOf('"2 global install",');
+  const noCompose = body.indexOf("await composePluginMissingStep(run);");
+  expect(realInstall).toBeGreaterThan(0);
+  expect(noCompose).toBeGreaterThan(realInstall);
+  // Called once, from globalSetup only.
+  expect(source.split("await composePluginMissingStep(run);").length).toBe(2);
 });
 
 test("counts one document, line-delimited values, and refuses garbage", () => {

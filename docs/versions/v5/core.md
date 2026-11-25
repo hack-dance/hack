@@ -30,7 +30,12 @@ instant between identity validation and removal can delete the replacement
 volume. Docker's non-forced removal still refuses a volume mounted by any
 container, including a stopped one.
 
-Native persistent data remains protected for graph restore.
+Native runs are discovered in the selected native home, including authored
+projects and Compose projects absent from the registry. Inventory uses the
+run's display receipt to identify the checkout and branch. Earlier runs
+without that receipt, missing checkouts, and an unavailable pool are reported
+as partial. Retained volumes with an unidentified owner appear without a
+project name. Native persistent data remains protected for graph restore.
 
 ## Project, instance and branch instance
 

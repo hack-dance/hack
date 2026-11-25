@@ -1,22 +1,22 @@
-import { dirname, isAbsolute } from "node:path";
+import { realpath } from "node:fs/promises";
+import { dirname, isAbsolute, join } from "node:path";
 import { nativeAuthoredProjectPs } from "../backends/native-authored-project-observe.ts";
 import { readNativeDiskUsage } from "../backends/native-disk-usage.ts";
 import { nativeProjectPs } from "../backends/native-project-observe.ts";
+import { readNativeResourceRuns } from "../backends/native-resource-runs.ts";
 import {
   invokeNativeRuntime,
   resolveNativeSetupSelection,
 } from "../backends/native-runtime-client.ts";
-import {
-  listNativeCopyInstances,
-  listRegistrationCheckouts,
-} from "./branch-instance-identity.ts";
+import { PROJECT_COMPOSE_FILENAME } from "../constants.ts";
+import { resolveComposeProjectName } from "./compose-project-name.ts";
 import {
   projectDockerTransportEnvironment,
   readDockerDaemonIdentity,
 } from "./docker-helper-environment.ts";
 import { getString, isRecord } from "./guards.ts";
+import { readProjectConfigFiles } from "./project.ts";
 import { readProjectRuntimeStateEntry } from "./project-runtime-state.ts";
-import { readProjectsRegistry } from "./projects-registry.ts";
 import {
   readResourceReferences,
   verifyResourceDetachment,
@@ -374,68 +374,99 @@ async function composeInventory(cwd: string) {
   };
 }
 
-async function nativeProjectRows(cwd: string) {
-  const runtime = await Promise.resolve()
-    .then(() => resolveNativeSetupSelection())
-    .catch(() => null);
-  if (!runtime) {
-    return {
-      rows: [] as ResourceRow[],
-      owners: new Map<string, ResourceOwner>(),
-      complete: false,
-    };
+type NativeRun = Awaited<
+  ReturnType<typeof readNativeResourceRuns>
+>["runs"][number];
+
+async function nativeProjectName({ scope, store }: NativeRun) {
+  if (
+    (await realpath(scope.projectRoot)) !== scope.projectRoot ||
+    (await realpath(scope.projectDir)) !== scope.projectDir
+  ) {
+    return null;
   }
-  const { projects } = await readProjectsRegistry();
-  const work = (
-    await Promise.all(
-      projects.flatMap((project) =>
-        listRegistrationCheckouts(project).flatMap((checkout) =>
-          (["runtime", "authored"] as const).map(async (store) =>
-            (
-              await listNativeCopyInstances({ checkout, store })
-            ).map((branch) => ({
-              store,
-              scope: {
-                projectRoot: checkout.root,
-                projectDir: checkout.projectDir,
-                nativeHome: runtime.home,
-                branch,
-              },
-              owner: {
-                project: project.name,
-                checkout: checkout.root,
-                branch,
-                detached: false,
-              },
-            }))
-          )
-        )
-      )
-    )
-  ).flat();
-  const signal = AbortSignal.timeout(12_000);
+  if (store === "authored") {
+    const config: unknown = await Bun.file(
+      join(scope.projectDir, "hack.project.json")
+    ).json();
+    return isRecord(config) ? (getString(config, "name") ?? null) : null;
+  }
+  const cfg = await readProjectConfigFiles(scope.projectDir);
+  if (cfg.parseError) {
+    return null;
+  }
+  const composeFile = join(scope.projectDir, PROJECT_COMPOSE_FILENAME);
+  if (!(await Bun.file(composeFile).exists())) {
+    return null;
+  }
+  return await resolveComposeProjectName({
+    project: { projectRoot: scope.projectRoot, composeFile },
+    cfg,
+  });
+}
+
+const nativeReaders = {
+  select: resolveNativeSetupSelection,
+  disk: readNativeDiskUsage,
+  invoke: invokeNativeRuntime,
+  compose: nativeProjectPs,
+  authored: nativeAuthoredProjectPs,
+};
+
+async function nativeProjectRows(cwd: string, readers: typeof nativeReaders) {
+  const runtime = await Promise.resolve()
+    .then(() => readers.select())
+    .catch(() => null);
   const rows: ResourceRow[] = [];
   const owners = new Map<string, ResourceOwner>();
-  let complete = work.length <= 64;
-  for (
-    let index = 0;
-    index < Math.min(64, work.length) && !signal.aborted;
-    index += 4
-  ) {
+  const issues = new Set<string>();
+  if (!runtime) {
+    issues.add("Native runtime selection is unavailable.");
+    return { rows, owners, issues };
+  }
+  const scan = await readNativeResourceRuns(runtime.home);
+  if (scan.missing) {
+    issues.add(
+      `${scan.missing} native run(s) have a missing or unverifiable checkout receipt.`
+    );
+  }
+  if (scan.incomplete) {
+    issues.add("The native run directories could not be fully scanned.");
+  }
+  const work = scan.runs;
+  const signal = AbortSignal.timeout(12_000);
+
+  for (let index = 0; index < work.length && !signal.aborted; index += 4) {
     await Promise.all(
-      work.slice(index, index + 4).map(async ({ store, scope, owner }) => {
+      work.slice(index, index + 4).map(async (entry) => {
+        const { store, scope, run } = entry;
+        const name = await nativeProjectName(entry).catch(() => null);
+        if (!name) {
+          issues.add(
+            "A native run’s checkout or project name could not be read."
+          );
+          return;
+        }
+        const owner = {
+          project: name,
+          checkout: scope.projectRoot,
+          branch: scope.branch,
+          detached: false,
+        };
+        owners.set(run, owner);
         const observe =
-          store === "runtime" ? nativeProjectPs : nativeAuthoredProjectPs;
+          store === "runtime" ? readers.compose : readers.authored;
         const result = await observe({ runtime, scope, signal }).catch(
           () => null
         );
-        if (!result || result.status !== "observed") {
-          complete = false;
+        if (!result || result.run !== run) {
+          issues.add("One or more native runs could not be observed.");
+          return;
         }
-        if (result?.run) {
-          owners.set(result.run, owner);
+        if (result.status !== "observed") {
+          issues.add("One or more native runs could not be fully observed.");
         }
-        for (const item of result?.items ?? []) {
+        for (const item of result.items) {
           if (item.container) {
             rows.push({
               id: item.container,
@@ -451,21 +482,25 @@ async function nativeProjectRows(cwd: string) {
           }
         }
         // Legacy graph snapshots report receipt-bound network and image identities.
-        if (
-          store === "runtime" &&
-          result?.run &&
-          result.status === "observed"
-        ) {
-          const graph = await invokeNativeRuntime({
-            runtime,
-            cwd,
-            args: ["graph", "status", "--run-id", result.run, "--json"],
-            signal,
-            timeoutMs: 5000,
-          }).catch(() => null);
+        if (store === "runtime" && result.status === "observed") {
+          const graph = await readers
+            .invoke({
+              runtime,
+              cwd,
+              args: ["graph", "status", "--run-id", result.run, "--json"],
+              signal,
+              timeoutMs: 5000,
+            })
+            .catch(() => null);
           const receipt = isRecord(graph) ? graph.receipt : null;
-          if (!(isRecord(receipt) && isRecord(receipt.resources))) {
-            complete = false;
+          if (
+            !(
+              isRecord(receipt) &&
+              receipt.run === run &&
+              isRecord(receipt.resources)
+            )
+          ) {
+            issues.add("Native graph attachments could not be observed.");
             return;
           }
           for (const resource of Object.values(receipt.resources).filter(
@@ -494,23 +529,26 @@ async function nativeProjectRows(cwd: string) {
       })
     );
   }
-  return { rows, owners, complete: complete && !signal.aborted };
+  if (signal.aborted) {
+    issues.add("Native run observation exceeded its time budget.");
+  }
+  return { rows, owners, issues };
 }
 
-async function nativeInventory(cwd: string) {
+export async function nativeInventory(cwd: string, readers = nativeReaders) {
   const [disk, storage, projects] = await Promise.all([
-    readNativeDiskUsage(cwd).catch(() => null),
+    readers.disk(cwd).catch(() => null),
     Promise.resolve()
       .then(() =>
-        invokeNativeRuntime({
+        readers.invoke({
           cwd,
-          runtime: resolveNativeSetupSelection(),
+          runtime: readers.select(),
           args: ["graph", "storage-inventory", "--json"],
           timeoutMs: 12_000,
         })
       )
       .catch(() => null),
-    nativeProjectRows(cwd),
+    nativeProjectRows(cwd, readers),
   ]);
   const rows = projects.rows;
   if (disk) {
@@ -533,21 +571,18 @@ async function nativeInventory(cwd: string) {
         continue;
       }
       const run = getString(ref, "run");
+      const owner = run ? projects.owners.get(run) : undefined;
+      if (!owner) {
+        projects.issues.add(
+          "One or more native volumes could not be attributed to a checkout."
+        );
+      }
       rows.push({
         id: name,
         name,
         kind: "volume",
         backend: "native",
-        owners: run
-          ? [
-              projects.owners.get(run) ?? {
-                project: run,
-                checkout: null,
-                branch: null,
-                detached: false,
-              },
-            ]
-          : [],
+        owners: owner ? [owner] : [],
         bytes:
           typeof volume.bytes === "number" &&
           Number.isSafeInteger(volume.bytes) &&
@@ -560,9 +595,15 @@ async function nativeInventory(cwd: string) {
       });
     }
   }
+  if (!disk?.complete) {
+    projects.issues.add("Native home disk usage is incomplete or unavailable.");
+  }
+  if (!(isRecord(storage) && Array.isArray(storage.volumes))) {
+    projects.issues.add("Native storage inventory is unavailable.");
+  }
   return {
     rows: groupedResources(rows),
-    complete: Boolean(disk?.complete && storage && projects.complete),
+    issues: [...projects.issues].sort(),
   };
 }
 
@@ -574,7 +615,8 @@ export async function listResources(cwd: string) {
   return {
     rows: [...compose.rows, ...native.rows],
     composeComplete: compose.complete,
-    nativeComplete: native.complete,
+    nativeComplete: native.issues.length === 0,
+    nativeIssues: native.issues,
   };
 }
 

@@ -183,6 +183,13 @@ success behavior stays covered by command-specific suites.
 | `hack doctor --json --machine` | Envelope; `data.schema: hack.doctor.machine.v1` |
 <!-- json-inventory:end -->
 
+### Native resource inventory coverage
+
+`hack resources list --json` sets `data.nativeComplete` to false when
+native run discovery, owner attribution, or observation is incomplete.
+`data.nativeIssues` lists human-readable reasons. An unattributed volume
+has an empty `owners` array.
+
 ### Resource removal refusals
 
 `hack resources remove --json` reports a machine-readable `error.detail.reason`

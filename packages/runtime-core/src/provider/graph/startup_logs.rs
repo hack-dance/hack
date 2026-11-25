@@ -102,7 +102,28 @@ pub(super) fn tail(service: &str, frames: &[u8]) -> Option<StartupLogTail> {
         stdout,
         stderr,
         truncated: out_truncated || err_truncated,
+        exit_code: None,
     })
+}
+
+/// The exit status to report beside `service`'s tail: the recorded startup
+/// failure's observation when it names this service (the exit that failed the
+/// start), else the observation read before cleanup. None unless it exited.
+pub(super) fn exit_code(
+    receipt: &Receipt,
+    observed: &BTreeMap<String, Observation>,
+    service: &str,
+) -> Option<i64> {
+    let observation = receipt
+        .startup_failure
+        .as_ref()
+        .filter(|failure| failure.service == service)
+        .map(|failure| failure.observation)
+        .or_else(|| observed.get(service).copied());
+    match observation {
+        Some(Observation::Exited { code }) => Some(code),
+        _ => None,
+    }
 }
 
 fn demux(mut frames: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -175,7 +196,9 @@ pub(super) fn capture(candidate: &crate::Candidate, run: &str) -> Option<Startup
         .into_iter()
         .filter_map(|(service, id)| {
             let frames = engine.logs_tail_frames(&id, MAX_LINES).ok()?;
-            tail(&service, &frames)
+            let mut tail = tail(&service, &frames)?;
+            tail.exit_code = exit_code(&receipt, &observed, &service);
+            Some(tail)
         })
         .collect();
     (!services.is_empty()).then_some(StartupLogsDiagnostic {
@@ -264,6 +287,7 @@ mod tests {
             stdout,
             stderr: String::new(),
             truncated: false,
+            exit_code: None,
         };
         for services in [
             vec![],
@@ -313,6 +337,55 @@ mod tests {
         // A completed initializer and a removed container are not failures to tail.
         let observed = BTreeMap::from([("init".to_string(), Observation::Exited { code: 0 })]);
         assert!(select(&receipt, &observed).is_empty());
+    }
+
+    #[test]
+    fn an_exited_service_reports_its_exit_code_beside_its_tail() {
+        let mut receipt = receipt();
+        let observed = BTreeMap::from([
+            ("api".to_string(), Observation::Exited { code: 1 }),
+            ("db".to_string(), Observation::Dead),
+            ("web".to_string(), Observation::Exited { code: 0 }),
+        ]);
+        // Without a recorded failure, the observation read before cleanup.
+        assert_eq!(exit_code(&receipt, &observed, "api"), Some(1));
+        assert_eq!(exit_code(&receipt, &observed, "db"), None);
+        assert_eq!(exit_code(&receipt, &observed, "worker"), None);
+        // A required listener's zero exit before readiness is reported as 0.
+        super::super::startup_failure::record(&mut receipt, "web", Observation::Exited { code: 0 })
+            .unwrap();
+        assert_eq!(exit_code(&receipt, &observed, "web"), Some(0));
+        // The recorded exit that failed the start wins over a later observation.
+        let mut recorded = self::receipt();
+        super::super::startup_failure::record(
+            &mut recorded,
+            "api",
+            Observation::Exited { code: 3 },
+        )
+        .unwrap();
+        assert_eq!(exit_code(&recorded, &observed, "api"), Some(3));
+
+        let mut tail = tail("api", &frame(2, "error: Script not found \"dev\"\n")).unwrap();
+        tail.exit_code = exit_code(&recorded, &observed, "api");
+        let error = CandidateError::new("engine_rejected", "Startup failed.").with_startup_logs(
+            Some(StartupLogsDiagnostic {
+                version: 1,
+                services: vec![tail],
+            }),
+        );
+        let reply = serde_json::to_value(&error).unwrap();
+        assert_eq!(
+            reply["startup_logs"]["services"][0],
+            json!({"service":"api","stdout":"","stderr":"error: Script not found \"dev\"","truncated":false,"exit_code":3})
+        );
+        // A tail without an exit status keeps the previous four-field shape.
+        let plain = super::tail("db", &frame(1, "x\n")).unwrap();
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("exit_code")
+                .is_none()
+        );
     }
 
     #[test]

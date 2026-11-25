@@ -832,7 +832,11 @@ test(
       { severity: "fatal", code: "ignored_severity", field: "x" },
       null,
     ]);
-    const { report, code, output } = await preflight(f, f.native);
+    // HACK_NATIVE_BUILDS=0 turns builds off, so the build is a blocker too.
+    const { report, code, output } = await preflight(f, {
+      ...f.native,
+      HACK_NATIVE_BUILDS: "0",
+    });
     expect(code).toBe(1);
     expect(report.report_version).toBe(2);
     expect(report.backend).toBe("native");
@@ -1236,7 +1240,8 @@ test(
       ],
     ] as const) {
       const f = await fixture({ services: { web: service }, ...extra });
-      const env = { ...f.native, ...GRANT };
+      // HACK_NATIVE_BUILDS=0 is the only way a basic build becomes a blocker.
+      const env = { ...f.native, ...GRANT, HACK_NATIVE_BUILDS: "0" };
       const { report } = await preflight(f, env);
       expect(codes(report, "cli")).toEqual([expected]);
       await scriptSourceShare(f);
@@ -1820,7 +1825,8 @@ test(
 test(
   "builds, probes and service names are judged per service, and a dotted service name is not truncated",
   async () => {
-    const BUILDS = { ...GRANT, HACK_NATIVE_BUILDS: "1" };
+    // Native builds are on by default (HACK-2532); no switch is set.
+    const BUILDS = { ...GRANT };
     const f = await fixture({
       services: {
         api: { image: IMAGE },
@@ -1855,7 +1861,7 @@ test(
       },
     ]);
     const { report } = await preflight(f, { ...f.native, ...BUILDS });
-    // With builds enabled an admitted build is no blocker and needs no image.
+    // With builds on an admitted build is no blocker and needs no image.
     expect(codes(report, "cli")).toEqual([
       "invalid_http_probe:probed",
       "invalid_service_name",
@@ -1870,8 +1876,12 @@ test(
       ["api", "services.api.shm_size"],
       [null, "services.undeclared.shm_size"],
     ]);
-    // Without the opt-in, the same admissible build needs it.
-    const off = await preflight(f, { ...f.native, ...GRANT });
+    // With the off switch, the same admissible build is a blocker.
+    const off = await preflight(f, {
+      ...f.native,
+      ...GRANT,
+      HACK_NATIVE_BUILDS: "0",
+    });
     expect(codes(off.report, "cli")).toContain("build_requires_opt_in:built");
     expect(codes(off.report, "cli")).not.toContain("missing_image:built");
   },

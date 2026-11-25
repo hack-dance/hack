@@ -749,11 +749,13 @@ function buildFindings(opts: {
       admitted: false,
       found: [
         finding(
+          // The code predates the default flip (HACK-2532) and is kept because
+          // preflight codes are a stable contract; the message names the switch.
           { ...base, code: "build_requires_opt_in", field: "build" },
           {
             message:
-              "The service is built from a Dockerfile, and native builds are off by default.",
-            fix: "Set HACK_NATIVE_BUILDS=1 and prepare the native builder, or give the service a prebuilt image.",
+              "The service is built from a Dockerfile, and HACK_NATIVE_BUILDS=0 turns native builds off.",
+            fix: "Unset HACK_NATIVE_BUILDS to build it in the native runtime, or give the service a prebuilt image.",
           }
         ),
       ],

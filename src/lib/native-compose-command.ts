@@ -5,7 +5,10 @@ import type { RuntimeBaseOptions } from "../backends/runtime-backend.ts";
 import { CliUsageError } from "../cli/command.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { psServiceState, renderPs } from "../ui/ps-output.ts";
-import { writeUpHookBlocker } from "../ui/start-refusal-output.ts";
+import {
+  writeStartBlocker,
+  writeUpHookBlocker,
+} from "../ui/start-refusal-output.ts";
 import type { AutostartGlobalView } from "./autostart-view.ts";
 import {
   emitCliResult,
@@ -1894,7 +1897,7 @@ async function executePreparedGeneration(opts: {
   if (result.outcome === "uncertain") {
     return reportNativeStartupIncomplete({
       afterHookCode: after.code(),
-      json: options.json === true,
+      options,
     });
   }
   if (options.json) {
@@ -2268,25 +2271,49 @@ async function unchangedUnroutedUp(opts: {
     : null;
 }
 
+/**
+ * An uncertain effect keeps its pending generation, so a plain `down` has no
+ * saved generation to stop and a retried `up` refuses the pending one. The
+ * printed recovery is therefore the explicit owned stop, `down --recover`.
+ * JSON keeps the closed codes and messages; text uses the shared blocker.
+ */
 function reportNativeStartupIncomplete(opts: {
   readonly afterHookCode: number | undefined;
-  readonly json: boolean;
+  readonly options: NativeComposeCommandOptions;
 }): number {
+  const command = nativeComposeHookCommand("down", opts.options);
   if (opts.afterHookCode === undefined || opts.afterHookCode === 0) {
     throw new HackCliError({
       code: "E_STARTUP_INCOMPLETE",
       message:
         "Native Compose execution is incomplete; inspect saved state and use explicit owned stop recovery before retrying.",
+      // The engine effect is unknown: no workload may be running, so the
+      // blocker names what is certainly retained, the pending start.
+      startBlocker: {
+        thing: "project",
+        problem: "startup incomplete · pending start retained",
+        needs: "this start needs the pending start stopped first",
+        command,
+      },
     });
   }
-  const message =
-    "Native host after hook failed; startup remains incomplete and saved ownership is retained. Values omitted.";
-  if (opts.json) {
+  if (opts.options.json) {
     emitCliResult({
-      result: errorResult({ code: "E_LIFECYCLE_FAILED", message }),
+      result: errorResult({
+        code: "E_LIFECYCLE_FAILED",
+        message:
+          "Native host after hook failed; startup remains incomplete and saved ownership is retained. Values omitted.",
+      }),
     });
   } else {
-    process.stderr.write(`${message}\n`);
+    writeStartBlocker({
+      thing: "lifecycle",
+      problem: "hook failed",
+      which: `after, exit ${opts.afterHookCode}`,
+      needs:
+        "stop the retained services, then fix the failing hook and retry this start",
+      command,
+    });
   }
   return opts.afterHookCode;
 }
@@ -2350,7 +2377,7 @@ function assertSelectedWorkloads(inputs: AcquiredComposeInputs): void {
 }
 
 function nativeComposeHookCommand(
-  action: "ps" | "up",
+  action: "down" | "ps" | "up",
   options: NativeComposeCommandOptions
 ): string | undefined {
   if (
@@ -2364,6 +2391,9 @@ function nativeComposeHookCommand(
     return;
   }
   const flags: string[] = [];
+  if (action === "down") {
+    flags.push("--recover");
+  }
   if (action === "up") {
     if (options.detach) {
       flags.push("--detach");

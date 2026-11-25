@@ -127,6 +127,15 @@ still warming or starting another selection, a second targeted start returns
 `E_NATIVE_STILL_STARTING` through the owner. Use `hack ps` to check its progress
 and retry.
 
+A targeted start sends the owner a review of the whole Compose file. If that
+review no longer matches what the run recorded (for example, a running service's
+definition or the source changed since the run started), the owner records its
+own review of the combined services instead, and `up` warns that it did. The
+start still succeeds. A later restore of this run, after a retaining
+`hack down`, has to reconcile that review: it refuses when the run uses live
+source sharing, carries a source cache scope or has a pending initializer cache
+release. Runtimes from before this check omit the warning.
+
 Adding routes or loopback ports requires enough free bridge sockets in the
 running pool. Hack checks capacity before recording or creating the selected
 services. Adding host relay bindings still requires a fresh graph start.
@@ -149,6 +158,9 @@ created midway. The owner can answer after an in-flight image inspection,
 volume preparation or container operation settles. Confirmed
 `hack down --remove-data` during a service append also cancels it and stops
 the run, then removes its owned volumes once the stop is confirmed.
+If the add finished or rolled back while you were confirming, nothing is
+removed and the project keeps running; run `hack down`, then
+`hack down --remove-data`.
 If the owner exited, use
 `hack down --recover`. Recovery uses the last committed receipt for cleanup
 and keeps interrupted writes as evidence. After a retaining `down`, `ps` shows
@@ -287,3 +299,7 @@ Native `hack up --json` includes the same `hack.timings/1` records
 in `data.timings`. Add `--timings-file <file>` to save those records as JSONL
 in a new file. Times overlap when steps run together, so use `command.total`
 for elapsed startup time.
+
+Native `hack down` and `hack ps` accept the same two flags. `--timings` prints
+the command's timeline to stderr, so a `--json` result on stdout is unchanged.
+`--timings-file <file>` saves the joined `hack.timings/1` records as JSONL.

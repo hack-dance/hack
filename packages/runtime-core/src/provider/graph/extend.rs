@@ -99,6 +99,44 @@ fn reviews_services(plan: &project::PlanData, owned: &BTreeSet<&str>) -> bool {
         .eq(owned.iter().copied())
 }
 
+/// Which serialization the committed combined review describes.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CombinedReview {
+    /// The CLI's full review of the whole file, or no full review was offered.
+    Cli,
+    /// The CLI offered a full review that the owner could not use, so the owner
+    /// reviewed its own serialization. A later plain `up` has to reconcile.
+    OwnerFallback,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl CombinedReview {
+    /// The additive `combined_review` field of the extend reply; absent for
+    /// [`CombinedReview::Cli`] so earlier CLIs and replies are unchanged.
+    #[cfg(target_os = "macos")]
+    pub(super) fn reply_field(self) -> Option<&'static str> {
+        match self {
+            Self::Cli => None,
+            Self::OwnerFallback => Some("owner_fallback"),
+        }
+    }
+}
+
+/// The review a committed append reports. `offered` is whether the CLI sent a
+/// full-file review; `kept` is whether it survived the authored-digest filter
+/// (a running service's changed definition, or no recorded owner input, drops
+/// it before it is tried, which is the same fallback as a review the owner
+/// rejects); `tried` is what [`review_combined`] returned.
+#[cfg(any(target_os = "macos", test))]
+fn committed_review(offered: bool, kept: bool, tried: CombinedReview) -> CombinedReview {
+    match (offered, kept) {
+        (false, _) => CombinedReview::Cli,
+        (true, false) => CombinedReview::OwnerFallback,
+        (true, true) => tried,
+    }
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn review_combined(
     candidate: &Candidate,
@@ -106,7 +144,7 @@ fn review_combined(
     document: &Value,
     full: Option<(&str, &str, &[u8])>,
     owned: &BTreeSet<&str>,
-) -> Result<project::PlanReport, CandidateError> {
+) -> Result<(project::PlanReport, CombinedReview), CandidateError> {
     if let Some((expected_plan, expected_hash, bytes)) = full {
         let report = project::plan_normalized(
             candidate,
@@ -124,19 +162,25 @@ fn review_combined(
             && report.plan.enrollment_compatible
             && reviews_services(&report.plan, owned)
         {
-            return Ok(report);
+            return Ok((report, CombinedReview::Cli));
         }
         // A changed source inventory can change the plan ID while an append is
         // being prepared. Fall back to the owner's known combined declarations.
     }
     let bytes = document.to_string();
-    project::plan_normalized(
+    let report = project::plan_normalized(
         candidate,
         project::NormalizedComposeOptions {
             compose_bytes: bytes.as_bytes(),
             ..compose
         },
-    )
+    )?;
+    let review = if full.is_some() {
+        CombinedReview::OwnerFallback
+    } else {
+        CombinedReview::Cli
+    };
+    Ok((report, review))
 }
 
 /// The newly compiled graph uses existing resources by logical key. Existing
@@ -185,6 +229,8 @@ pub(super) struct Started {
     pub receipt: Receipt,
     pub services: BTreeSet<String>,
     pub changed: BTreeSet<String>,
+    /// Whether the committed review is the CLI's or the owner's fallback.
+    pub combined_review: CombinedReview,
 }
 
 #[cfg(target_os = "macos")]
@@ -320,10 +366,14 @@ pub(super) fn run(
             receipt,
             services: BTreeSet::new(),
             changed,
+            combined_review: CombinedReview::Cli,
         });
     }
     // The whole-file review can describe the live run only if the definitions
     // of its already-owned containers still match the admitted declarations.
+    let offered = full_identity
+        .as_ref()
+        .is_some_and(|full| full.review().is_some());
     let full_identity = full_identity.filter(|_| {
         authored.is_some_and(|(previous, next)| {
             receipt.readiness.keys().all(|name| {
@@ -344,13 +394,14 @@ pub(super) fn run(
         .chain(prepared.configs.keys())
         .map(String::as_str)
         .collect();
-    let reviewed = review_combined(
+    let (reviewed, review) = review_combined(
         candidate,
         options.compose,
         &combined.document,
         full_identity.as_ref().and_then(|full| full.review()),
         &combined_services,
     )?;
+    let combined_review = committed_review(offered, full_identity.is_some(), review);
     let combined_covers_owned = reviews_services(&reviewed.plan, &combined_services);
     let combined_identity = NormalizedInputIdentity {
         namespace: receipt.namespace.clone(),
@@ -551,6 +602,7 @@ pub(super) fn run(
                 receipt,
                 services,
                 changed,
+                combined_review,
             })
         }
         Err(error) => {
@@ -576,6 +628,23 @@ pub(super) fn run(
             }
         }
     }
+}
+
+/// The containers one rollback stop batch covers: every container this append
+/// added, and every previously stopped service it selected to resume. A resumed
+/// service can have accepted the start before its reply was lost; it is stopped
+/// here without deleting its pre-existing resources. Today every added
+/// container belongs to a selected service (so it is also in `extending`); the
+/// "not in `before`" arm keeps any added container covered even if that stops
+/// holding, matching the removal loop, which deletes every added resource.
+#[cfg(any(target_os = "macos", test))]
+fn rollback_stops(current: &Receipt, before: &Receipt) -> Receipt {
+    let mut stops = current.clone();
+    stops.resources.retain(|key, resource| {
+        resource.kind == Kind::Container
+            && (!before.resources.contains_key(key) || current.extending.contains(&resource.key))
+    });
+    stops
 }
 
 #[cfg(target_os = "macos")]
@@ -608,16 +677,11 @@ fn rollback(
             .resources
             .contains_key(&format!("container:{service}"))
     });
-    shutdown::stop_selected(engine, &added, true)?;
-    let mut resumed = current.clone();
-    resumed.resources.retain(|key, resource| {
-        resource.kind == Kind::Container
-            && selected.contains(&resource.key)
-            && before.resources.contains_key(key)
-    });
-    // A previously stopped service can have accepted the start before its
-    // reply was lost. Stop it without deleting its pre-existing resources.
-    shutdown::stop_selected(engine, &resumed, false)?;
+    // Only added containers carry an admitted policy this append may disarm.
+    shutdown::disarm_owned(engine, &added)?;
+    // One stop batch, so one engine bound (and one base allowance) covers the
+    // added and resumed containers that the CLI's rollback wait counts.
+    shutdown::stop_selected(engine, &rollback_stops(&current, before), false)?;
     for kind in [Kind::Container, Kind::Network, Kind::Volume] {
         for resource in added
             .resources
@@ -707,7 +771,7 @@ mod tests {
         let reviewed = project::plan_normalized(&candidate, full_options).unwrap();
         let synthetic: Value = serde_json::from_str(&full).unwrap();
         assert_ne!(synthetic.to_string(), full);
-        let combined = review_combined(
+        let (combined, review) = review_combined(
             &candidate,
             compose,
             &synthetic,
@@ -715,6 +779,7 @@ mod tests {
             &BTreeSet::from(["redis", "web"]),
         )
         .unwrap();
+        assert_eq!(review, CombinedReview::Cli);
         assert_eq!(combined.plan_id, reviewed.plan_id);
         assert_eq!(combined.plan.compose_sha256, original);
         let contract = source::review_shared_contract(&combined.plan).unwrap();
@@ -731,6 +796,32 @@ mod tests {
             "live_source_contract"
         );
         contract.verify(&restore.plan, current.receipt()).unwrap();
+
+        // A full review whose plan ID no longer matches (a changed source
+        // inventory) falls back to the owner's own serialization, and says so.
+        let (fallback, review) = review_combined(
+            &candidate,
+            compose,
+            &synthetic,
+            Some((&"f".repeat(64), &original, full.as_bytes())),
+            &BTreeSet::from(["redis", "web"]),
+        )
+        .unwrap();
+        assert_eq!(review, CombinedReview::OwnerFallback);
+        assert_eq!(
+            fallback.plan.compose_sha256,
+            digest(synthetic.to_string().as_bytes())
+        );
+        // Without an offered full review there is nothing to fall back from.
+        let (_, review) = review_combined(
+            &candidate,
+            compose,
+            &synthetic,
+            None,
+            &BTreeSet::from(["redis", "web"]),
+        )
+        .unwrap();
+        assert_eq!(review, CombinedReview::Cli);
         assert!(
             review_combined(
                 &candidate,
@@ -741,6 +832,69 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn rollback_stops_added_and_resumed_containers_in_one_batch() {
+        let resource = |kind: &str, key: &str| json!({"kind":kind,"key":key,"name":format!("n-{key}"),"id":null,"image":null,"phase":"started"});
+        let receipt = |resources: Value, extending: Value| -> Receipt {
+            serde_json::from_value(json!({
+                "version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"ns",
+                "plan_id":"c".repeat(64),"phase":"ready-observed","readiness":{},
+                "resources":resources,"extending":extending
+            }))
+            .unwrap()
+        };
+        let before = receipt(
+            json!({
+                "container:web": resource("container", "web"),
+                "container:worker": resource("container", "worker"),
+                "container:idle": resource("container", "idle"),
+                "network:default": resource("network", "default"),
+            }),
+            json!([]),
+        );
+        // `worker` was stopped and is resumed; `redis` and its volume are new.
+        // `helper` is an added container outside `extending`: only the
+        // "not in `before`" arm covers it.
+        let current = receipt(
+            json!({
+                "container:web": resource("container", "web"),
+                "container:worker": resource("container", "worker"),
+                "container:idle": resource("container", "idle"),
+                "container:redis": resource("container", "redis"),
+                "container:helper": resource("container", "helper"),
+                "network:default": resource("network", "default"),
+                "volume:redis-data": resource("volume", "redis-data"),
+            }),
+            json!(["redis", "worker"]),
+        );
+        let stops = rollback_stops(&current, &before);
+        assert_eq!(
+            stops
+                .resources
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["container:helper", "container:redis", "container:worker"]
+        );
+    }
+
+    #[test]
+    fn committed_review_reports_fallback_only_for_an_offered_review() {
+        use CombinedReview::{Cli, OwnerFallback};
+        // No full review offered: nothing to fall back from.
+        for kept in [false, true] {
+            for tried in [Cli, OwnerFallback] {
+                assert_eq!(committed_review(false, kept, tried), Cli);
+            }
+        }
+        // Offered but dropped by the authored-digest filter: `review_combined`
+        // saw no review and returned `Cli`, yet the owner used its own review.
+        assert_eq!(committed_review(true, false, Cli), OwnerFallback);
+        // Offered and kept: whatever `review_combined` decided.
+        assert_eq!(committed_review(true, true, Cli), Cli);
+        assert_eq!(committed_review(true, true, OwnerFallback), OwnerFallback);
     }
 
     #[test]

@@ -180,7 +180,7 @@ test("admission names a known unsupported build field, never an unknown key", ()
   expect(unknown).not.toContain("synthetic-canary");
 });
 
-test("builds refuse unless explicitly enabled, and projects without builds are unaffected", () => {
+test("builds refuse while turned off, and projects without builds are unaffected", () => {
   const services = { web: { build: "." }, db: { image: "postgres:17" } };
   expect(() =>
     admitNativeProjectBuilds({
@@ -209,8 +209,21 @@ test("builds refuse unless explicitly enabled, and projects without builds are u
       enabled: true,
     }).keys(),
   ]).toEqual(["web"]);
+});
+
+test("native builds are on by default and HACK_NATIVE_BUILDS=0 is the only off switch", () => {
+  // HACK-2532: a normal project builds at least one image, so native builds
+  // cannot be an opt-in while native is the default backend.
+  expect(nativeBuildsEnabled({})).toBe(true);
+  expect(nativeBuildsEnabled({ HACK_NATIVE_BUILDS: undefined })).toBe(true);
+  expect(nativeBuildsEnabled({ HACK_NATIVE_BUILDS: "" })).toBe(true);
+  // The earlier opt-in value keeps working.
   expect(nativeBuildsEnabled({ HACK_NATIVE_BUILDS: "1" })).toBe(true);
-  expect(nativeBuildsEnabled({ HACK_NATIVE_BUILDS: "true" })).toBe(false);
+  expect(nativeBuildsEnabled({ HACK_NATIVE_BUILDS: "true" })).toBe(true);
+  expect(nativeBuildsEnabled({ HACK_NATIVE_BUILDS: "0" })).toBe(false);
+  expect(nativeBuildsDisabledRefusal("web")).toContain(
+    "HACK_NATIVE_BUILDS=0 turns native builds off; unset HACK_NATIVE_BUILDS"
+  );
 });
 
 const runtime = {

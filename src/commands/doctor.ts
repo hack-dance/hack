@@ -3709,7 +3709,7 @@ async function checkComposeBackendFeatures(opts: {
           requestedEnvName: undefined,
         })
       : undefined;
-  // The same build classification native up applies under HACK_NATIVE_BUILDS.
+  // The same build classification native up applies (on unless HACK_NATIVE_BUILDS=0).
   const buildsEnabled = nativeBuildsEnabled();
   const reading = await readComposeBackendReading(ctx.composeFile, {
     adaptationCandidates,

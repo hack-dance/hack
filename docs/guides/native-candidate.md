@@ -321,7 +321,7 @@ preflight. Raw runtime stderr and startup output are not configuration findings.
   `native_adaptation_invalid`, `internal_hosts_unreadable`,
   `internal_hosts_without_dependencies`, `external_network`, `external_volume`,
   `reserved_label`, `unsupported_build`, `foreign_platform`,
-  `invalid_service_name`, `invalid_service`, `build_requires_opt_in`,
+  `invalid_service_name`, `invalid_service`, `build_disabled`,
   `unsupported_build_form`, `emulated_build`, `environment_file_input`, `missing_image`,
   `extra_hosts_without_dependencies`, `unsupported_logging`, `invalid_restart`,
   `unsupported_label`, `invalid_http_probe`, `managed_env_unreadable`,
@@ -397,7 +397,7 @@ Compose backend. Native support for them is planned after v5.
 | Foreign external network | Exact external names `hack-dev` and `hack-logging` map to fresh native-owned project bridges, including logical aliases; they do not attach to Docker networks or share cross-project container DNS. Native publishes routes independently of Docker’s global Caddy. Other external networks stay refused by name. A top-level network sets `external: true` or `external: {name: ...}`. A reviewed `x-hack-isolated: true` replacement is not external: it creates an owned internal bridge. A network that the selected adaptation (`HACK_NATIVE_ADAPTATION` or the committed `.hack/native/adaptation.json`; see [Native settings files](#native-settings-files)) lists in `isolatedNetworks` gets the same replacement, so it is not external either. |
 | Duplicate Hack network aliases | Two logical declarations name the same `hack-dev` or `hack-logging` identity. Keep one declaration and attach its services to that declaration; native refuses instead of silently splitting connectivity. |
 | External volume | A top-level volume sets `external: true` or `external: {name: ...}`. The native runtime only creates volumes it owns, and there is no native replacement for an external volume. |
-| Build outside the basic form | A service `build` is not the basic form that [`hack config import --dry-run`](../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`), or the service also sets `image`. Build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. With `HACK_NATIVE_BUILDS=1` (see below), only a build field other than `context`, `dockerfile`, `target` and `args`, or `image` together with `build`, counts; native build admission reviews the values of those four fields itself. |
+| Build outside the basic form | A service `build` is not the basic form that [`hack config import --dry-run`](../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`), or the service also sets `image`. Build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. With native builds on (the default; see below), only a build field other than `context`, `dockerfile`, `target` and `args`, or `image` together with `build`, counts; native build admission reviews the values of those four fields itself. |
 | Non-native platform | A service sets a `platform` other than `linux/arm64` or `linux/arm64/v8`, for example `linux/amd64`. The native VM runs Linux arm64. A missing or `null` `platform` is unset and passes. `linux/amd64` passes only for a service that the `HACK_NATIVE_ADAPTATION` selection opts in to [amd64 emulation](#amd64-emulation-with-rosetta-2); every other platform value stays on the Compose backend. |
 
 Native `hack up` and `hack restart` check for these features after selecting the
@@ -463,10 +463,11 @@ volumes. On the native backend it refuses before reading anything and names the
 rerun: `HACK_RUNTIME_BACKEND=compose hack config adopt --dry-run`. See
 [Legacy Compose adoption](../reference/native-compose-adoption.md).
 
-Native image-project `up` builds Compose `build:` services only when you opt in
-with `HACK_NATIVE_BUILDS=1` (and the usual `HACK_NATIVE_SHARED_SOURCE=1`). Without
-it, a `build:` service refuses before any hook or VM effect and names the variable.
-With it:
+Native image-project `up` builds Compose `build:` services by default (with the
+usual `HACK_NATIVE_SHARED_SOURCE=1`). `HACK_NATIVE_BUILDS=0` is the only off switch:
+with it, a `build:` service refuses before any hook or VM effect and names the
+variable. Any other value, including the earlier opt-in `HACK_NATIVE_BUILDS=1`, keeps
+builds on. With builds on:
 
 - Accepted forms are `build: <context>` and a mapping of `context`, `dockerfile`,
   `target` and `args`. Paths follow Compose (the context is relative to the Compose
@@ -475,7 +476,7 @@ With it:
   interpolation, a list item without `=` (host variable inheritance), `null`, other
   build keys (`secrets`, `ssh`, `cache_from`, `platforms`, `network` and the rest),
   remote contexts and `image` together with `build` refuse. Values are never shown.
-  With `HACK_NATIVE_BUILDS=1`, `up` names the first such service and the field in the
+  With builds on, `up` names the first such service and the field in the
   three-line form, for example `! build  web uses build.ssh (SSH agent forwarding into
   a native build is not supported)`, then the Compose-backend command. Only Compose's
   own build field names are printed; any other key is not.
@@ -646,14 +647,14 @@ the same adaptation selection as native `up` without `--env` before it reports. 
 finds an external network, the message also names the `isolatedNetworks` selection
 above, which keeps that network's project on native.
 
-A basic build is not one of these features, but without `HACK_NATIVE_BUILDS=1`
-native image-project `up` refuses it, so doctor does not report it as ok then. On the
-native backend the check warns, names the variable and the next steps (set
-`HACK_NATIVE_BUILDS=1`, preview the authored native conversion with
-`hack config import --dry-run`, or select the Compose backend), and its JSON adds
-`composeBackend.nativeUpRefusals: ["basic_build"]`. On the Compose backend the same
-note is informational. With `HACK_NATIVE_BUILDS=1` set, doctor classifies builds the
-way native builds admit them and reports no basic-build refusal.
+A basic build is not one of these features. By default doctor classifies builds the
+way native builds admit them and reports no basic-build refusal. With
+`HACK_NATIVE_BUILDS=0`, native image-project `up` refuses a basic build, so doctor
+does not report it as ok then. On the native backend the check warns, names the
+variable and the next steps (unset `HACK_NATIVE_BUILDS`, preview the authored native
+conversion with `hack config import --dry-run`, or select the Compose backend), and
+its JSON adds `composeBackend.nativeUpRefusals: ["basic_build"]`. On the Compose
+backend the same note is informational.
 
 Publication control tokens are delivered to the relay through a one-shot inherited
 pipe (`--control-fd 0`), never through process arguments. The relay reads exactly
@@ -1491,7 +1492,7 @@ no tree and keeps its private `-repairing-` staging directory. Without a kept ar
 refuses (`provider_repair_unavailable`); prepare a fresh candidate home instead.
 
 The pins also name a BuildKit client (`buildx`, `darwin-arm64`), the image builder
-for native image builds (`HACK_NATIVE_BUILDS=1`). `runtime setup` installs it, as
+for native image builds (on by default). `runtime setup` installs it, as
 described above. The manual command stays for offline and manual homes:
 
 ```sh
@@ -1553,8 +1554,8 @@ path. Other printed commands are unchanged and name a candidate launcher by its
 full path ([printed commands](candidate-install.md#printed-commands-name-your-launcher)).
 
 `runtime build-image --request <file> --json` builds one image in the running
-runtime's engine with that client. Native `up` calls it for `build:` services when
-`HACK_NATIVE_BUILDS=1` is set; you can also run it directly. The request is a private
+runtime's engine with that client. Native `up` calls it for `build:` services unless
+`HACK_NATIVE_BUILDS=0` turns builds off; you can also run it directly. The request is a private
 JSON file (a singly linked, mode-`0600` file owned by you):
 
 ```json
@@ -1595,7 +1596,7 @@ JSON file (a singly linked, mode-`0600` file owned by you):
   `rebuild` always builds. The key (version 2) covers the Dockerfile and
   `.dockerignore` bytes, target, arguments and versions, and every context entry the
   ignore file lets the build read: its path, kind, permission bits, contents, symlink
-  target and hard-link group, as described with `HACK_NATIVE_BUILDS` above. It does
+  target and hard-link group, as described with native builds above. It does
   not cover network responses, cache mounts or a moved base-image tag.
 - The runtime must have network egress and the isolated build network that a runtime
   started by this version sets up. An older runtime refuses with

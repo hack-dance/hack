@@ -128,11 +128,17 @@ impl HackApp {
         cx.notify();
     }
 
-    pub(crate) fn show_resource_inventory_fixture(&mut self, confirmation: bool) {
-        let report = hack_desktop_core::resource_inventory::fixture();
+    pub(crate) fn show_resource_inventory_fixture(&mut self, name: &str) {
+        let mut report = hack_desktop_core::resource_inventory::fixture();
+        if name == "resources-partial" {
+            report.native_complete = false;
+            report
+                .native_issues
+                .push("A native run’s checkout or project name could not be read.".into());
+        }
         self.resource_inventory.selection = report.rows.first().map(key);
         self.resource_inventory.report = Some(report);
-        if confirmation {
+        if name == "resources-confirm" {
             self.resource_inventory.confirmation = Some((self.model.source_epoch(), RemovalPlan {
                 id: "volume:old-copy_data".into(),
                 message: "Delete volume old-copy_data permanently? This cannot be undone.\nSize: 2097152 bytes.\nCheckouts: \"/work/old-copy\".\nNo registered checkout or run references this Compose project. Hack has not seen this project at any other path.".into(),
@@ -229,9 +235,11 @@ pub(crate) fn render(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> impl 
                 .flex_col()
                 .gap(space::S4)
                 .children(
-                    (!(report.compose_complete && report.native_complete))
-                        .then_some("Some observations are unavailable."),
+                    (!report.compose_complete
+                        || (!report.native_complete && report.native_issues.is_empty()))
+                    .then_some("Some observations are unavailable."),
                 )
+                .children(report.native_issues.iter().cloned())
                 .children(
                     report
                         .rows

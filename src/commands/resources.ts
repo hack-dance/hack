@@ -31,6 +31,9 @@ const list = withHandler(listSpec, async ({ ctx, args }) => {
         `${row.backend} ${row.kind} ${JSON.stringify(row.name)} [${row.kind}:${row.id}] · ${row.bytes ?? "unknown"} bytes${row.owners.some((owner) => owner.detached) ? " · detached" : ""}${row.refusal ? ` · ${row.refusal}` : ""}\n`
       );
     }
+    for (const issue of data.nativeIssues) {
+      process.stdout.write(`Native inventory: ${issue}\n`);
+    }
     if (!(data.composeComplete && data.nativeComplete)) {
       process.stdout.write("Some resource observations were unavailable.\n");
     }

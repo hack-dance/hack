@@ -96,10 +96,13 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                                     app.simulate_daemon_unavailable(false);
                                 }
                                 app.show_resources(cx);
-                                if matches!(f.name(), "resources-inventory" | "resources-confirm") {
-                                    app.show_resource_inventory_fixture(
-                                        f.name() == "resources-confirm",
-                                    );
+                                if matches!(
+                                    f.name(),
+                                    "resources-inventory"
+                                        | "resources-confirm"
+                                        | "resources-partial"
+                                ) {
+                                    app.show_resource_inventory_fixture(f.name());
                                 }
                             }
                             if f.name().starts_with("catalog-") {

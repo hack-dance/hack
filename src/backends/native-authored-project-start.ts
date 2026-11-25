@@ -70,6 +70,7 @@ import {
   type NativeExitDiagnostic,
   serveNativeAuthoredProjectGraph,
 } from "./native-project-process.ts";
+import { recordNativeResourceOwner } from "./native-resource-runs.ts";
 import {
   invokeNativeRuntime,
   NATIVE_GRAPH_UNRESERVED,
@@ -751,6 +752,12 @@ async function runPreparedLifecycle(ctx: {
         publishAuthoredReady(
           {
             run: ctx.options.run,
+            recordInventoryOwner: () =>
+              recordNativeResourceOwner(
+                ctx.options.scope,
+                "authored",
+                ctx.options.run
+              ),
             observe: (event) => observeHook(ctx.options, event),
             onReady: (value) =>
               observedReady(ctx.options, value, ctx.inputs().result.plan.name),

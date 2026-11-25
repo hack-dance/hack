@@ -159,6 +159,73 @@ function resolveExport(opts: {
 }
 
 /**
+ * A plain object standing in for an overridden object export (such as
+ * `logger`). Each method is an own, writable data property that forwards its
+ * call to the export serving `key` at call time; other properties are getters
+ * that read it. It is deliberately not a Proxy: Bun's `spyOn` leaves a Proxy
+ * unchanged, so a `spyOn(logger, "warn")` in any later test file recorded no
+ * calls once one file had registered a logger mock (HACK-2650). A plain own
+ * property is what `spyOn` replaces and `mockRestore` puts back.
+ *
+ * The property set is the real export's plus every override registered for
+ * `key` so far; a later registration's extra keys are not added.
+ */
+function dispatchingObject(opts: {
+  readonly state: ModuleMockState;
+  readonly key: string;
+  readonly sample: object;
+}): object {
+  const { state, key, sample } = opts;
+  const current = () => resolveExport({ state, key }) as object;
+  const properties = new Set<PropertyKey>(Reflect.ownKeys(sample));
+  for (const registration of state.registrations) {
+    const override = registration.overrides[key];
+    if (typeof override === "object" && override !== null) {
+      for (const property of Reflect.ownKeys(override)) {
+        properties.add(property);
+      }
+    }
+  }
+  const object: Record<PropertyKey, unknown> = {};
+  for (const property of properties) {
+    const value =
+      Reflect.get(sample, property) ??
+      state.registrations
+        .map((registration) => registration.overrides[key])
+        .map((override) =>
+          typeof override === "object" && override !== null
+            ? Reflect.get(override, property)
+            : undefined
+        )
+        .find((candidate) => candidate !== undefined);
+    if (typeof value === "function") {
+      Object.defineProperty(object, property, {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value(this: unknown, ...args: unknown[]): unknown {
+          const target = current();
+          const method = Reflect.get(target, property);
+          if (typeof method !== "function") {
+            throw new TypeError(
+              `Scoped module mock: "${key}.${String(property)}" is not callable`
+            );
+          }
+          return Reflect.apply(method, target, args);
+        },
+      });
+    } else {
+      Object.defineProperty(object, property, {
+        configurable: true,
+        enumerable: true,
+        get: () => Reflect.get(current(), property),
+      });
+    }
+  }
+  return object;
+}
+
+/**
  * Builds (or reuses) a wrapper for an overridden export that re-resolves its
  * target on every call/property access, so activation state applies at use
  * time instead of import time.
@@ -205,12 +272,7 @@ function getOrCreateWrapper(opts: {
       );
     };
   } else if (typeof sample === "object" && sample !== null) {
-    wrapper = new Proxy(sample as object, {
-      get: (_target, property) =>
-        Reflect.get(resolveExport({ state, key }) as object, property),
-      has: (_target, property) =>
-        Reflect.has(resolveExport({ state, key }) as object, property),
-    });
+    wrapper = dispatchingObject({ state, key, sample: sample as object });
   } else {
     wrapper = state.real[key];
   }

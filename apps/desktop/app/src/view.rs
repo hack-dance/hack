@@ -137,6 +137,7 @@ pub struct HackApp {
     pub(crate) resource_inventory: crate::resource_inventory_view::InventoryPane,
     pub(crate) sidebar_menu: Option<String>,
     pub(crate) changes: crate::changes_view::ChangesPane,
+    pub(crate) configuration: crate::config_view::Configuration,
     pub(crate) catalog: crate::service_catalog::ServiceCatalog,
     pub(crate) service_pane: crate::service_view::ServicePane,
     pub(crate) service_focus: gpui_kit::FocusHandle,
@@ -223,6 +224,17 @@ impl HackApp {
             }
         })
         .detach();
+        let config_input = cx.new(|cx| InputState::new(window, cx).placeholder("Setting value"));
+        cx.subscribe(
+            &config_input,
+            |this: &mut HackApp, _, ev: &InputEvent, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    this.configuration.clear_feedback();
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let mut this = Self {
             model: AppModel::new(),
             source,
@@ -231,6 +243,7 @@ impl HackApp {
             resource_inventory: Default::default(),
             sidebar_menu: None,
             changes: Default::default(),
+            configuration: crate::config_view::Configuration::new(config_input),
             catalog: crate::service_catalog::ServiceCatalog {
                 input: catalog_input,
                 selected: 0,
@@ -497,6 +510,7 @@ impl HackApp {
             self.sidebar_menu = None;
         }
         if selection_changed {
+            self.configuration.invalidate_project();
             // Only accepted snapshots may invalidate a tail or replace a
             // stream. Root/backend changes also change stream ownership.
             self.files = Default::default();
@@ -1181,6 +1195,7 @@ impl HackApp {
         if before != after {
             self.clear_selected_service();
             self.model.source_changed();
+            self.configuration.invalidate();
             self.changes = Default::default();
             self.action_started.clear();
             self.copies = Default::default();
@@ -1368,6 +1383,13 @@ impl HackApp {
                 machine_row("resources", Glyph::Container, "Resources", div(), ui)
                     .when(self.pane == Pane::Resources, |d| d.bg(p.surface_1))
                     .on_click(cx.listener(|this, _, _, cx| this.show_resources(cx))),
+            )
+            .child(
+                machine_row("configuration", Glyph::Pencil, "Configuration", div(), ui)
+                    .when(self.pane == Pane::Configuration, |d| d.bg(p.surface_1))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_configuration(window, cx)),
+                    ),
             )
             .child(
                 machine_row(
@@ -2119,6 +2141,7 @@ impl Render for HackApp {
             None
         };
         let main: AnyElement = match &list.phase {
+            _ if self.pane == Pane::Configuration => self.render_configuration(&ui, cx),
             _ if self.pane == Pane::BannersSheet => crate::health_fixtures::banners(&ui, cx),
             _ if self.pane == Pane::ErrorsSheet => {
                 crate::health_fixtures::errors(self, &ui, window, cx)

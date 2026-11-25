@@ -88,6 +88,9 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                             if fixtures::loads_usage(f) {
                                 app.show_usage_now();
                             }
+                            if f.name().starts_with("config-") {
+                                app.show_configuration_fixture(f.name(), window, cx);
+                            }
                             if f.name().starts_with("resources-") {
                                 if f.name() == "resources-unavailable" {
                                     app.simulate_daemon_unavailable(false);

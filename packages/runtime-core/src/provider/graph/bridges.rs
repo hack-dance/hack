@@ -1313,10 +1313,11 @@ pub(super) fn publication_upstream(
             validate_route_publication(resource.routing.as_ref(), upstream_port, port, hostnames)?
         }
     }
-    Ok(engine
-        .guest()
-        .engine_socket()?
-        .with_file_name(format!("bridge-{slot:02}.sock")))
+    Ok(engine.guest().engine_socket()?.with_file_name(
+        std::path::Path::new(&engine.guest().socket_layout().bridge(slot))
+            .file_name()
+            .expect("fixed bridge basename"),
+    ))
 }
 
 fn stop_slot(

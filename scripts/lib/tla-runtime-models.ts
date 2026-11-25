@@ -177,6 +177,13 @@ const startGraphBad = (...flags: readonly StartGraphFlag[]): string =>
     .join(", ")}]`;
 const contracts: readonly ModelContract[] = [
   {
+    name: "native-pool-layout",
+    module: "PoolLayout",
+    states: 38,
+    invariant: "LayoutPreserved",
+    fields: ['owner = "legacy"', 'initial = "compact"', "refused = TRUE"],
+  },
+  {
     name: "project-remote-selection",
     module: "ProjectRemoteSelection",
     states: 11,

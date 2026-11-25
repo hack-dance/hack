@@ -273,6 +273,7 @@ fn shadows_name_resolution(target: &str) -> bool {
 /// Wrap the already composed environment launcher, never its inner application.
 /// The directory and executable are immutable read-only mounts owned by this run.
 pub(super) fn attach(
+    layout: crate::provider::PoolLayout,
     config: &mut Value,
     service: &Service,
     directory: &str,
@@ -405,8 +406,12 @@ pub(super) fn attach(
         (executable.to_owned(), "/run/hack-relay-guest".to_owned()),
     ];
     let sockets = service.bindings.values().map(|binding| {
-        let path = format!("/run/hack-dependencies/dependency-{:02}.sock", binding.slot);
-        (path.clone(), path)
+        // Keep the container-side contract stable. The bound guest source is
+        // selected by the pool, and the relay opens only the legacy target.
+        (
+            layout.dependency(binding.slot),
+            crate::provider::PoolLayout::Legacy.dependency(binding.slot),
+        )
     });
     for (source, target) in fixed.into_iter().chain(sockets) {
         mounts.push(json!({"Type":"bind","Source":source,"Target":target,"ReadOnly":true,"BindOptions":{"Propagation":"rprivate"}}));

@@ -145,14 +145,20 @@ Do not copy these documents into source control or attach them to diagnostics.
 
 ## Shared pool socket capacity
 
-A fresh development pool started with a project share reserves space for two
-application bridge sockets and one host-dependency socket by default. The
+A fresh development pool started with a project share reserves space for 16
+application bridge sockets and eight host-dependency sockets by default. The
 combined limit is 32, subject to the pinned provider’s boot command-line
 budget. Project shares also consume that budget. Project minimums take precedence over spare capacity,
 and explicit exact counts are honored. Projects and branches share the available
 slots in each direction. A new start can be refused if the live pool has too
 few free slots. The default applies at pool creation; existing pool capacities
 stay in effect.
+
+Fresh pools use compact guest paths for project shares and sockets. Pools
+created with the previous layout keep their recorded paths across stop,
+restart, and recovery. An older runtime refuses a compact pool. Keep the
+original home when its data is needed, or select a separate native home for
+a fresh pool.
 
 ## Owned project networks
 

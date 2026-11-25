@@ -757,15 +757,30 @@ fn full_command_refuses_unconfirmed_legacy_witness_before_publishing_journal() {
 #[test]
 fn full_legacy_command_archives_with_real_current_witness_and_exact_retry() {
     isolated("full_legacy_command_child");
+    isolated("full_legacy_command_legacy_pool_child");
 }
 
 #[test]
 #[ignore = "isolated full-recovery fixture launched by full_legacy_command_archives_with_real_current_witness_and_exact_retry"]
 fn full_legacy_command_child() {
+    full_legacy_command(super::super::PoolLayout::CompactV1);
+}
+
+#[test]
+#[ignore = "isolated full-recovery fixture launched by full_legacy_command_archives_with_real_current_witness_and_exact_retry"]
+fn full_legacy_command_legacy_pool_child() {
+    full_legacy_command(super::super::PoolLayout::Legacy);
+}
+
+fn full_legacy_command(layout: super::super::PoolLayout) {
     let (f, candidate, _alias) = complete_fixture();
     fs::write(f.home.join("compose.yaml"), "services: {}\n").unwrap();
-    let share = crate::provider::ProjectShareIntent::approve(&f.home, true).unwrap();
+    let share = crate::provider::ProjectShareIntent::approve(&f.home, true)
+        .unwrap()
+        .with_layout(layout)
+        .unwrap();
     let mut pool = state::Owner::load(&candidate).unwrap();
+    pool.socket_layout = layout;
     pool.project_share = Some(share.clone());
     pool.save(&candidate).unwrap();
     let run = "a".repeat(32);

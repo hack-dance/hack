@@ -2041,6 +2041,76 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // HACK-2669 rows 1, 3, 4, HACK-2707, HACK-2708, HACK-2709: the warm-up
+    // window after `up -d`. The shared HTTPS owner's startup, acquire and
+    // release contend for the provider lease with commands and a stop. The
+    // negative control is the old single nonblocking graph read at the ready
+    // line: a brief holder made the acquire refuse and the run was torn down.
+    name: "native-warmup-window",
+    module: "WarmupWindow",
+    states: 272,
+    invariant: "NoTeardownByBriefHolder",
+    fields: ["torn = TRUE", 'https = "refused"', 'lease = "cmd"'],
+    additionalControls: [
+      {
+        // HACK-2708: the release after Ctrl-C read once while an exec that
+        // waited for the lease held it.
+        name: "nonblocking-release",
+        negative: true,
+        invariant: "NoRecoveryRequired",
+        fields: ['fin = "unconfirmed"', 'https = "retained"', 'lease = "cmd"'],
+      },
+      {
+        // HACK-2707: the authority gave up on the lease a `hack down` held
+        // for its stop, leaving the shared owner's startup failure retained.
+        name: "short-authority-wait",
+        negative: true,
+        invariant: "NoRecoveryRequired",
+        fields: ['fin = "unconfirmed"', 'https = "startupFailed"'],
+      },
+      {
+        // HACK-2707: cleanup did not wait for the in-flight acquisition.
+        name: "cleanup-before-settled",
+        negative: true,
+        invariant: "NoRecoveryRequired",
+        fields: ['fin = "unconfirmed"', 'https = "authority"'],
+        alternativeWitnesses: [['fin = "unconfirmed"', 'https = "verify"']],
+      },
+      {
+        // The same omission could acknowledge a lifetime whose acquisition
+        // had not even started its intent.
+        name: "acquire-after-cleanup",
+        negative: true,
+        invariant: "NoAcquisitionAfterCleanup",
+        fields: ['fin = "confirmed"', 'https = "pending"'],
+        alternativeWitnesses: [
+          ['fin = "confirmed"', 'https = "authority"'],
+          ['fin = "confirmed"', 'https = "verify"'],
+        ],
+      },
+      {
+        // The waits stay bounded: a holder that outlasts the read's wait
+        // still makes the acquire refuse.
+        name: "long-holder",
+        negative: true,
+        invariant: "NoTeardownByBriefHolder",
+        fields: ["torn = TRUE", 'https = "refused"', 'lease = "cmd"'],
+      },
+      {
+        // Reachability: a stop during warm-up ends with a refused acquire,
+        // a verified release and confirmed cleanup.
+        name: "released-after-refusal",
+        negative: true,
+        invariant: "NeverReleasedAfterRefusal",
+        fields: [
+          'fin = "confirmed"',
+          'https = "released"',
+          "refusedSeen = TRUE",
+        ],
+      },
+    ],
+  },
+  {
     name: "stopped-pool-startup",
     module: "Resume",
     states: 71,

@@ -45,6 +45,21 @@ const SHA = /^[a-f0-9]{64}$/;
 const SINGLE_CERTIFICATE =
   /^-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----$/;
 const OWNER_RECEIPT = "active-owner.json";
+/**
+ * How long the hostname authority waits for the provider lease at startup
+ * (`AUTHORITY_STARTUP_LEASE_WAIT` in the runtime). It starts at a run's ready
+ * line, beside that run's first commands and a `hack down` whose graph stop
+ * holds the lease for about 12 s (HACK-2707).
+ */
+export const NATIVE_HTTPS_AUTHORITY_LEASE_WAIT_MS = 30_000;
+/** Authority and Caddy readiness after the authority has the lease. */
+const NATIVE_HTTPS_READY_MS = 10_000;
+/**
+ * The whole child startup: the authority's lease wait plus readiness. A
+ * client that waits for a starting shared owner waits longer than this.
+ */
+export const NATIVE_HTTPS_CHILD_STARTUP_MS =
+  NATIVE_HTTPS_AUTHORITY_LEASE_WAIT_MS + NATIVE_HTTPS_READY_MS;
 const OWNER_SOCKET = "owner.sock";
 const BASE64_PUBLIC_KEY = /^[A-Za-z0-9+/=]{1,256}$/;
 const HOST =
@@ -1504,7 +1519,8 @@ export async function startNativeProjectHttps(opts: {
     void startedAuthority.exited.then(() => {
       dead = true;
     });
-    const deadline = Date.now() + 10_000;
+    // One shared deadline for the authority (its lease wait included) and Caddy.
+    const deadline = Date.now() + NATIVE_HTTPS_CHILD_STARTUP_MS;
     startupStage = "authority-ready";
     ownedAuthority = await waitReady(
       deadline,

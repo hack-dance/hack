@@ -4042,6 +4042,14 @@ async function startNativeProjectAttempt(
         let httpsIntent: NativeHttpsLeaseIdentity | undefined;
         let httpsFailure: Error | undefined;
         let joinedIngress: Promise<void> | undefined;
+        // The HTTPS acquisition a started return makes at the owner's ready line
+        // runs beside the graph owner. Cleanup waits for it to settle before it
+        // decides between release and recovery: a `hack down` (or Ctrl-C) during
+        // warm-up must not retire this lifetime while the shared owner is still
+        // starting or the acquire is still in flight (HACK-2707).
+        let readyIngress: Promise<void> | undefined;
+        // The graph owner has exited: no new acquisition starts after this.
+        let serveSettled = false;
         try {
           const dependencyFile = join(directory, "dependencies.json");
           await writeFile(
@@ -4292,12 +4300,27 @@ async function startNativeProjectAttempt(
           // checked and the run is reported ready.
           const allReady = async () => {
             if (mapped) {
+              if (serveSettled || httpsClosing) {
+                return;
+              }
+              const acquisition = acquireHttps(
+                mapped.readyMapping,
+                mapped.persistedMapping
+              );
+              readyIngress = acquisition.then(
+                () => undefined,
+                () => undefined
+              );
               try {
-                await acquireHttps(
-                  mapped.readyMapping,
-                  mapped.persistedMapping
-                );
+                await acquisition;
               } catch (error) {
+                // A stop that reached the owner first (a `hack down` during
+                // warm-up) makes the acquire refuse: the graph is no longer
+                // ready. That is the stop, not an infrastructure failure, and
+                // the graph is already on its way down.
+                if (serveSettled) {
+                  return;
+                }
                 httpsFailure =
                   error instanceof Error
                     ? error
@@ -4524,6 +4547,7 @@ async function startNativeProjectAttempt(
           } catch (error) {
             serveFailure = error;
           } finally {
+            serveSettled = true;
             retention.abort();
             clearTimeout(retentionTimer);
             await startupStatus.stop();
@@ -4634,6 +4658,7 @@ async function startNativeProjectAttempt(
           httpsClosing = true;
           try {
             await joinedIngress;
+            await readyIngress;
             if (https) {
               await https.releaseAfterCleanup();
             } else if (httpsIntent) {

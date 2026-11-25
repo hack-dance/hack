@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   chmod,
   lstat,
@@ -26,7 +26,10 @@ import {
   type NativeHttpsOwnerBinding,
   nativeHttpsLeaseIdentity,
 } from "../src/backends/native-https-owner-protocol.ts";
-import { verifyNativeHttpsLeaseGraph } from "../src/backends/native-https-owner-server.ts";
+import {
+  verifyNativeHttpsLeaseGraph,
+  verifyNativeHttpsOwnerIdle,
+} from "../src/backends/native-https-owner-server.ts";
 import {
   nativeHttpsExecutableSha256,
   nativeHttpsLeaseReleasePath,
@@ -34,7 +37,10 @@ import {
   nativeHttpsReadRelease,
   nativeHttpsRecordRelease,
 } from "../src/backends/native-https-owner-storage.ts";
-import type { invokeNativeRuntime } from "../src/backends/native-runtime-client.ts";
+import {
+  type invokeNativeRuntime,
+  NativeRuntimeRequestError,
+} from "../src/backends/native-runtime-client.ts";
 
 const serverModule = resolve(
   import.meta.dir,
@@ -1050,6 +1056,154 @@ test("native release proof rejects live compute, pending journals, bridges, and 
   await expect(
     verifyNativeHttpsLeaseGraph(binding, selected, "release", invoke)
   ).rejects.toThrow();
+});
+
+/**
+ * HACK-2669 rows 1, 3 and 4, HACK-2708 and HACK-2709: every leased read the
+ * shared owner makes for an acquire or a release refused `provider_busy` at
+ * once whenever a command (or the ready owner's own restart tick) held the
+ * provider lease at that moment. The frontend then stopped the whole run (a
+ * refused acquire) or exited 1 (an unconfirmed release). The reads now wait out
+ * contention inside one bound, retry nothing else, and still refuse a lasting
+ * holder with its own refusal.
+ */
+describe("shared HTTPS graph verification and provider-lease contention", () => {
+  const binding = {
+    runtime: { home: "/unused", binary: "/unused/native" },
+    pool: { owner: "a".repeat(32), bootId: "boot" },
+  } as NativeHttpsOwnerBinding;
+  const selected = lease("b");
+  const receipt = (phase: string) => ({
+    journal_incomplete: false,
+    receipt: {
+      run: selected.run,
+      owner: binding.pool.owner,
+      namespace: selected.namespace,
+      plan_id: selected.planId,
+      phase,
+      resources: { "container:web": { kind: "container" } },
+    },
+    observations: {
+      "container:web": {
+        state: phase === "ready-observed" ? "running" : "absent",
+      },
+    },
+  });
+  const holder =
+    "Provider lease acquisition refused; recorded holder: exec; no operation was admitted.";
+  const busy = () =>
+    new NativeRuntimeRequestError({
+      message: holder,
+      nativeCode: "provider_busy",
+    });
+  /** The leased reads refuse while `held()`; the record of every call is kept. */
+  function contended(phase: string, held: () => boolean) {
+    const calls: string[] = [];
+    const invoke: typeof invokeNativeRuntime = async ({ args }) => {
+      const name = `${args[0]} ${args[1]}`;
+      calls.push(name);
+      if (args[1] === "status") {
+        return { phase: "running", process_alive: true, guest_boot_id: "boot" };
+      }
+      if (held()) {
+        throw busy();
+      }
+      if (args[1] === "inspect") {
+        return receipt(phase);
+      }
+      if (args[1] === "bridges") {
+        return { run: selected.run, slots: {} };
+      }
+      return { scope: "durable-ownership-only", claims: [] };
+    };
+    return { invoke, calls };
+  }
+
+  test("an acquire at the ready line waits out a briefly held lease", async () => {
+    const until = performance.now() + 300;
+    const { invoke, calls } = contended(
+      "ready-observed",
+      () => performance.now() < until
+    );
+    const started = performance.now();
+    await verifyNativeHttpsLeaseGraph(binding, selected, "acquire", invoke);
+    expect(performance.now() - started).toBeGreaterThanOrEqual(250);
+    // Only the refused read was retried; status ran once.
+    expect(calls.filter((call) => call === "runtime status")).toHaveLength(1);
+    expect(
+      calls.filter((call) => call === "graph inspect").length
+    ).toBeGreaterThan(1);
+  });
+
+  test("a release after a stop waits out a command that took the lease", async () => {
+    let refusals = 0;
+    const { invoke, calls } = contended("stopped-data-retained", () => {
+      refusals += 1;
+      // Each leased read is refused twice before the command lets go.
+      return refusals % 3 !== 0;
+    });
+    await verifyNativeHttpsLeaseGraph(binding, selected, "release", invoke);
+    expect(calls).toContain("graph bridges");
+    expect(calls).toContain("runtime publication-hostnames");
+  });
+
+  test("the idle check before retirement waits out a briefly held lease", async () => {
+    const until = performance.now() + 200;
+    const { invoke } = contended("stopped-data-retained", () => {
+      return performance.now() < until;
+    });
+    await verifyNativeHttpsOwnerIdle(binding, invoke);
+  });
+
+  test("a lasting holder is still refused, with its own refusal", async () => {
+    const { invoke } = contended("ready-observed", () => true);
+    const started = performance.now();
+    const failure = await verifyNativeHttpsLeaseGraph(
+      binding,
+      selected,
+      "acquire",
+      invoke,
+      { busyWaitMs: 300 }
+    ).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(NativeRuntimeRequestError);
+    expect((failure as Error).message).toBe(holder);
+    expect(performance.now() - started).toBeGreaterThanOrEqual(250);
+    expect(performance.now() - started).toBeLessThan(5000);
+    await expect(
+      verifyNativeHttpsOwnerIdle(binding, invoke, { busyWaitMs: 100 })
+    ).rejects.toThrow(holder);
+  });
+
+  test("the owner's shutdown ends a wait at once", async () => {
+    const { invoke } = contended("ready-observed", () => true);
+    const stopping = new AbortController();
+    setTimeout(() => stopping.abort(), 150);
+    const started = performance.now();
+    await expect(
+      verifyNativeHttpsLeaseGraph(binding, selected, "acquire", invoke, {
+        signal: stopping.signal,
+      })
+    ).rejects.toThrow(holder);
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
+  test("a refusal after acquisition is never retried", async () => {
+    let inspections = 0;
+    const invoke: typeof invokeNativeRuntime = async ({ args }) => {
+      if (args[1] === "status") {
+        return { phase: "running", process_alive: true, guest_boot_id: "boot" };
+      }
+      inspections += 1;
+      throw new NativeRuntimeRequestError({
+        message: "graph_owner_recovery",
+        nativeCode: "graph_owner_recovery",
+      });
+    };
+    await expect(
+      verifyNativeHttpsLeaseGraph(binding, selected, "acquire", invoke)
+    ).rejects.toThrow("graph_owner_recovery");
+    expect(inspections).toBe(1);
+  });
 });
 
 test("detached startup failure reports only its generation-bound diagnostic and refuses recovery", async () => {

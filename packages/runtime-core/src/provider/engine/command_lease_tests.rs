@@ -260,3 +260,34 @@ fn the_dependency_refresh_request_waits_for_a_briefly_held_lease() {
     assert_waited_then_acquired(started, hold, &after);
     holder.join().unwrap();
 }
+
+/// HACK-2669 rows 1, 3 and 4, HACK-2708 and HACK-2709: the reads the shared
+/// HTTPS owner makes to admit and release a run's lease take the provider lease
+/// with one attempt each, so a command (or the ready owner's restart tick)
+/// holding it at that moment refused them at once. The owner now waits these
+/// refusals out; they are pre-admission `provider_busy` refusals naming the
+/// holder, the only refusal it retries.
+#[test]
+fn the_shared_https_owner_reads_refuse_provider_busy_at_once_naming_the_holder() {
+    let (_home, candidate) = running_pool();
+    let (release, holder) = hold_lease(&candidate, Duration::from_secs(30));
+    let started = Instant::now();
+    for refused in [
+        crate::provider::publication::inspect_claims(&candidate)
+            .err()
+            .unwrap(),
+        crate::provider::graph::inspect_bridges(&candidate, &"a".repeat(32))
+            .err()
+            .unwrap(),
+    ] {
+        assert_eq!(refused.code, "provider_busy", "{}", refused.message);
+        assert!(
+            refused.message.contains("recorded holder:"),
+            "{}",
+            refused.message
+        );
+    }
+    assert!(started.elapsed() < Duration::from_secs(1));
+    release.send(()).unwrap();
+    holder.join().unwrap();
+}

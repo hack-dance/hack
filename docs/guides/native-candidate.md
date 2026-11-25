@@ -5038,7 +5038,9 @@ retried. A ready foreground owner holds the provider lease briefly and often, so
 and the dependency refresh it sends first, wait up to 15 seconds for another holder
 to release that lease before refusing with `provider_busy` naming the holder. For
 compose-backed exec the 30-second budget starts after that wait; an authored project's
-exec and one-off `run` count the wait inside their own 30-second budget. A pending
+exec and one-off `run` count the wait inside their own 30-second budget. A compose
+project's one-off `run` waits the same way before its job is reserved, within one
+15-second bound for its selection and admission. A pending
 Ctrl-C or `hack down` ends the wait at once without starting the command. When fresh values are delivered through private stdin, output that is still arriving
 or already queued when that budget ends is read to the end, so a command that finished on a
 busy host returns its exit code (see below). `--env` and `--profile` changes are refused. A command name such as `bun`
@@ -5139,11 +5141,24 @@ On the built current-branch runtime and CLI, exercise authored and adopted servi
 Linux PTY and fake-Engine tests do not qualify these real Engine/VM effects.
 
 
-Managed HTTPS authority startup uses the same five-second provider-lock admission
-budget as ordinary pool startup. This lets a brief concurrent graph inspection
-finish before admission. Pool identity, socket ownership and certificate admission
-are checked only after the lock is acquired; expiry refuses with `provider_busy`
-and no authority is published. Serving and cleanup are never replayed.
+Managed HTTPS authority startup waits up to 30 seconds for the provider lock, as
+owned cleanup does. A routed run started with `hack up -d` takes its shared HTTPS
+lease at the owner's ready line, which is exactly when that run's first `hack exec`
+or `hack run` and a `hack down` arrive; a `hack down` holds the lock for its whole
+graph stop. The wait ends early once the authority's owner exits. Pool identity,
+socket ownership and certificate admission are checked only after the lock is
+acquired; expiry refuses with `provider_busy` and no authority is published.
+Serving and cleanup are never replayed.
+
+The shared owner's graph reads for a lease acquire or release, and its idle check
+before retiring, read under the provider lock too. Each waits out a holder for up
+to 15 seconds (one deadline per verification) instead of refusing at once, so a
+command or a stop during route warm-up no longer makes the acquire refuse (which
+stopped the whole run) or the release unconfirmed. Only `provider_busy` is
+retried; a holder that outlasts the wait is still refused. The frontend that
+spawned the shared owner waits for its whole startup, and its cleanup waits for an
+acquisition still in flight before it releases or recovers the lease, so a
+`hack down` during warm-up stops the run with confirmed cleanup.
 
 An authority child that exits before readiness can supply a bounded structured
 native error code without exposing its stderr. Malformed, oversized or missing

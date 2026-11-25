@@ -44,6 +44,7 @@ import {
 } from "./native-https-startup-failure.ts";
 import {
   inspectActiveNativeHttpsOwner,
+  NATIVE_HTTPS_CHILD_STARTUP_MS,
   verifyActiveNativeHttpsConnection,
   verifyNativeHttpsHostname,
 } from "./native-project-https.ts";
@@ -108,12 +109,17 @@ export class NativeHttpsLeaseAcquisitionError extends ClosedCliError {
   }
 }
 
+/** What the frontend that spawned a shared owner knows about it: whether it exited. */
+export interface NativeHttpsSpawnedOwner {
+  readonly exited: () => boolean;
+}
+
 /** The exact reviewed executable is detached into its own process group. */
 export async function spawnNativeHttpsOwner(opts: {
   readonly frontend: { readonly binary: string; readonly sha256: string };
   readonly configurationPath: string;
   readonly home: string;
-}): Promise<void> {
+}): Promise<NativeHttpsSpawnedOwner | undefined> {
   if (
     (await nativeHttpsExecutableSha256(opts.frontend.binary)) !==
     opts.frontend.sha256
@@ -134,7 +140,12 @@ export async function spawnNativeHttpsOwner(opts: {
     child.once("error", () => reject(nativeHttpsOwnerRefused()));
     child.once("spawn", resolve);
   });
+  let exited = false;
+  child.once("exit", () => {
+    exited = true;
+  });
   child.unref();
+  return { exited: () => exited };
 }
 
 function sameBinding(
@@ -196,7 +207,12 @@ async function readNativeHttpsOwnerConfigurationAtHome(
 /** No stale directory is removed. Interrupted startup is explicit recovery work. */
 export async function ensureNativeHttpsOwner(opts: {
   readonly binding: NativeHttpsOwnerBinding;
-  readonly spawnOwner?: typeof spawnNativeHttpsOwner;
+  /** Test seam; a stand-in that reports nothing gives no exit observation. */
+  readonly spawnOwner?: (
+    opts: Parameters<typeof spawnNativeHttpsOwner>[0]
+  ) => Promise<unknown>;
+  /** This call spawned the owner: how its caller can tell that it exited. */
+  readonly onSpawned?: (owner: NativeHttpsSpawnedOwner) => void;
 }): Promise<NativeHttpsOwnerConfiguration> {
   const { binding } = opts;
   const root = nativeHttpsOwnerRoot(binding.runtime.home);
@@ -228,11 +244,15 @@ export async function ensureNativeHttpsOwner(opts: {
       await mkdir(join(root, "leases"), { mode: 0o700 });
       const configurationPath = join(root, "configuration.json");
       await nativeHttpsWriteNew(configurationPath, configuration);
-      await (opts.spawnOwner ?? spawnNativeHttpsOwner)({
+      const spawned = await (opts.spawnOwner ?? spawnNativeHttpsOwner)({
         frontend: binding.frontend,
         home: binding.runtime.home,
         configurationPath,
       });
+      if (isRecord(spawned) && typeof spawned.exited === "function") {
+        const exited = spawned.exited;
+        opts.onSpawned?.({ exited: () => exited() === true });
+      }
       return configuration;
     }
     // Only startup publication can be retried; no acquire/release request is replayed.
@@ -302,11 +322,30 @@ async function endpointFor(
   return endpoint;
 }
 
+/**
+ * How long the frontend that spawned a shared owner waits for it to publish its
+ * endpoint: longer than the owner's whole child startup (the authority's lease
+ * wait included), so it never gives up on an owner that is still starting, then
+ * finds nothing it can release or recover.
+ */
+export const NATIVE_HTTPS_OWNER_STARTUP_WAIT_MS =
+  NATIVE_HTTPS_CHILD_STARTUP_MS + 15_000;
+
 export async function connectNativeHttpsOwner(
   configuration: NativeHttpsOwnerConfiguration,
-  waitForStartup = true
+  waitForStartup = true,
+  /**
+   * The frontend that spawned this owner waits for its whole startup
+   * ({@link NATIVE_HTTPS_OWNER_STARTUP_WAIT_MS}), ending early once that
+   * process exits. Other callers wait the ordinary 15 s.
+   */
+  spawned?: NativeHttpsSpawnedOwner
 ): Promise<Socket> {
-  const deadline = Date.now() + (waitForStartup ? 15_000 : 1);
+  let startupWaitMs = 1;
+  if (waitForStartup) {
+    startupWaitMs = spawned ? NATIVE_HTTPS_OWNER_STARTUP_WAIT_MS : 15_000;
+  }
+  const deadline = Date.now() + startupWaitMs;
   for (;;) {
     try {
       const endpoint = await endpointFor(configuration);
@@ -340,7 +379,8 @@ export async function connectNativeHttpsOwner(
       if (
         !isRecord(error) ||
         error.code !== "ENOENT" ||
-        Date.now() >= deadline
+        Date.now() >= deadline ||
+        spawned?.exited()
       ) {
         throw error;
       }
@@ -443,12 +483,21 @@ export async function acquireNativeHttpsLease(
     httpsPort: opts.httpsPort,
     certificateNameLimit: opts.certificateNameLimit ?? 256,
   };
-  const configuration = await ensureNativeHttpsOwner({ binding });
+  let spawned: NativeHttpsSpawnedOwner | undefined;
+  const configuration = await ensureNativeHttpsOwner({
+    binding,
+    onSpawned: (owner) => {
+      spawned = owner;
+    },
+  });
   const intended = nativeHttpsLeaseIdentity(configuration, opts.lease);
   await opts.onIntent?.(intended);
   let socket: Socket;
   try {
-    socket = await connectNativeHttpsOwner(configuration);
+    // An owner this frontend just spawned may be waiting out a `hack down`
+    // of the same run for the provider lease (HACK-2707): wait for its whole
+    // startup rather than give up while it is still starting.
+    socket = await connectNativeHttpsOwner(configuration, true, spawned);
   } catch (startupFailure) {
     throw new NativeHttpsLeaseAcquisitionError(intended, { startupFailure });
   }

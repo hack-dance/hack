@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  COMPOSE_CLIENT_DECLINED_HINT,
   COMPOSE_CLIENT_FULL_OUTPUT_HINT,
   COMPOSE_CLIENT_LINE_CHARS,
   COMPOSE_CLIENT_PROMPT_HINT,
@@ -7,9 +8,11 @@ import {
   COMPOSE_CLIENT_WARNING_CHARS,
   type ComposeClientCapture,
   composeClientWarnings,
+  isComposeQuestionLine,
   openComposeClientCapture,
   sanitizeComposeClientLines,
   writeComposeClientFailure,
+  writeComposeClientQuestions,
   writeComposeClientTail,
   writeComposeClientWarnings,
 } from "../src/lib/compose-client-output.ts";
@@ -114,6 +117,87 @@ test("a warning printed after more than 64 KiB of output still shows, as do earl
   } finally {
     capture.close();
   }
+});
+
+test("a warning repeated under different timestamps takes one slot, so a later distinct warning is kept", () => {
+  const capture = openComposeClientCapture();
+  try {
+    for (let second = 0; second < 70; second += 1) {
+      feed(
+        capture,
+        `time="2026-01-01T00:00:${String(second).padStart(2, "0")}Z" level=warning msg="The \\"A\\" variable is not set."\n`
+      );
+    }
+    feed(capture, 'time="2026-01-01T00:01:10Z" level=warning msg="late one"\n');
+    expect(capture.warnings({ limit: 10 })).toEqual([
+      'The "A" variable is not set.',
+      "late one",
+    ]);
+  } finally {
+    capture.close();
+  }
+});
+
+test("questions are told apart from warnings, build steps and ordinary lines", () => {
+  for (const line of [
+    'Volume "shop_db" exists but doesn\'t match configuration in compose file. Recreate (data will be lost)?',
+    "Recreate (data will be lost)? [y/N]",
+    "Continue? [Y/n]",
+    "Proceed (y/N)",
+    "Are you sure you want to remove? [yN]",
+    "? Volume exists. Recreate",
+  ]) {
+    expect(isComposeQuestionLine(line), line).toBe(true);
+  }
+  for (const line of [
+    " Container shop-api-1  Started",
+    "#12 [build 3/9] RUN echo 'ready?'",
+    'time="2026-01-01T00:00:00Z" level=warning msg="why?"',
+    "WARN[0000] unset?",
+    "Error response from daemon: conflict",
+  ]) {
+    expect(isComposeQuestionLine(line), line).toBe(false);
+  }
+});
+
+test("a question without a line break is complete when its stream ends, and never joins the next phase", () => {
+  const capture = openComposeClientCapture();
+  try {
+    // The images phase asks on stdout and ends; the start phase prints next.
+    feed(capture, "Recreate (data will be lost)?", "stdout");
+    capture.end?.("stdout");
+    capture.end?.("stderr");
+    feed(capture, "compose-up-stdout-marker\n", "stdout");
+    expect(capture.tail()).toEqual([
+      "Recreate (data will be lost)?",
+      "compose-up-stdout-marker",
+    ]);
+    expect(capture.questions()).toEqual(["Recreate (data will be lost)?"]);
+    // A long build after it does not lose it, and it is kept once.
+    for (let index = 0; index < 2000; index += 1) {
+      feed(capture, `#7 ${index} layer ${"z".repeat(60)}\n`, "stdout");
+    }
+    feed(capture, "Recreate (data will be lost)?\n", "stdout");
+    expect(capture.questions()).toEqual(["Recreate (data will be lost)?"]);
+    expect(capture.warnings()).toEqual([]);
+  } finally {
+    capture.close();
+  }
+});
+
+test("unanswered questions from a successful start render with how to answer them", () => {
+  let out = "";
+  writeComposeClientQuestions(["Recreate (data will be lost)?"], (text) => {
+    out += text;
+  });
+  expect(out).toBe(
+    `! compose  unanswered question: Recreate (data will be lost)?\n${COMPOSE_CLIENT_DECLINED_HINT}\n`
+  );
+  let none = "";
+  writeComposeClientQuestions([], (text) => {
+    none += text;
+  });
+  expect(none).toBe("");
 });
 
 test("each stream is split into lines on its own, across chunk and character boundaries", () => {
@@ -252,6 +336,19 @@ test("a Compose question in the tail names the foreground start as the way to an
   });
   expect(out.at(-1)).toBe(COMPOSE_CLIENT_PROMPT_HINT);
   expect(out).not.toContain(COMPOSE_CLIENT_FULL_OUTPUT_HINT);
+});
+
+test("a failed start names a question its quoted lines no longer show", () => {
+  const out = failureReport({
+    text: `Recreate (data will be lost)?\n${numbered(30)}\n`,
+    phase: "start",
+  });
+  expect(out[0]).toBe("docker compose output (last 20 lines):");
+  expect(out).not.toContain("  Recreate (data will be lost)?");
+  expect(out.slice(-2)).toEqual([
+    "Compose asked earlier: Recreate (data will be lost)?",
+    COMPOSE_CLIENT_PROMPT_HINT,
+  ]);
 });
 
 test("a failed start with no client output prints no tail and no hint", () => {

@@ -124,3 +124,61 @@ process.exit(0);`
     20_000
   );
 }
+
+/** A sink that keeps the text of both streams and records each `end`. */
+function textSink() {
+  const decoder = new TextDecoder();
+  const state = { text: "", ended: [] as string[] };
+  return {
+    state,
+    sink: {
+      write: (chunk: Uint8Array) => {
+        state.text += decoder.decode(chunk, { stream: true });
+      },
+      end: (stream: "stdout" | "stderr") => {
+        state.ended.push(stream);
+      },
+    },
+  };
+}
+
+test("an output sink waits for a descendant that writes after its parent exits", async () => {
+  const { run } = await import("../src/lib/shell.ts");
+  const { state, sink } = textSink();
+  // The shell exits at once; its background child writes 300 ms later.
+  const code = await run(
+    ["/bin/sh", "-c", "(sleep 0.3; echo late-line) & echo early-line"],
+    { stdin: "ignore", outputSink: sink }
+  );
+  expect(code).toBe(0);
+  expect(state.text).toContain("early-line");
+  expect(state.text).toContain("late-line");
+  expect(state.ended.sort()).toEqual(["stderr", "stdout"]);
+}, 10_000);
+
+test("an output sink stops waiting for a descendant that keeps the pipes open", async () => {
+  const { run } = await import("../src/lib/shell.ts");
+  const { state, sink } = textSink();
+  const started = performance.now();
+  let pid: number | undefined;
+  try {
+    const code = await run(["/bin/sh", "-c", "sleep 30 & echo $!"], {
+      stdin: "ignore",
+      outputSink: sink,
+    });
+    pid = Number.parseInt(state.text.trim(), 10);
+    expect(code).toBe(0);
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(Number.isInteger(pid)).toBe(true);
+    expect(state.ended.sort()).toEqual(["stderr", "stdout"]);
+  } finally {
+    // Only the sleep this test started, by its recorded pid.
+    if (pid !== undefined && Number.isInteger(pid) && pid > 1) {
+      try {
+        process.kill(pid);
+      } catch {
+        // Already gone.
+      }
+    }
+  }
+}, 10_000);

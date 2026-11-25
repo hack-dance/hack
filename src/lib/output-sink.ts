@@ -1,6 +1,12 @@
 /** Receives a child's stdout and stderr chunks in place of this process's streams. */
 export interface OutputSink {
   write(chunk: Uint8Array, stream: "stdout" | "stderr"): void;
+  /**
+   * The command that fed `stream` has settled and the stream is no longer
+   * read, so an unterminated last line (such as a question Compose asked) is
+   * complete. Called once per stream per command, after its last `write`.
+   */
+  end?(stream: "stdout" | "stderr"): void;
 }
 
 /**
@@ -12,8 +18,9 @@ export const OUTPUT_DRAIN_GRACE_MS = 1000;
 /**
  * Reads both streams into `sink` as chunks arrive, so a chatty child never
  * blocks on a full pipe. `settle` is called once the command has exited: it
- * waits for both streams to end, at most `graceMs`, then cancels the readers.
- * A chunk the sink throws on is dropped; reading continues.
+ * waits for both streams to end, at most `graceMs`, then cancels the readers
+ * and calls the sink's `end` for each stream. A chunk the sink throws on is
+ * dropped; reading continues.
  */
 export function pumpOutput(opts: {
   readonly stdout: ReadableStream<Uint8Array>;
@@ -50,6 +57,14 @@ export function pumpOutput(opts: {
       } finally {
         clearTimeout(timer);
         await Promise.allSettled(readers.map(({ reader }) => reader.cancel()));
+        // A cancelled read resolves as done, so no write follows these.
+        for (const { stream } of readers) {
+          try {
+            opts.sink.end?.(stream);
+          } catch {
+            // The sink's own failure must not fail the command.
+          }
+        }
       }
     },
   };

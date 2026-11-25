@@ -33,10 +33,17 @@ case " $* " in
   *" down "*)
     : > "$state/down-ran"
     exit 0 ;;
-  *" up "*" --no-start"*)
+  *" up --no-start "*|*" up "*" --no-start "*)
     printf '%s\\n' 'compose-no-start-marker'
     if [ -n "\${STUB_WARN:-}" ]; then
       printf '%s\\n' 'WARN[0000] The "STUB_UNSET" variable is not set. Defaulting to a blank string.' >&2
+    fi
+    if [ -n "\${STUB_ASK:-}" ]; then
+      # Compose without a terminal on stdin: the question, no line break,
+      # then one read; end-of-input means its default answer.
+      printf '%s' "Volume \\"shop_db\\" exists but doesn't match configuration in compose file. Recreate (data will be lost)?"
+      if read -r answer; then : > "$state/answered"; else : > "$state/end-of-input"; fi
+      if [ -n "\${STUB_ASK_FAIL:-}" ]; then exit 1; fi
     fi
     exit 0 ;;
   *" up "*" -d "*|*" up -d"*)
@@ -897,3 +904,64 @@ test("a startup notice during a detached phase does not land on the transient wa
     notice
   );
 }, 20_000);
+
+const VOLUME_QUESTION =
+  'Volume "shop_db" exists but doesn\'t match configuration in compose file. Recreate (data will be lost)?';
+const PROMPT_HINT =
+  "Compose asked a question, and a detached `hack up` cannot answer it. Run `hack up` in the foreground to answer it.";
+
+test("a question Compose answered with its default during a successful detached start is reported", async () => {
+  const result = await cli(["up", "--detach"], {
+    STUB_UP_SECONDS: "0",
+    STUB_ASK: "1",
+  });
+  expect(result.exitCode, result.stderr).toBe(0);
+  // The closed stdin gave the client end-of-input, not an answer.
+  expect(await Bun.file(join(state, "end-of-input")).exists()).toBe(true);
+  expect(await Bun.file(join(state, "answered")).exists()).toBe(false);
+  const lines = result.stderr.split("\n");
+  // The question is its own line, not joined to the next phase's output.
+  expect(lines, result.stderr).toContain(
+    `! compose  unanswered question: ${VOLUME_QUESTION}`
+  );
+  expect(lines).toContain(
+    "A detached `hack up` cannot answer Compose's questions, so Compose went on with its default answer. To answer, run `hack up` in the foreground."
+  );
+  expect(result.stderr).not.toContain("compose-up-stdout-marker");
+}, 60_000);
+
+test("a failed detached start quotes the question Compose asked with the prompt hint", async () => {
+  const result = await cli(["up", "--detach"], {
+    STUB_UP_SECONDS: "0",
+    STUB_ASK: "1",
+    STUB_ASK_FAIL: "1",
+  });
+  expect(result.exitCode).toBe(1);
+  const lines = result.stderr.split("\n");
+  const heading = lines.findIndex((line) =>
+    line.startsWith("docker compose output (last ")
+  );
+  expect(heading, result.stderr).toBeGreaterThanOrEqual(0);
+  expect(lines.slice(heading + 1, heading + 4)).toEqual([
+    "  compose-no-start-marker",
+    `  ${VOLUME_QUESTION}`,
+    PROMPT_HINT,
+  ]);
+}, 60_000);
+
+test("a failed start names a question Compose asked before its quoted lines", async () => {
+  const result = await cli(["up", "--detach"], {
+    STUB_UP_SECONDS: "0",
+    STUB_ASK: "1",
+    STUB_UP_FAIL: "1",
+  });
+  expect(result.exitCode).toBe(1);
+  const lines = result.stderr.split("\n");
+  const heading = lines.indexOf("docker compose output (last 20 lines):");
+  expect(heading, result.stderr).toBeGreaterThanOrEqual(0);
+  // The images phase asked; the start phase's 26 lines pushed it out.
+  expect(lines.slice(heading + 21, heading + 23)).toEqual([
+    `Compose asked earlier: ${VOLUME_QUESTION}`,
+    PROMPT_HINT,
+  ]);
+}, 60_000);

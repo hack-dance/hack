@@ -73,9 +73,11 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
   /**
    * Detached only: receives the Compose client's stdout and stderr for the
    * images and start phases instead of the terminal. Their stdin is then
-   * closed, so a client prompt fails instead of waiting unseen. The caller
-   * reports progress from its own observations and quotes what the sink kept
-   * only when the start fails.
+   * closed, so a client question reads end-of-input instead of waiting
+   * unseen: Compose either fails or goes on with its default answer. The
+   * caller reports progress from its own observations, quotes what the sink
+   * kept when the start fails, and repeats its warnings and unanswered
+   * questions when it succeeds.
    */
   readonly clientOutput?: OutputSink;
   /**

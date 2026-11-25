@@ -83,8 +83,10 @@ secret values and secret-looking values replaced by `[REDACTED]`. For
 Compose's full output, run `hack up` in the foreground or
 `hack up --detach --json`: both still pass the client's output through. A
 detached start cannot answer a Compose question, such as whether to recreate a
-volume: Compose reads no input and the start fails. Run `hack up` in the
-foreground to answer it. A successful start ends with the primary address,
+volume: Compose reads no input, then either fails or goes on with its default
+answer. Either way Hack repeats the question (a successful start prints it as a
+`! compose  unanswered question:` line). Run `hack up` in the foreground to
+answer it. A successful start ends with the primary address,
 startup time, and count of configured routes for running services whose HTTP
 readiness has yet to be checked. The command makes no HTTP request to warm the
 routes. A detached native start reports its primary served HTTPS address and

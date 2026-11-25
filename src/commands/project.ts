@@ -287,6 +287,7 @@ import {
   type ComposeClientCapture,
   openComposeClientCapture,
   writeComposeClientFailure,
+  writeComposeClientQuestions,
   writeComposeClientWarnings,
 } from "../lib/compose-client-output.ts";
 import { runningComposeDirectAccess } from "../lib/compose-direct-access.ts";
@@ -9553,6 +9554,10 @@ async function runResolvedComposeUp({
     if (clientOutput) {
       writeComposeClientWarnings(
         clientOutput.warnings({ redactValues: quoteRedactValues })
+      );
+      // Compose went on with its default answer to each of these.
+      writeComposeClientQuestions(
+        clientOutput.questions({ redactValues: quoteRedactValues })
       );
     }
 

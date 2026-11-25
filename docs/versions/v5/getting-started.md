@@ -72,8 +72,14 @@ hack ps
 hack open
 ```
 
-Detached Compose `hack up` reports completed hooks by name and lists services
-after confirming startup. A successful start ends with the primary address,
+Detached Compose `hack up` reports completed hooks by name, prints an `images`
+row when images are built or pulled and containers created, and lists services
+after confirming startup. It does not pass through the Docker Compose client's
+own lines. A successful start repeats each Compose warning (such as an unset
+variable) once, as a `! compose` line. A failed start shows the client's last
+20 lines before the reason, with escapes removed and credentials in URLs and
+secret-looking values replaced by `[REDACTED]`. `--json` and foreground starts
+still pass the client's output through. A successful start ends with the primary address,
 startup time, and count of configured routes for running services whose HTTP
 readiness has yet to be checked. The command makes no HTTP request to warm the
 routes. A detached native start reports its primary served HTTPS address and

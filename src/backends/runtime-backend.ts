@@ -21,7 +21,7 @@ import {
 import { withDependencyStartupProgress } from "../lib/dependency-startup-progress.ts";
 import { reportLifecycleProgress } from "../lib/lifecycle-progress.ts";
 import { childStdoutTarget } from "../lib/machine-stdout.ts";
-import { exec, run } from "../lib/shell.ts";
+import { exec, type RunOptions, run } from "../lib/shell.ts";
 import { readLinesFromStream } from "../ui/lines.ts";
 import { createStructuredLogGrouper } from "../ui/log-group.ts";
 import {
@@ -69,6 +69,15 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
     readonly services: readonly string[];
   };
   readonly detach: boolean;
+  /**
+   * Detached only: an open descriptor (owned and closed by the caller after
+   * `up` settles) that receives the Compose client's stdout and stderr for
+   * the images and start phases instead of the terminal. Their stdin is then
+   * closed, so a client prompt fails instead of waiting unseen. The caller
+   * reports progress from its own observations and quotes the capture only
+   * when the start fails.
+   */
+  readonly clientOutputFd?: number;
   /** Detached `start` phase budget (container start and dependency wait). */
   readonly startupTimeoutMs?: number;
   /** Detached `images` phase budget (image build/pull and container creation). */
@@ -356,7 +365,7 @@ async function runComposeStartPhase(input: {
   const finished = run(input.cmd, {
     cwd: options.cwd,
     env: options.env,
-    stdout: childStdoutTarget(options.routeStdoutToStderr),
+    ...composeClientStdio(options),
     timeoutMs: ceilingMs,
     forwardSignals: true,
     settleProcessGroupOnCancel: true,
@@ -557,7 +566,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
         return run(cmd, {
           cwd: opts.cwd,
           env: opts.env,
-          stdout: childStdoutTarget(opts.routeStdoutToStderr),
+          ...composeClientStdio(opts),
           timeoutMs,
           forwardSignals: true,
           settleProcessGroupOnCancel: true,
@@ -798,6 +807,15 @@ function mergeSpawnEnv(
   override: Record<string, string> | undefined
 ): Record<string, string> {
   return childEnvironment(process.env, override);
+}
+
+/** Where a detached Compose phase's client stdio goes. */
+function composeClientStdio(
+  opts: RuntimeUpOptions
+): Pick<RunOptions, "stdin" | "stdout" | "outputFd"> {
+  return opts.clientOutputFd === undefined
+    ? { stdout: childStdoutTarget(opts.routeStdoutToStderr) }
+    : { stdin: "ignore", outputFd: opts.clientOutputFd };
 }
 
 /** `--wait` for `docker compose up -d`, only when asked. */

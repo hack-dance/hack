@@ -283,6 +283,12 @@ import {
   HackCliError,
   okResult,
 } from "../lib/cli-result.ts";
+import {
+  type ComposeClientCapture,
+  tryOpenComposeClientCapture,
+  writeComposeClientTail,
+  writeComposeClientWarnings,
+} from "../lib/compose-client-output.ts";
 import { runningComposeDirectAccess } from "../lib/compose-direct-access.ts";
 import {
   buildComposeDownFailure,
@@ -9163,6 +9169,7 @@ async function runResolvedComposeUp({
     });
   lifecycleSignalCleanup?.dispose();
   let signalCleanup = installOperationSignalCleanup();
+  let clientOutput: ComposeClientCapture | undefined;
   try {
     // After `up.before` hooks, which may start the engine, open the tunnel
     // DOCKER_HOST needs or create a shared network, and before any pull: name
@@ -9249,6 +9256,8 @@ async function runResolvedComposeUp({
     if (!progress) {
       reportComposeStartupBudget({ budgets, detach });
     }
+    // Human detached starts print Hack's rows instead of the client's lines.
+    clientOutput = progress ? tryOpenComposeClientCapture() : undefined;
     const upPhase = trackComposeStartupPhase();
     const launch = async (localFiles: readonly string[]) => {
       const composeFilesWithEnv = remoteStartup
@@ -9366,13 +9375,17 @@ async function runResolvedComposeUp({
             startupTimeoutMs,
             imageTimeoutMs: budgets.imageTimeoutMs,
             startupCeilingMs: budgets.startupCeilingMs,
-            onStartupPhase: upPhase.onStartupPhase,
+            onStartupPhase: (phase) => {
+              upPhase.onStartupPhase(phase);
+              progress?.phase(phase);
+            },
             onStartupProgress: upPhase.onStartupProgress,
             onStartupStalled: upPhase.onStartupStalled,
             composeFiles: composeFilesWithEnv,
             composeProject: composeProjectName,
             profiles,
             detach,
+            clientOutputFd: clientOutput?.fd,
             cwd: dirname(project.composeFile),
             env: envOverrides.env,
             routeStdoutToStderr: json,
@@ -9408,6 +9421,7 @@ async function runResolvedComposeUp({
       });
     };
     const guarded = await launchWithEnv().finally(async () => {
+      progress?.settle();
       foregroundReceiptStop.abort();
       try {
         await settlePublication();
@@ -9496,8 +9510,19 @@ async function runResolvedComposeUp({
           exitCode: upCode,
         });
       }
+      if (clientOutput && upCode !== 130 && upCode !== 143) {
+        // Enough of the client's own words to diagnose the failure.
+        writeComposeClientTail(
+          clientOutput.tail({ redactValues: preflightRedactValues })
+        );
+      }
       logger.error({ message: failure.message });
       return upCode;
+    }
+    if (clientOutput) {
+      writeComposeClientWarnings(
+        clientOutput.warnings({ redactValues: preflightRedactValues })
+      );
     }
 
     const containersStartedAt = performance.now();
@@ -9721,6 +9746,8 @@ async function runResolvedComposeUp({
     } finally {
       foregroundTermination.guard?.dispose();
       signalCleanup.dispose();
+      // Every Compose child that held the descriptor has exited by now.
+      clientOutput?.close();
     }
   }
 }

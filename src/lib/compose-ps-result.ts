@@ -354,12 +354,28 @@ export function engineErrorLine(opts: {
   readonly redactValues?: Iterable<string>;
 }): string | null {
   const source = cleanLines(opts.stderr).find(
-    (line) => !isWarningLine(line) && opts.matches(line.toLowerCase())
+    (line) => !isComposeWarningLine(line) && opts.matches(line.toLowerCase())
   );
   if (source === undefined) {
     return null;
   }
-  let line = source.replace(
+  return redactComposeOutputLine({
+    line: source,
+    redactValues: opts.redactValues,
+  });
+}
+
+/**
+ * One line of Docker or Compose client output made safe to quote: URL
+ * credentials and each `redactValues` entry (4 characters or longer, longest
+ * first) become `[REDACTED]`, and the line is cut to a bounded length. The
+ * caller removes escapes and control characters first.
+ */
+export function redactComposeOutputLine(opts: {
+  readonly line: string;
+  readonly redactValues?: Iterable<string>;
+}): string {
+  let line = opts.line.replace(
     URL_USERINFO,
     (_match, scheme: string) => `${scheme}[REDACTED]@`
   );
@@ -374,14 +390,14 @@ export function engineErrorLine(opts: {
     : line;
 }
 
+/** Compose/Docker warning lines: `WARN[0000] …`, `level=warning …`, `warning: …`. */
+export function isComposeWarningLine(line: string): boolean {
+  return WARNING_LINE.test(line);
+}
+
 function cleanLines(text: string): string[] {
   return text
     .split("\n")
     .map((raw) => raw.replace(ANSI_ESCAPE, "").trim())
     .filter((line) => line.length > 0);
-}
-
-/** Compose/Docker warning lines: `WARN[0000] …`, `level=warning …`, `warning: …`. */
-function isWarningLine(line: string): boolean {
-  return WARNING_LINE.test(line);
 }

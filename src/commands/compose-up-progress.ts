@@ -1,3 +1,4 @@
+import type { ComposeStartupPhase } from "../lib/compose-startup-budget.ts";
 import type { ProjectLifecycleCommand } from "../lib/project.ts";
 import { resolveLifecycleCommandServiceName } from "../lib/project-lifecycle-controller.ts";
 import { createTextOutput, formatDuration } from "../ui/text-output.ts";
@@ -51,9 +52,19 @@ export function createComposeUpProgress(opts: {
     }));
   const row = createTextOutput().stepRows([
     ...hookLabels("before", opts.before),
+    { name: "images" },
     ...opts.services.map((detail) => ({ name: "services", detail })),
     ...hookLabels("after", opts.after),
   ]);
+  // The Compose client's own lines are captured (HACK-2542), so its two
+  // detached phases show a transient wait here and the images phase closes
+  // with one row when the start phase begins.
+  let clearPhase: (() => void) | undefined;
+  let imagesStartedAt: number | undefined;
+  const settle = () => {
+    clearPhase?.();
+    clearPhase = undefined;
+  };
   const hook =
     (name: "before" | "after"): HookCompletion =>
     (detail, result, durationMs) =>
@@ -68,6 +79,26 @@ export function createComposeUpProgress(opts: {
       pending(`before ${service}`)) satisfies HookStart,
     afterStart: ((service) => pending(`after ${service}`)) satisfies HookStart,
     serviceWait: () => pending("services"),
+    /** The backend began a detached phase. */
+    phase(phase: ComposeStartupPhase): void {
+      settle();
+      if (phase === "images") {
+        imagesStartedAt = performance.now();
+        clearPhase = pending("images");
+        return;
+      }
+      if (imagesStartedAt !== undefined) {
+        row({
+          name: "images",
+          status: "ok",
+          result: `ready · ${formatDuration(performance.now() - imagesStartedAt)}`,
+        });
+        imagesStartedAt = undefined;
+      }
+      clearPhase = pending("services");
+    },
+    /** Compose returned or threw: drop any transient phase wait. */
+    settle,
     before: hook("before"),
     after: hook("after"),
     services(state: {

@@ -261,6 +261,13 @@ export interface RunOptions {
    */
   readonly stdout?: "inherit" | "stderr" | "ignore";
   readonly stderr?: "inherit" | "ignore";
+  /**
+   * Send the child's stdout and stderr to this open descriptor (for example
+   * an unlinked capture file) instead of this process's streams; it takes
+   * precedence over `stdout` and `stderr`. The caller owns the descriptor and
+   * closes it after the run settles. Works with and without a terminal group.
+   */
+  readonly outputFd?: number;
   /** Non-TTY owner-supplied descriptors. The caller holds them through settlement;
    * run captures numbers synchronously and never reopens names or closes the FDs. */
   readonly privateIo?: {
@@ -369,6 +376,7 @@ export async function run(
       env: buildSpawnEnv(options.env, options.unsetEnvKeys, options.hackReexec),
       stdout: options.stdout,
       stderr: options.stderr,
+      outputFd: options.outputFd,
       stdin: options.stdin,
       timeoutMs: options.timeoutMs,
       signal,
@@ -391,8 +399,13 @@ export async function run(
     stdin: options.privateIo?.stdin ?? options.stdin ?? "inherit",
     stdout:
       options.privateIo?.stdout ??
+      options.outputFd ??
       (options.stdout === "stderr" ? 2 : (options.stdout ?? "inherit")),
-    stderr: options.privateIo?.stderr ?? options.stderr ?? "inherit",
+    stderr:
+      options.privateIo?.stderr ??
+      options.outputFd ??
+      options.stderr ??
+      "inherit",
     detached: ownsProcessGroup,
   });
   const observeCpu = beginNativeCpuChild(

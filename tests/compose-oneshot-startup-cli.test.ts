@@ -31,11 +31,28 @@ case " $* " in
   *" down "*)
     : > "$state/down-ran"
     exit 0 ;;
-  *" up "*" --no-start"*) exit 0 ;;
+  *" up "*" --no-start"*)
+    printf '%s\\n' 'compose-no-start-marker'
+    if [ -n "\${STUB_WARN:-}" ]; then
+      printf '%s\\n' 'WARN[0000] The "STUB_UNSET" variable is not set. Defaulting to a blank string.' >&2
+    fi
+    exit 0 ;;
   *" up "*" -d "*|*" up -d"*)
     rm -f "$state/down-ran"
     : > "$state/up-started"
     printf '%s\\n' 'compose-up-stdout-marker'
+    if [ -n "\${STUB_WARN:-}" ]; then
+      printf '%s\\n' 'time="2026-01-01T00:00:00Z" level=warning msg="The \\"STUB_UNSET\\" variable is not set. Defaulting to a blank string."' >&2
+    fi
+    if [ -n "\${STUB_UP_FAIL:-}" ]; then
+      i=1
+      while [ "$i" -le 25 ]; do
+        printf 'client line %s\\n' "$i" >&2
+        i=$((i + 1))
+      done
+      printf '\\033[31mpull access denied for https://someone:hunter2@registry.invalid/app, token fixture-secret-value\\033[0m\\n' >&2
+      exit 1
+    fi
     sleep "\${STUB_UP_SECONDS:-1}"
     : > "$state/up-done"
     exit 0 ;;
@@ -669,9 +686,21 @@ test("Compose closes a confirmed start and stop with plain lifecycle lines", asy
   const service = output.findIndex((line) =>
     /^✓ services +api +up$/.test(line)
   );
+  const images = output.findIndex((line) =>
+    /^✓ images +ready · \d+\.\ds$/.test(line)
+  );
+  // HACK-2542: the Compose client's own lines are not passed through.
+  for (const marker of [
+    "compose-no-start-marker",
+    "compose-up-stdout-marker",
+  ]) {
+    expect(up.stdout).not.toContain(marker);
+    expect(up.stderr).not.toContain(marker);
+  }
   expect(output.indexOf("before output")).toBeGreaterThanOrEqual(0);
   expect(before).toBeGreaterThan(output.indexOf("before output"));
-  expect(migration).toBeGreaterThan(before);
+  expect(images).toBeGreaterThan(before);
+  expect(migration).toBeGreaterThan(images);
   expect(service).toBeGreaterThan(migration);
   expect(output.indexOf("after output")).toBeGreaterThan(service);
   expect(after).toBeGreaterThan(output.indexOf("after output"));
@@ -739,6 +768,11 @@ test("detached Compose up clears its transient hook and service waits on a TTY",
   );
   expect(result.stdout).toContain(`${erase}services ...${erase}✓ services`);
   expect(result.stdout).toContain(`${erase}after verify ...${erase}✓ after`);
+  // Through the terminal-group runner too, the client's lines stay captured
+  // and each detached phase shows only a transient wait.
+  expect(result.stdout).toContain(`${erase}images ...${erase}✓ images`);
+  expect(result.stdout).not.toContain("compose-no-start-marker");
+  expect(result.stdout).not.toContain("compose-up-stdout-marker");
   expect(result.stdout.indexOf("before prepare ...")).toBeLessThan(
     result.stdout.indexOf("services ...")
   );
@@ -746,3 +780,46 @@ test("detached Compose up clears its transient hook and service waits on a TTY",
     result.stdout.indexOf("after verify ...")
   );
 }, 20_000);
+
+test("a failed detached Compose start quotes the client's last lines, redacted, before the reason", async () => {
+  const result = await cli(["up", "--detach"], {
+    STUB_UP_SECONDS: "0",
+    STUB_UP_FAIL: "1",
+    STUB_API_TOKEN: "fixture-secret-value",
+  });
+  expect(result.exitCode).toBe(1);
+  expect(result.stdout).not.toContain("client line");
+  const lines = result.stderr.split("\n");
+  const heading = lines.indexOf("docker compose output (last 20 lines):");
+  expect(heading, result.stderr).toBeGreaterThanOrEqual(0);
+  const quoted = lines.slice(heading + 1, heading + 21);
+  expect(quoted[0]).toBe("  client line 7");
+  expect(quoted[18]).toBe("  client line 25");
+  expect(quoted[19]).toBe(
+    "  pull access denied for https://[REDACTED]@registry.invalid/app, token [REDACTED]"
+  );
+  expect(lines).not.toContain("  client line 6");
+  expect(result.stderr).not.toContain("hunter2");
+  expect(result.stderr).not.toContain("fixture-secret-value");
+  expect(result.stderr).not.toContain("\x1b[31m");
+  // Hack's own reason is still reported after the quoted lines.
+  expect(result.stdout + lines.slice(heading + 21).join("\n")).toContain(
+    "docker compose up"
+  );
+}, 60_000);
+
+test("a successful detached Compose start repeats each client warning once", async () => {
+  const result = await cli(["up", "--detach"], {
+    STUB_UP_SECONDS: "0",
+    STUB_WARN: "1",
+  });
+  expect(result.exitCode, result.stderr).toBe(0);
+  const warnings = result.stderr
+    .split("\n")
+    .filter((line) => line.startsWith("! compose"));
+  expect(warnings).toEqual([
+    '! compose  The "STUB_UNSET" variable is not set. Defaulting to a blank string.',
+  ]);
+  expect(result.stderr).not.toContain("WARN[0000]");
+  expect(result.stderr).not.toContain("level=warning");
+}, 60_000);

@@ -512,7 +512,10 @@ fn compact_add_replays_the_converted_share_after_record_commit() {
     let owner = Owner::load(&candidate).unwrap();
     assert_eq!(owner.socket_layout, super::super::PoolLayout::CompactV1);
     let compact_second = f.second.clone().with_layout(owner.socket_layout).unwrap();
-    assert_eq!(owner.additional_project_shares, [compact_second.clone()]);
+    assert_eq!(
+        owner.additional_project_shares,
+        std::slice::from_ref(&compact_second)
+    );
 
     let db = network_update::database(&candidate);
     let record = config_audit::read_database(&db, &owner.machine).unwrap();

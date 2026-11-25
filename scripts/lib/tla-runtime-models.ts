@@ -3034,19 +3034,25 @@ const contracts: readonly ModelContract[] = [
   },
   {
     // HACK-2097: `down --recover` after a lost foreground whose graph owner
-    // still runs and then stops itself, dies part-way or loses its publication.
-    // `negative` is the code before: a running selection whose stop found the
-    // owner gone refused. `unconfirmed-absent` accepts a retired publication
+    // still runs and then stops itself (its publication reading `uncertain`
+    // mid-retirement), dies at any point of its run or its stop, or loses its
+    // publication. `negative` is the code before: a running selection whose
+    // stop found the owner gone refused without naming a working step.
+    // `no-settle` reselects without the bounded wait and refuses an owner
+    // still exiting. `unconfirmed-absent` accepts a retired publication
     // without the stopped-receipt check and reports a false success.
     name: "native-down-lost-frontend",
     module: "DownLostFrontend",
-    states: 27,
+    states: 57,
     invariant: "NoDeadEnd",
-    fields: ['pc = "refused"', "vanished = FALSE", 'owner = "absent"'],
-    alternativeWitnesses: [
-      ['pc = "refused"', "vanished = FALSE", 'owner = "exited"'],
-    ],
+    fields: ['pc = "refused"', 'why = "unnamed"', "reselected = FALSE"],
     additionalControls: [
+      {
+        name: "no-settle",
+        negative: true,
+        invariant: "NoDeadEnd",
+        fields: ['pc = "refused"', 'why = "unnamed"', "reselected = TRUE"],
+      },
       {
         name: "unconfirmed-absent",
         negative: true,

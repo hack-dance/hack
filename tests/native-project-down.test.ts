@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  NATIVE_OWNER_EXIT_NOTICE,
   nativeDownEnvironment,
   nativeProjectDown,
 } from "../src/backends/native-project-down.ts";
@@ -1373,6 +1374,18 @@ test.each([
     text: "run hack down --recover again",
   },
   {
+    // HACK-2097: its start settled; it died after writing its cleanup intent.
+    name: "an owner that died during its own stop",
+    selection: ownerSelection("exited", "cleanup-intent"),
+    text: "exited during its own stop (receipt cleanup-intent)",
+  },
+  {
+    // The explicit cleanup refuses a restore in progress, so it is not named.
+    name: "an owner that died while restoring",
+    selection: ownerSelection("exited", "restoring"),
+    text: "exited while restoring or restarting its retained run (receipt restoring)",
+  },
+  {
     name: "an unclassified publication",
     selection: ownerSelection("uncertain"),
     text: "cannot confirm this run's foreground owner state",
@@ -2587,16 +2600,35 @@ test("a frontend lost in the window: plain down recovers it as down --recover do
 // `down --recover` that follows can select it running and then reach it after it
 // stopped (publication retired) or after it died mid-way (publication left).
 async function lostForegroundDown(opts: {
-  readonly reselected: ReturnType<typeof ownerSelection>;
+  /** The selections after the stop went unanswered; the last one repeats. */
+  readonly reselections: readonly ReturnType<typeof ownerSelection>[];
+  readonly recover?: boolean;
+  /** False: the frontend is alive, so plain down selects only after the stop. */
+  readonly lostFrontend?: boolean;
+  /** False: an absent owner left the graph ready (a torn retirement). */
+  readonly stoppedByOwner?: boolean;
+  readonly ownerExitWaitMs?: number;
 }) {
   const fx = await fixture();
-  await deadFrontend(fx.scope);
+  const lostFrontend = opts.lostFrontend !== false;
+  if (lostFrontend) {
+    await deadFrontend(fx.scope);
+  }
+  const recover = opts.recover ?? true;
+  // The first selection, before the stop, saw the owner running.
+  const selectsFirst = lostFrontend || recover;
   const calls: string[] = [];
   const events: string[] = [];
+  const notices: string[] = [];
   let stopped = false;
+  let selections = 0;
   const down = nativeProjectDown({
     ...fx,
-    recover: true,
+    recover,
+    ownerExitWaitMs: opts.ownerExitWaitMs ?? 0,
+    notice: (line) => {
+      notices.push(line);
+    },
     before: async () => {
       events.push("before");
     },
@@ -2610,13 +2642,27 @@ async function lostForegroundDown(opts: {
       const command = request.args[1]!;
       calls.push(command);
       if (command === "foreground-owner") {
+        selections += 1;
         // Running at the first selection; the owner then stops on its own.
-        return calls.filter((c) => c === "foreground-owner").length === 1
-          ? ownerSelection("running")
-          : opts.reselected;
+        if (selectsFirst && selections === 1) {
+          return ownerSelection("running");
+        }
+        const selection =
+          opts.reselections[
+            Math.min(
+              selections - (selectsFirst ? 2 : 1),
+              opts.reselections.length - 1
+            )
+          ]!;
+        if (
+          selection.foreground === "absent" &&
+          opts.stoppedByOwner !== false
+        ) {
+          stopped = true;
+        }
+        return selection;
       }
       if (command === "cleanup") {
-        stopped = opts.reselected.foreground === "absent";
         throw new NativeRuntimeRequestError({
           message: "Native runtime request failed (graph_owner_recovery).",
           nativeCode: "graph_owner_recovery",
@@ -2649,8 +2695,11 @@ async function lostForegroundDown(opts: {
       return snapshot(stopped);
     },
   });
-  return { fx, calls, events, down };
+  return { fx, calls, events, notices, down };
 }
+
+const selectionCount = (calls: readonly string[]) =>
+  calls.filter((c) => c === "foreground-owner").length;
 
 /** The lost frontend's lifetime is recovered, so the next `up` can register its own. */
 async function expectFrontendRecovered(scope: NativeProjectRunScope) {
@@ -2659,11 +2708,12 @@ async function expectFrontendRecovered(scope: NativeProjectRunScope) {
 }
 
 test("lost foreground, live owner: down --recover completes when the owner stopped itself before the stop arrived", async () => {
-  const { fx, calls, events, down } = await lostForegroundDown({
-    reselected: ownerSelection("absent", "stopped-data-retained"),
+  const { fx, calls, events, notices, down } = await lostForegroundDown({
+    reselections: [ownerSelection("absent", "stopped-data-retained")],
   });
   expect(await down).toMatchObject({ status: "stopped", dataPreserved: true });
-  expect(calls.filter((c) => c === "foreground-owner")).toHaveLength(2);
+  expect(selectionCount(calls)).toBe(2);
+  expect(notices).toEqual([]);
   expect(calls).not.toContain("recover-live-owner");
   expect(calls).not.toContain("retire-unadmitted-owner");
   // Cleanup was asked once and never replayed; the stop is confirmed after.
@@ -2677,7 +2727,7 @@ test("lost foreground, live owner: down --recover completes when the owner stopp
 
 test("lost foreground, live owner: down --recover recovers an owner that died before the stop arrived", async () => {
   const { fx, calls, events, down } = await lostForegroundDown({
-    reselected: ownerSelection("exited"),
+    reselections: [ownerSelection("exited")],
   });
   expect(await down).toMatchObject({ status: "stopped", dataPreserved: true });
   expect(calls.indexOf("cleanup")).toBeLessThan(
@@ -2687,16 +2737,131 @@ test("lost foreground, live owner: down --recover recovers an owner that died be
   await expectFrontendRecovered(fx.scope);
 });
 
-test("lost foreground, live owner: an owner still running after a refused stop is not treated as dead", async () => {
+test("lost foreground, live owner: an owner still running after the bounded wait is not treated as dead and names the rerun", async () => {
   const { fx, calls, events, down } = await lostForegroundDown({
-    reselected: ownerSelection("running"),
+    reselections: [ownerSelection("running")],
   });
   await expectClosedRefusal(
     down,
-    "cannot confirm this run's foreground owner state"
+    "Native down --recover found this run's foreground owner still running or retiring its publication after it stopped answering; retained data was not changed and nothing was replayed. Run hack ps --json, wait for the owner to exit, then run hack down --recover again."
   );
   expect(calls).not.toContain("recover-live-owner");
   expect(calls).not.toContain("retire-unadmitted-owner");
+  expect(calls.filter((c) => c === "cleanup")).toHaveLength(1);
+  expect(events).toEqual(["before"]);
+  expect(await loadNativeProjectRun(fx.scope)).toEqual(run);
+});
+
+test("lost foreground, live owner: down --recover waits while the owner finishes its stop and retires its publication", async () => {
+  // Still running (its stop in progress), then its publication read
+  // mid-retirement (`uncertain` over the stopped receipt), then gone.
+  const { fx, calls, events, notices, down } = await lostForegroundDown({
+    reselections: [
+      ownerSelection("running"),
+      ownerSelection("uncertain", "stopped-data-retained"),
+      ownerSelection("absent", "stopped-data-retained"),
+    ],
+    ownerExitWaitMs: 10_000,
+  });
+  expect(await down).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(selectionCount(calls)).toBe(4);
+  expect(notices).toEqual([NATIVE_OWNER_EXIT_NOTICE]);
+  // A publication read mid-change is never retired as an unadmitted owner.
+  expect(calls).not.toContain("retire-unadmitted-owner");
+  expect(calls).not.toContain("recover-live-owner");
+  expect(calls.filter((c) => c === "cleanup")).toHaveLength(1);
+  expect(events.slice(0, 3)).toEqual(["before", "retire-host", "after"]);
+  await expectFrontendRecovered(fx.scope);
+});
+
+test("lost foreground, live owner: a publication still uncertain after the bounded wait refuses with the rerun step", async () => {
+  const { fx, calls, events, notices, down } = await lostForegroundDown({
+    reselections: [ownerSelection("uncertain", "stopped-data-retained")],
+    ownerExitWaitMs: 300,
+  });
+  await expectClosedRefusal(
+    down,
+    "wait for the owner to exit, then run hack down --recover again"
+  );
+  // It polled within the bound instead of refusing at the first read.
+  expect(selectionCount(calls)).toBeGreaterThan(2);
+  expect(notices).toEqual([NATIVE_OWNER_EXIT_NOTICE]);
+  expect(calls).not.toContain("retire-unadmitted-owner");
+  expect(calls).not.toContain("recover-live-owner");
+  expect(events).toEqual(["before"]);
+  expect(await loadNativeProjectRun(fx.scope)).toEqual(run);
+});
+
+test("lost foreground, live owner: an owner that died during its own stop is diagnosed as such, not as an unconfirmed start", async () => {
+  // Its retaining cleanup wrote `cleanup-intent` before stopping anything.
+  const { fx, calls, events, down } = await lostForegroundDown({
+    reselections: [ownerSelection("exited", "cleanup-intent")],
+  });
+  const error = await expectClosedRefusal(
+    down,
+    "Native down --recover found that this run's foreground owner exited during its own stop (receipt cleanup-intent); retained data and evidence were kept and nothing was replayed."
+  );
+  expect(error.message).toContain(
+    "native-candidate.md#explicit-cleanup-after-a-dead-foreground-owner"
+  );
+  expect(error.message).not.toContain("before its start was confirmed");
+  expect(error.message).not.toContain("never settled");
+  expect(calls).not.toContain("recover-live-owner");
+  expect(events).toEqual(["before"]);
+  expect(await loadNativeProjectRun(fx.scope)).toEqual(run);
+});
+
+test("lost foreground, live owner: plain down completes when the owner stopped itself, and its refusals name plain down", async () => {
+  const stoppedItself = await lostForegroundDown({
+    recover: false,
+    reselections: [ownerSelection("absent", "stopped-data-retained")],
+  });
+  expect(await stoppedItself.down).toMatchObject({
+    status: "stopped",
+    dataPreserved: true,
+  });
+  expect(selectionCount(stoppedItself.calls)).toBe(2);
+  expect(stoppedItself.calls).not.toContain("recover-live-owner");
+  await expectFrontendRecovered(stoppedItself.fx.scope);
+
+  const stillRunning = await lostForegroundDown({
+    recover: false,
+    reselections: [ownerSelection("running")],
+  });
+  const error = await expectClosedRefusal(
+    stillRunning.down,
+    "Native down found this run's foreground owner still running"
+  );
+  expect(error.message).toContain("then run hack down again.");
+  expect(error.message).not.toContain("--recover");
+});
+
+test("plain down with a live frontend accepts an owner that retired itself before its stop arrived", async () => {
+  // No selection before the stop; the one after it finds the owner gone.
+  const { calls, down } = await lostForegroundDown({
+    recover: false,
+    lostFrontend: false,
+    reselections: [ownerSelection("absent", "stopped-data-retained")],
+  });
+  expect(await down).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(calls.indexOf("cleanup")).toBeLessThan(
+    calls.indexOf("foreground-owner")
+  );
+  expect(selectionCount(calls)).toBe(1);
+  // The stopped receipt is confirmed after the selection, never assumed.
+  expect(calls[calls.indexOf("foreground-owner") + 1]).toBe("inspect");
+});
+
+test("lost foreground, live owner: an absent owner whose graph is still ready refuses without recovery (unconfirmed-absent control)", async () => {
+  // A torn retirement: the publication is gone, the receipt still ready.
+  const { fx, calls, events, down } = await lostForegroundDown({
+    reselections: [ownerSelection("absent")],
+    stoppedByOwner: false,
+  });
+  await expectClosedRefusal(down, "Native down cleanup is unconfirmed");
+  expect(calls).not.toContain("recover-live-owner");
+  expect(calls).not.toContain("retire-unadmitted-owner");
+  expect(calls.filter((c) => c === "cleanup")).toHaveLength(1);
   expect(events).toEqual(["before"]);
   expect(await loadNativeProjectRun(fx.scope)).toEqual(run);
 });

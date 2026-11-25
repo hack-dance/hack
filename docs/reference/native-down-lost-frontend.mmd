@@ -7,38 +7,48 @@ stateDiagram-v2
     classDef wait stroke-width:1.6px
     classDef fail stroke-width:1.6px
 
-    [*] --> select : lost up, owner runs
-    select --> confirm : [stopped]
-    select --> recover : [exited]
-    select --> stop : [running]
-    stop --> confirm : owner stops
-    stop --> reselect : owner gone, once
+    [*] --> stop : first select saw running
+    stop --> confirm : owner answers
+    stop --> reselect : owner left stop unanswered
+    reselect --> reselect : poll while settling
+    reselect --> exiting : settling at bound
+    exiting --> reselect : owner exited, rerun
     reselect --> confirm : [absent]
-    reselect --> recover : [exited]
-    reselect --> refused : [running]
+    reselect --> recover : [exited, ready]
+    reselect --> retire : [exited, retained]
+    reselect --> midstop : exited mid-stop
     recover --> confirm : death proved
+    retire --> confirm : death proved
     confirm --> done : [stopped]
-    confirm --> refused : [not stopped]
+    confirm --> torn : [not stopped]
     done --> [*]
 
     note right of reselect
-        HACK-2097: the owner stopped
-        itself or died after the first
-        selection. Before this fix the
-        down refused here.
+        HACK-2097: wait at most 15 s
+        while the owner finishes its
+        own stop and retires its
+        publication. Never recovered
+        while running or uncertain.
     end note
     note right of done
         Data retained, frontend
         shutdown recovered; hack up
         starts the run again.
     end note
-    note left of refused
-        INV NoDeadEnd: only a torn
-        publication retirement ends
-        here, with nothing replayed.
+    note left of midstop
+        Died during its own stop:
+        refusal names the explicit
+        dead-owner cleanup.
+    end note
+    note left of torn
+        INV NoDeadEnd: every refusal
+        names a working step.
     end note
 
     class done ok
     class reselect wait
     class recover wait
-    class refused fail
+    class retire wait
+    class exiting wait
+    class midstop fail
+    class torn fail

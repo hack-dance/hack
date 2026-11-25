@@ -58,6 +58,14 @@ test("a refused same-boot recovery names a working sequence, not a fresh home (H
     "native-candidate.md#explicit-cleanup-after-a-dead-foreground-owner"
   );
   expect(hint).toContain("keeps the data in this home");
+  // Not every exited owner had an unsettled start, and the explicit cleanup
+  // does not admit a restore or restart in progress.
+  expect(hint).not.toContain("never settled");
+  expect(hint).toContain("cannot be recovered in this boot");
+  expect(hint).toContain("an owner that died during its own stop");
+  expect(hint).toContain(
+    "An owner that died while restoring or restarting a retained run has no supported retirement"
+  );
   // The old answer abandoned the run: a second checkout in a fresh home.
   expect(hint).not.toContain("separate project checkout");
   expect(hint).not.toContain("fresh native home");

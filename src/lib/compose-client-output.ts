@@ -242,12 +242,18 @@ export function openComposeClientCapture(): ComposeClientCapture {
       if (!open) {
         return [];
       }
+      // Find each question on the whole retained line first: sanitizing cuts a
+      // line to its display length, which can drop a long question's `?`.
+      // Only the question text is then redacted and cut for display.
+      const questions = [...warningLines, ...pending()]
+        .map(cleanComposeClientLine)
+        .flatMap((line) => {
+          const question = composeQuestionText(line);
+          return question === undefined ? [] : [question];
+        });
       const lines = sanitizeComposeClientLines({
-        text: [...warningLines, ...pending()].join("\n"),
+        text: questions.join("\n"),
         redactValues: opts?.redactValues,
-      }).flatMap((line) => {
-        const question = composeQuestionText(line);
-        return question === undefined ? [] : [question];
       });
       return [...new Set(lines)].slice(
         0,

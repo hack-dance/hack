@@ -189,6 +189,24 @@ test("a question that Compose's next progress text joined on the same line is st
   }
 });
 
+test("a question longer than the display limit is still reported", () => {
+  const volume = `v${"x".repeat(150)}`;
+  const long = `Volume "${volume}" exists but doesn't match configuration in compose file. Recreate (data will be lost)? Container app-1 Running `;
+  expect(long.length).toBeGreaterThan(240);
+  const capture = openComposeClientCapture();
+  try {
+    feed(capture, long, "stderr");
+    capture.end?.("stderr");
+    const questions = capture.questions();
+    expect(questions).toHaveLength(1);
+    expect(questions[0]?.startsWith(`Volume "${volume.slice(0, 40)}`)).toBe(
+      true
+    );
+  } finally {
+    capture.close();
+  }
+});
+
 test("a question without a line break is complete when its stream ends, and never joins the next phase", () => {
   const capture = openComposeClientCapture();
   try {

@@ -37,6 +37,7 @@ import {
   startNativeDetachedUp,
 } from "../../src/lib/native-detached-up.ts";
 
+import { NativeServiceExitedError } from "../../src/lib/native-service-exited.ts";
 import { NativeAuthoredAttemptLimitError } from "../../src/lib/native-up-refusals.ts";
 
 /**
@@ -542,6 +543,8 @@ if (role === "channel-holder") {
       "immediate-failure",
       "exit-first-failure",
       "failed-services",
+      "exited-service",
+      "exited-service-zero",
       "image-batch-errors",
       "prestart-refusal",
       "prestart-after-runtime",
@@ -730,6 +733,24 @@ if (role === "channel-holder") {
         process.off("SIGTERM", terminate);
         return 1;
       }
+      if (mode === "exited-service" || mode === "exited-service-zero") {
+        // HACK-2194: the service's own process exited. Its name and exit code
+        // cross IPC; its output, kept in the owner's message, never does.
+        nativeDetachedUpFailedServices(["api", "web"]);
+        const exited = new NativeServiceExitedError({
+          exited: [
+            { service: "web", exitCode: mode === "exited-service" ? 1 : 0 },
+          ],
+          alsoFailed: ["api", "web"],
+          nativeCode: "engine_rejected",
+          detached: false,
+        });
+        exited.message += "\nsynthetic-private-value";
+        await nativeDetachedUpFailure(exited);
+        server.stop(true);
+        process.off("SIGTERM", terminate);
+        return 1;
+      }
       if (mode === "unsafe-failure") {
         for (const value of [
           {
@@ -768,6 +789,44 @@ if (role === "channel-holder") {
             data: {
               code: "graph_port_publication",
               startupPhase: "unknown-phase",
+            },
+          },
+          // Exited services only with their own reason, and only names and
+          // integer exit codes.
+          {
+            kind: "failure",
+            data: {
+              code: "engine_rejected",
+              exitedServices: [{ service: "web", exitCode: 1 }],
+            },
+          },
+          {
+            kind: "failure",
+            data: {
+              code: "service_exited",
+              exitedServices: [{ service: "web", exitCode: "1" }],
+            },
+          },
+          {
+            kind: "failure",
+            data: {
+              code: "service_exited",
+              exitedServices: [
+                {
+                  service: "web",
+                  exitCode: 1,
+                  stderr: "synthetic-private-value",
+                },
+              ],
+            },
+          },
+          {
+            kind: "failure",
+            data: {
+              code: "service_exited",
+              exitedServices: [
+                { service: "synthetic private value", exitCode: 1 },
+              ],
             },
           },
         ]) {

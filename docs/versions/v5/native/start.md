@@ -112,6 +112,16 @@ If writable source sharing asks for consent, review the exact source roots and
 [sharing limits](full-reference.md#explicit-writable-development-source) before
 opting in. Check the app and saved data yourself; a running VM is not acceptance.
 
+If a service's own process exits before the start is ready, for example because
+its command names a script that does not exist, `up` stops the failed start and
+fails with `E_SERVICE_EXITED`. The message names each service and its exit code
+("Service app exited with code 1 during startup"). An exit with code 0 before
+readiness is reported the same way. With `--json`, `error.detail.services` lists
+each service's `name` and `exitCode`, and `error.detail.nativeCode` keeps the
+runtime's own code. A foreground `up` also prints each failed service's last
+output lines with managed values redacted. A detached `up` never carries service
+output, so run `hack up` without `-d` in a terminal to see them.
+
 For a native project backed by a Compose file, use `hack up redis` or pass
 several service names to start that selection and its `depends_on` dependencies.
 Hack adds them to the current run if the project is already up. Running services

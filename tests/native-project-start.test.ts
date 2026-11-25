@@ -63,6 +63,7 @@ import {
   parseNativeHttpsSelection,
   prepareNativeProjectServices,
   reviewedNativeHttpsRoutes,
+  serviceExitedFailure,
   startedServiceSummary,
   startNativeProject,
   verifyHttpsRoutes,
@@ -2550,6 +2551,140 @@ test("failed services' output is printed with managed values redacted and never 
     const text = await readFile(file, "utf8");
     expect(text).not.toContain("boot failed");
     expect(text).not.toContain("synthetic-secret");
+  }
+});
+
+// HACK-2194: a service whose own command exits is its own failure, not the
+// runtime's code for a later engine call.
+for (const { exitCode, phrase } of [
+  { exitCode: 1, phrase: "exited with code 1 during startup" },
+  { exitCode: 0, phrase: "exited with code 0 before it was ready" },
+]) {
+  test(`a service that exits ${exitCode} during startup is reported as E_SERVICE_EXITED with its last lines`, async () => {
+    const { opts, events } = await fixture();
+    const invoke = opts.dependencies.invoke!;
+    let selectedRun = "";
+    opts.dependencies.serve = async (request) => {
+      selectedRun = request.run;
+      request.onStartupLogs?.([
+        {
+          service: "web",
+          stdout: "",
+          stderr: 'error: Script not found "dev" TOKEN=synthetic-secret',
+          truncated: false,
+          exitCode,
+        },
+        { service: "worker", stdout: "", stderr: "", truncated: false },
+      ]);
+      request.onExitDiagnostic?.({
+        exitCode: 1,
+        nativeCode: "engine_rejected",
+      });
+      throw new NativeRuntimeRequestError({
+        message:
+          "Native graph startup was interrupted or failed (engine_rejected); inspect owned state before retrying.",
+        nativeCode: "engine_rejected",
+      });
+    };
+    opts.dependencies.invoke = async (request) =>
+      request.args[1] === "inspect"
+        ? stoppedGraph({
+            run: selectedRun,
+            owner: "c".repeat(32),
+            namespace: "b".repeat(64),
+            planId: "a".repeat(64),
+            effectiveEnvName: null,
+            profiles: [],
+            aws: null,
+          })
+        : invoke(request);
+    const failure = await startNativeProject(opts).catch(
+      (error: unknown) => error
+    );
+    expect(failure).toBeInstanceOf(HackCliError);
+    const error = failure as HackCliError;
+    expect(error.code).toBe("E_SERVICE_EXITED");
+    expect(error.detail).toEqual({
+      reason: "service_exited",
+      services: [{ name: "web", exitCode }],
+      alsoFailed: ["worker"],
+      nativeCode: "engine_rejected",
+    });
+    const [headline, ...report] = error.message.split("\n");
+    expect(headline).toBe(
+      `Service web ${phrase}. Also failed during startup: worker. The failed start was stopped. Fix the service's command or configuration and run hack up again.`
+    );
+    expect(error.message).not.toContain("engine_rejected");
+    expect(error.message).not.toContain("retained");
+    expect(report).toEqual([
+      "Last output of failed services (at most 64 lines each; managed values redacted; not saved):",
+      "--- web stderr ---",
+      'error: Script not found "dev" TOKEN=[REDACTED]',
+      "--- worker ---",
+      "(no output)",
+    ]);
+    expect(error.message).not.toContain("synthetic-secret");
+    expect(events.at(-1)).toBe("cleanup");
+  });
+}
+
+test("a failed service without an exit status keeps the runtime's startup failure", async () => {
+  const { opts } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  let selectedRun = "";
+  opts.dependencies.serve = async (request) => {
+    selectedRun = request.run;
+    request.onStartupLogs?.([
+      { service: "web", stdout: "", stderr: "killed", truncated: false },
+    ]);
+    throw new NativeRuntimeRequestError({
+      message:
+        "Native graph startup was interrupted or failed (graph_service_failed); inspect owned state before retrying.",
+      nativeCode: "graph_service_failed",
+    });
+  };
+  opts.dependencies.invoke = async (request) =>
+    request.args[1] === "inspect"
+      ? stoppedGraph({
+          run: selectedRun,
+          owner: "c".repeat(32),
+          namespace: "b".repeat(64),
+          planId: "a".repeat(64),
+          effectiveEnvName: null,
+          profiles: [],
+          aws: null,
+        })
+      : invoke(request);
+  const failure = await startNativeProject(opts).catch(
+    (error: unknown) => error
+  );
+  expect(failure).toBeInstanceOf(NativeRuntimeRequestError);
+  expect((failure as Error).message).toContain("(graph_service_failed)");
+});
+
+test("only a confirmed-cleanup startup failure becomes E_SERVICE_EXITED", () => {
+  const startupFailure = new Error("startup");
+  const base = {
+    error: startupFailure,
+    startupFailure,
+    cleanupConfirmed: true,
+    aborted: false,
+    exited: [{ service: "web", exitCode: 2 }],
+    failed: ["web"],
+    nativeCode: "engine_rejected",
+  };
+  const exited = serviceExitedFailure(base);
+  expect(exited).toBeInstanceOf(HackCliError);
+  expect((exited as HackCliError).code).toBe("E_SERVICE_EXITED");
+  // Unconfirmed cleanup, a stop request, a later error or no exit: unchanged.
+  for (const change of [
+    { cleanupConfirmed: false },
+    { aborted: true },
+    { error: new Error("cleanup") },
+    { exited: [] },
+  ]) {
+    const original = change.error ?? startupFailure;
+    expect(serviceExitedFailure({ ...base, ...change })).toBe(original);
   }
 });
 

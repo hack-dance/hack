@@ -34,6 +34,11 @@ import {
   requireWrappableNativeProcesses,
 } from "../lib/native-process-wrappers.ts";
 import { nativeRuntimeTempDirectory } from "../lib/native-runtime-temp.ts";
+import {
+  type NativeExitedService,
+  NativeServiceExitedError,
+  nativeExitedServices,
+} from "../lib/native-service-exited.ts";
 import { nativeStartOutcomeUnknown } from "../lib/native-up-refusals.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
@@ -1648,6 +1653,43 @@ function withGraphTimeoutDetail(opts: {
   });
 }
 
+/**
+ * HACK-2194: a start that failed because a service's own process exited is
+ * reported as `E_SERVICE_EXITED` with each service and exit code, not as the
+ * runtime's code (which may name a later engine call). Only for the startup
+ * failure itself, after its cleanup was confirmed and without a stop request:
+ * a cleanup or infrastructure failure, or an unconfirmed cleanup, keeps its own
+ * error and its retained-state guidance.
+ */
+export function serviceExitedFailure(opts: {
+  readonly error: unknown;
+  readonly startupFailure: unknown;
+  readonly cleanupConfirmed: boolean;
+  readonly aborted: boolean;
+  readonly exited: readonly NativeExitedService[];
+  readonly failed: readonly string[];
+  readonly nativeCode: string | undefined;
+}): unknown {
+  if (
+    opts.exited.length === 0 ||
+    opts.error !== opts.startupFailure ||
+    !opts.cleanupConfirmed ||
+    opts.aborted
+  ) {
+    return opts.error;
+  }
+  const nativeCode =
+    opts.nativeCode ??
+    (opts.error instanceof NativeRuntimeRequestError
+      ? opts.error.nativeCode
+      : undefined);
+  return new NativeServiceExitedError({
+    exited: opts.exited,
+    alsoFailed: opts.failed,
+    ...(nativeCode ? { nativeCode } : {}),
+    detached: false,
+  });
+}
 function withStartupLogReport(error: unknown, report: string): unknown {
   if (report !== "" && error instanceof Error) {
     error.message = `${error.message}\n${report}`;
@@ -4131,6 +4173,9 @@ async function startNativeProjectAttempt(
             | undefined;
           // Redacted at receipt; the raw tail is never retained or persisted.
           let startupLogReport = "";
+          // Value-free: failed services' names and, when they exited, exit codes.
+          let failedLogServices: readonly string[] = [];
+          let exitedServices: readonly NativeExitedService[] = [];
           const services = [
             ...nativeReviewedActiveServices(review.report.plan),
           ].sort();
@@ -4405,6 +4450,8 @@ async function startNativeProjectAttempt(
                 // waiting command names the services and points at foreground up.
                 nativeDetachedUpFailedServices(logs.map((log) => log.service));
                 noteActivityFailedServices(logs.map((log) => log.service));
+                failedLogServices = logs.map((log) => log.service);
+                exitedServices = nativeExitedServices(logs);
                 startupLogReport = formatNativeStartupLogReport({
                   logs,
                   managedEnvironment: input.managedEnvironment,
@@ -4622,7 +4669,18 @@ async function startNativeProjectAttempt(
               code,
             });
           } catch (error) {
-            throw withStartupLogReport(error, startupLogReport);
+            throw withStartupLogReport(
+              serviceExitedFailure({
+                error,
+                startupFailure: serveFailure,
+                cleanupConfirmed: graphCleanupConfirmed,
+                aborted: controller.signal.aborted,
+                exited: exitedServices,
+                failed: failedLogServices,
+                nativeCode: nativeExitCode,
+              }),
+              startupLogReport
+            );
           }
         } finally {
           httpsClosing = true;

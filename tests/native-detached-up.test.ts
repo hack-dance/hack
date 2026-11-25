@@ -472,6 +472,60 @@ test("detached failure names the services that failed during startup and how to 
   }
 });
 
+for (const { mode, exitCode, phrase } of [
+  {
+    mode: "exited-service",
+    exitCode: 1,
+    phrase: "exited with code 1 during startup",
+  },
+  {
+    mode: "exited-service-zero",
+    exitCode: 0,
+    phrase: "exited with code 0 before it was ready",
+  },
+]) {
+  test(`detached failure reports a service that exits ${exitCode} as E_SERVICE_EXITED with its exit code`, async () => {
+    const root = await fixtureRoot("native-detached-exited-service-");
+    const launcher = Bun.spawn(
+      [process.execPath, fixture, "launcher", root, mode],
+      {
+        env: fixtureEnv(root),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    try {
+      const [code, stdout, stderr] = await Promise.all([
+        launcher.exited,
+        new Response(launcher.stdout).text(),
+        new Response(launcher.stderr).text(),
+      ]);
+      expect(code).toBe(1);
+      const error = JSON.parse(stdout).error;
+      expect(error.code).toBe("E_SERVICE_EXITED");
+      expect(error.detail).toEqual({
+        reason: "service_exited",
+        services: [{ name: "web", exitCode }],
+        alsoFailed: ["api"],
+        nativeCode: "engine_rejected",
+      });
+      expect(error.message).toBe(
+        `Service web ${phrase}. Also failed during startup: api. The failed start was stopped. A detached start does not keep service output; run hack up without -d in a terminal to see the last lines (managed values redacted, not saved).`
+      );
+      expect(stdout).not.toContain("retained owners");
+      expect(stdout + stderr).not.toContain("synthetic-private-value");
+      expect(stderr).toBe("");
+    } finally {
+      if (launcher.exitCode === null) {
+        launcher.kill("SIGTERM");
+        await launcher.exited;
+      }
+      await removeFixture(root);
+    }
+  });
+}
+
 test("detached immediate exit drains its fixed failure before reporting an unconfirmed start", async () => {
   const modes = [
     "exit-first-failure",

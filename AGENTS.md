@@ -40,6 +40,8 @@ logic into focused helpers with meaningful tests when complexity grows.
 For a behavior change, add or update the closest regression test and affected docs.
 Run focused checks first, then required CI gates. Documentation-only changes need
 link, generation, and contract checks rather than artificial unit tests.
+See [focused verification techniques](WORKFLOW.md#focused-verification-techniques)
+for examples to use when the corresponding surface changes.
 
 - Build current-branch behavior with `bun run build`; test `./dist/hack`, not an
   unrelated installed version. Use `bun index.ts` for a source invocation.

@@ -18,6 +18,37 @@ verification requirements. Consumer setup is documented separately in
 7. Preserve useful learning in the closest durable asset. Create tickets or other
    follow-up records only for actionable, authorized work.
 
+## Focused verification techniques
+
+These are advisory examples for the surface being changed, not additional gates.
+[AGENTS.md](AGENTS.md#verification) defines the required checks.
+
+- For CLI output changes, capture the process's complete stdout and stderr as well
+  as checking the JSON envelope in [cli-result tests](tests/cli-result.test.ts).
+  Replay a changed recovery hint with `bun index.ts` from the original directory
+  through the shell the hint targets; quoting alone does not prove CLI acceptance.
+- For signal handling, distinguish an immediate child signal from an interrupt
+  after readiness. Check cleanup and delayed effects, using the real-process
+  patterns in [dev-command tests](tests/dev-command.test.ts). For timeout changes,
+  check premature termination as well as overruns; see
+  [shell-timeout tests](tests/shell-timeout.test.ts).
+- For dependency cache invalidation, change a real lockfile or runtime input and
+  check the resulting fingerprint and volume name, as in
+  [dependency-cache tests](tests/dependency-cache.test.ts).
+- For registry cleanup, exercise the public operation with a held file lock as well
+  as a stale lock; see [projects-registry tests](tests/projects-registry.test.ts).
+  For volume deletion, keep ownership checks distinct from eligibility checks in
+  [disposable-cache-volume tests](tests/disposable-cache-volumes.test.ts).
+- For platform-gated tests, report how many cases actually executed. If concurrent
+  builds write into the checkout or share output, isolate them before attributing
+  a failure to the patch. Set fixture permissions explicitly for ownership tests
+  while retaining cases that check refusal of unsafe permissions.
+- For missing-project fixtures, choose a temporary root whose ancestors contain no
+  `.hack` or legacy `.dev` project. Project discovery walks upward, so an unrelated ancestor can
+  turn a refusal test into real project activity; see
+  [dev-command boundary fixtures](tests/dev-command.test.ts). For process fixtures, observe the
+  owned child's exit separately from launcher completion before removing its state.
+
 Useful commands:
 
 ```bash

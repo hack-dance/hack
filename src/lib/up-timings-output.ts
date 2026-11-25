@@ -1,6 +1,21 @@
 import type { TimingRecord } from "./timing-record.ts";
 
-export function printUpTimings(records: readonly TimingRecord[]): void {
+type Milestone = readonly [step: string, label: string];
+
+const UP_MILESTONES: readonly Milestone[] = [
+  ["containers.started", "All containers started"],
+  ["services.ready", "All services ready"],
+];
+
+/**
+ * Print a joined `hack.timings/1` timeline to stderr. Only host-clock records
+ * with a trusted anchor are placed; stdout stays reserved for command output.
+ */
+export function printCommandTimeline(
+  records: readonly TimingRecord[],
+  title: string,
+  milestones: readonly Milestone[] = []
+): void {
   const root = records.find((record) => record.step === "command.total");
   if (!root) {
     return;
@@ -11,11 +26,8 @@ export function printUpTimings(records: readonly TimingRecord[]): void {
     (record) => record.clock === "host" && record.attrs.anchor_fresh !== true
   );
   const ms = (us: number) => `${(us / 1000).toFixed(1)} ms`;
-  const lines = [`Startup timeline (${ms(root.dur_us)})`];
-  for (const [step, label] of [
-    ["containers.started", "All containers started"],
-    ["services.ready", "All services ready"],
-  ] as const) {
+  const lines = [`${title} (${ms(root.dur_us)})`];
+  for (const [step, label] of milestones) {
     const milestone = host.find(
       (record) => record.step === step && record.outcome === "ok"
     );
@@ -31,4 +43,8 @@ export function printUpTimings(records: readonly TimingRecord[]): void {
     }
   }
   process.stderr.write(`${lines.join("\n")}\n`);
+}
+
+export function printUpTimings(records: readonly TimingRecord[]): void {
+  printCommandTimeline(records, "Startup timeline", UP_MILESTONES);
 }

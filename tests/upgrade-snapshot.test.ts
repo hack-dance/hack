@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   chmod,
   lstat,
@@ -8,13 +9,14 @@ import {
   readdir,
   readFile,
   realpath,
+  rename,
   rm,
   stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import {
   createUpgradeSnapshot,
@@ -24,6 +26,7 @@ import {
   restoreUpgradeSnapshot,
   type UpgradeSnapshot,
 } from "../src/lib/upgrade-snapshot.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 // A value that must never appear in a manifest, result or message.
 const SENTINEL = ["sentinel", "upgrade", "value", "7f3a91"].join("-");
@@ -323,6 +326,312 @@ test("no temporary or displaced file ever appears in the checkout", async () => 
       )
     ).toEqual([]);
   }
+});
+
+/** Runs a restore in a child process and SIGKILLs it at `boundary`. */
+async function killRestoreAt(opts: {
+  readonly manifestPath: string;
+  readonly boundary: number;
+  readonly overwrite?: boolean;
+}): Promise<void> {
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      join(import.meta.dir, "fixtures", "upgrade-restore-worker.ts"),
+      opts.manifestPath,
+      String(opts.boundary),
+      ...(opts.overwrite === true ? ["overwrite"] : []),
+    ],
+    {
+      cwd: root,
+      env: privateCliEnv({ root, home: join(root, "home") }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  const reader = child.stdout.getReader();
+  try {
+    const reached = await Promise.race([
+      reader.read(),
+      new Promise<never>((_resolve, reject) => {
+        setTimeout(
+          () => reject(new Error("No restore interruption checkpoint")),
+          15_000
+        ).unref();
+      }),
+    ]);
+    expect(new TextDecoder().decode(reached.value)).toContain("checkpoint");
+  } finally {
+    child.kill("SIGKILL");
+    await child.exited;
+    reader.releaseLock();
+  }
+}
+
+/** Every file kept in the snapshot's private displaced/ directory, by content. */
+async function displacedContents(snapshot: UpgradeSnapshot): Promise<string[]> {
+  const dir = join(snapshot.dir, "displaced");
+  const names = await readdir(dir).catch(() => []);
+  return (
+    await Promise.all(names.map((name) => readFile(join(dir, name), "utf8")))
+  ).sort();
+}
+
+test("SIGKILL at every restore boundary, then a plain rerun restores exact bytes and modes and keeps the step's output", async () => {
+  // HACK-2188: a rollback killed after it moved the step's output aside and
+  // before it published the snapshot's copy left the path empty, and every
+  // later rollback refused it as changed unless --overwrite was passed.
+  // Three targets (removed, rewritten with a new mode, created) each pass a
+  // staged and a displaced boundary: six kill points.
+  for (let boundary = 1; boundary <= 6; boundary += 1) {
+    await rm(join(work, "project"), { recursive: true, force: true });
+    const paths = await fixture();
+    const envBefore = await readFile(paths.env);
+    const configBefore = await readFile(paths.config);
+    const snapshot = await snapshotOf(paths);
+    await rm(paths.env);
+    await writeFile(paths.config, '{"name":"app-a","v":5}\n');
+    await chmod(paths.config, 0o600);
+    await writeFile(paths.created, "env: migrated\n", { mode: 0o600 });
+    await recordUpgradeSnapshotAfter({ manifestPath: snapshot.manifestPath });
+
+    await killRestoreAt({ manifestPath: snapshot.manifestPath, boundary });
+
+    const resumed = await restoreUpgradeSnapshot({
+      manifestPath: snapshot.manifestPath,
+    });
+    if (resumed.status === "invalid-manifest") {
+      throw new Error(resumed.message);
+    }
+    expect({
+      boundary,
+      status: resumed.status,
+      results: resumed.results.map((r) => [r.label, r.status, r.message]),
+    }).toMatchObject({ boundary, status: "restored" });
+    expect(await readFile(paths.env)).toEqual(envBefore);
+    expect(await mode(paths.env)).toBe(0o600);
+    expect(await readFile(paths.config)).toEqual(configBefore);
+    expect(await mode(paths.config)).toBe(0o644);
+    expect(await lstat(paths.created).catch(() => null)).toBeNull();
+    // Nothing is deleted: both step outputs are kept in the snapshot, and the
+    // resumed target names where its displaced output is.
+    expect(await displacedContents(snapshot)).toEqual([
+      "env: migrated\n",
+      '{"name":"app-a","v":5}\n',
+    ]);
+    if (boundary === 4) {
+      const config = resumed.results.find((r) => r.path === paths.config);
+      expect(config?.status).toBe("restored");
+      expect(await readFile(config?.keptAs ?? "", "utf8")).toBe(
+        '{"name":"app-a","v":5}\n'
+      );
+    }
+    expect((await readdir(join(work, "project"))).sort()).toEqual([
+      ".env",
+      ".hack",
+      "hack.config.json",
+    ]);
+    const again = await restoreUpgradeSnapshot({
+      manifestPath: snapshot.manifestPath,
+    });
+    expect(
+      again.status === "invalid-manifest"
+        ? []
+        : again.results.map((r) => r.status)
+    ).toEqual(["already-restored", "already-restored", "already-restored"]);
+    // The resumed restore is complete: a user who then deletes the restored
+    // config is refused, not overridden by the step output kept aside.
+    await expectDeletionKept({
+      manifestPath: snapshot.manifestPath,
+      path: paths.config,
+    });
+  }
+}, 120_000);
+
+test("a killed overwrite restore of an unrecorded target is reported where it was kept, then finished by overwrite", async () => {
+  // An interrupted apply records no after state, so its rollback needs
+  // overwrite. If that rollback is killed after displacement, a plain rerun
+  // must not treat the displaced file as the step's output: it reports where
+  // the file is and leaves the path empty; overwrite then finishes it.
+  const paths = await fixture();
+  const configBefore = await readFile(paths.config);
+  const snapshot = await snapshotOf(paths);
+  await writeFile(paths.config, '{"unrecorded":true}\n');
+  // Boundaries: config staged (1), config displaced (2).
+  await killRestoreAt({
+    manifestPath: snapshot.manifestPath,
+    boundary: 2,
+    overwrite: true,
+  });
+  expect(await lstat(paths.config).catch(() => null)).toBeNull();
+  const plain = await restoreUpgradeSnapshot({
+    manifestPath: snapshot.manifestPath,
+    paths: [paths.config],
+  });
+  const entry = plain.status === "invalid-manifest" ? null : plain.results[0];
+  expect(entry?.status).toBe("conflict");
+  expect(entry?.message).toContain("interrupted");
+  expect(await readFile(entry?.keptAs ?? "", "utf8")).toBe(
+    '{"unrecorded":true}\n'
+  );
+  expect(await lstat(paths.config).catch(() => null)).toBeNull();
+  const forced = await restoreUpgradeSnapshot({
+    manifestPath: snapshot.manifestPath,
+    paths: [paths.config],
+    overwrite: true,
+  });
+  const done = forced.status === "invalid-manifest" ? null : forced.results[0];
+  expect(done?.status).toBe("restored");
+  expect(await readFile(paths.config)).toEqual(configBefore);
+  expect(await mode(paths.config)).toBe(0o644);
+  expect(await readFile(done?.keptAs ?? "", "utf8")).toBe(
+    '{"unrecorded":true}\n'
+  );
+}, 60_000);
+
+/** The single result of a restore of `path` alone. */
+async function restoreOne(input: {
+  readonly manifestPath: string;
+  readonly path: string;
+  readonly overwrite?: boolean;
+  readonly afterDisplace?: (path: string) => Promise<void>;
+}) {
+  const result = await restoreUpgradeSnapshot({
+    manifestPath: input.manifestPath,
+    paths: [input.path],
+    overwrite: input.overwrite,
+    afterDisplace: input.afterDisplace,
+  });
+  if (result.status === "invalid-manifest") {
+    throw new Error(result.message);
+  }
+  const [entry] = result.results;
+  if (entry === undefined) {
+    throw new Error("The restore returned no result.");
+  }
+  return entry;
+}
+
+/** Restores the step output of the fixture's config and records it. */
+async function configStepOutput() {
+  const paths = await fixture();
+  const configBefore = await readFile(paths.config);
+  const snapshot = await snapshotOf(paths);
+  await writeFile(paths.config, '{"name":"app-a","v":5}\n');
+  await recordUpgradeSnapshotAfter({ manifestPath: snapshot.manifestPath });
+  return { paths, configBefore, snapshot };
+}
+
+/** A plain restore of a path the user emptied is refused and stays empty. */
+async function expectDeletionKept(input: {
+  readonly manifestPath: string;
+  readonly path: string;
+}) {
+  await rm(input.path);
+  const plain = await restoreOne(input);
+  expect(plain.status).toBe("conflict");
+  expect(plain.message).not.toContain("interrupted");
+  expect(plain.keptAs).toBeUndefined();
+  expect(await lstat(input.path).catch(() => null)).toBeNull();
+}
+
+test("a plain rollback after the user deletes a restored file refuses it and keeps the path empty", async () => {
+  // Review of HACK-2188: a completed restore left the step output keyed in
+  // displaced/, so a later plain rollback took the user's deletion for an
+  // interrupted restore and recreated the file without overwrite.
+  const { paths, configBefore, snapshot } = await configStepOutput();
+  const first = await restoreOne({
+    manifestPath: snapshot.manifestPath,
+    path: paths.config,
+  });
+  expect(first.status).toBe("restored");
+  expect(await readFile(first.keptAs ?? "", "utf8")).toBe(
+    '{"name":"app-a","v":5}\n'
+  );
+  await expectDeletionKept({
+    manifestPath: snapshot.manifestPath,
+    path: paths.config,
+  });
+  // Nothing is deleted, and overwrite still restores the snapshot's copy.
+  expect(await displacedContents(snapshot)).toEqual([
+    '{"name":"app-a","v":5}\n',
+  ]);
+  const forced = await restoreOne({
+    manifestPath: snapshot.manifestPath,
+    path: paths.config,
+    overwrite: true,
+  });
+  expect(forced.status).toBe("restored");
+  expect(await readFile(paths.config)).toEqual(configBefore);
+});
+
+test("a restore killed after publication, before its displaced file lost its key, is settled by the already-restored rerun", async () => {
+  // The publication and the key drop are separate steps. A kill between
+  // them leaves the snapshot's copy at the path and a keyed step output;
+  // the rerun finds the target already restored and drops the key, so a
+  // later deletion is still refused.
+  const { paths, snapshot } = await configStepOutput();
+  const first = await restoreOne({
+    manifestPath: snapshot.manifestPath,
+    path: paths.config,
+  });
+  const consumed = first.keptAs ?? "";
+  const keyed = join(
+    dirname(consumed),
+    `${createHash("sha256").update(paths.config).digest("hex").slice(0, 16)}-${basename(consumed)}`
+  );
+  await rename(consumed, keyed);
+
+  const again = await restoreOne({
+    manifestPath: snapshot.manifestPath,
+    path: paths.config,
+  });
+  expect(again.status).toBe("already-restored");
+  expect(again.keptAs).toBeDefined();
+  expect(again.keptAs).not.toBe(keyed);
+  expect(await readFile(again.keptAs ?? "", "utf8")).toBe(
+    '{"name":"app-a","v":5}\n'
+  );
+  expect(await lstat(keyed).catch(() => null)).toBeNull();
+  await expectDeletionKept({
+    manifestPath: snapshot.manifestPath,
+    path: paths.config,
+  });
+});
+
+test("a completed restore drops the key from every displaced file of its target, not only the newest", async () => {
+  // A restore whose publication was refused (a file took the name) keeps
+  // the step output keyed. A later overwrite restore displaces that file
+  // and completes; the older step output must not be adopted after the
+  // user deletes the restored file.
+  const { paths, configBefore, snapshot } = await configStepOutput();
+  const refused = await restoreOne({
+    manifestPath: snapshot.manifestPath,
+    path: paths.config,
+    afterDisplace: async (path) => {
+      await writeFile(path, '{"edited":true}\n');
+    },
+  });
+  expect(refused.status).toBe("conflict");
+  expect(await readFile(refused.keptAs ?? "", "utf8")).toBe(
+    '{"name":"app-a","v":5}\n'
+  );
+  const forced = await restoreOne({
+    manifestPath: snapshot.manifestPath,
+    path: paths.config,
+    overwrite: true,
+  });
+  expect(forced.status).toBe("restored");
+  expect(await readFile(paths.config)).toEqual(configBefore);
+  await expectDeletionKept({
+    manifestPath: snapshot.manifestPath,
+    path: paths.config,
+  });
+  expect(await displacedContents(snapshot)).toEqual([
+    '{"edited":true}\n',
+    '{"name":"app-a","v":5}\n',
+  ]);
 });
 
 test("a parent directory reached through a symlink from another filesystem counts by where it leads", async () => {

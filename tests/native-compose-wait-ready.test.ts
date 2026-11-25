@@ -62,3 +62,28 @@ test("observation failure propagates without another acquisition", async () => {
   ).rejects.toThrow("fixed synthetic observation failure");
   expect(reads).toBe(1);
 });
+
+test("an injected clock alone orders polls against the deadline (HACK-2637)", async () => {
+  // Virtual time far behind the wall clock: a loop that read Date.now() would not poll.
+  let now = 1000;
+  const backoffs: number[] = [];
+  const polls: number[] = [];
+  const result = await waitNativeComposeReady({
+    deadline: 2200,
+    clock: {
+      now: () => now,
+      sleep: async (ms) => {
+        backoffs.push(ms);
+        now += ms;
+      },
+    },
+    observe: async () => {
+      polls.push(now);
+      return { ready: false };
+    },
+    ready: (state) => state.ready,
+  });
+  expect(result).toBeNull();
+  expect(polls).toEqual([1000, 1500, 2000]);
+  expect(backoffs).toEqual([500, 500, 500]);
+});

@@ -21,7 +21,8 @@ import {
 import { withDependencyStartupProgress } from "../lib/dependency-startup-progress.ts";
 import { reportLifecycleProgress } from "../lib/lifecycle-progress.ts";
 import { childStdoutTarget } from "../lib/machine-stdout.ts";
-import { exec, run } from "../lib/shell.ts";
+import type { OutputSink } from "../lib/output-sink.ts";
+import { exec, type RunOptions, run } from "../lib/shell.ts";
 import { readLinesFromStream } from "../ui/lines.ts";
 import { createStructuredLogGrouper } from "../ui/log-group.ts";
 import {
@@ -69,6 +70,23 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
     readonly services: readonly string[];
   };
   readonly detach: boolean;
+  /**
+   * Detached only: receives the Compose client's stdout and stderr for the
+   * images and start phases instead of the terminal. Their stdin is then
+   * closed, so a client question reads end-of-input instead of waiting
+   * unseen: Compose either fails or goes on with its default answer. The
+   * caller reports progress from its own observations, quotes what the sink
+   * kept when the start fails, and repeats its warnings and unanswered
+   * questions when it succeeds.
+   */
+  readonly clientOutput?: OutputSink;
+  /**
+   * Detached only: receives each line Hack itself prints to stderr while a
+   * Compose phase runs (dependency cache progress, startup notices), so a
+   * caller that shows a transient wait can clear it first. Absent: the line
+   * goes straight to stderr.
+   */
+  readonly onStartupNotice?: (line: string) => void;
   /** Detached `start` phase budget (container start and dependency wait). */
   readonly startupTimeoutMs?: number;
   /** Detached `images` phase budget (image build/pull and container creation). */
@@ -329,8 +347,9 @@ async function runComposeStartPhase(input: {
       startupCeilingMs: options.startupCeilingMs,
       env: input.budgetEnv,
     });
-    process.stderr.write(
-      `Some Compose extends chains could not be resolved, so one-shot progress is unknown; this start may run up to its ${ceilingMs} ms ceiling.\n`
+    startupNotice(
+      options,
+      `Some Compose extends chains could not be resolved, so one-shot progress is unknown; this start may run up to its ${ceilingMs} ms ceiling.`
     );
     const code = await input.runPhase(input.cmd, ceilingMs);
     if (code === 124) {
@@ -356,7 +375,7 @@ async function runComposeStartPhase(input: {
   const finished = run(input.cmd, {
     cwd: options.cwd,
     env: options.env,
-    stdout: childStdoutTarget(options.routeStdoutToStderr),
+    ...composeClientStdio(options),
     timeoutMs: ceilingMs,
     forwardSignals: true,
     settleProcessGroupOnCancel: true,
@@ -557,7 +576,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
         return run(cmd, {
           cwd: opts.cwd,
           env: opts.env,
-          stdout: childStdoutTarget(opts.routeStdoutToStderr),
+          ...composeClientStdio(opts),
           timeoutMs,
           forwardSignals: true,
           settleProcessGroupOnCancel: true,
@@ -640,12 +659,13 @@ export const composeRuntimeBackend: RuntimeBackend = {
         cwd: opts.cwd,
         env: opts.env,
         onPhase: (service, phase) => {
-          process.stderr.write(`Dependency cache ${service}: ${phase}\n`);
+          startupNotice(opts, `Dependency cache ${service}: ${phase}`);
           reportLifecycleProgress({ service, phase });
         },
         onUnavailable: () => {
-          process.stderr.write(
-            "Dependency progress unavailable; Compose startup continues. Inspect hack ps and hack logs for status.\n"
+          startupNotice(
+            opts,
+            "Dependency progress unavailable; Compose startup continues. Inspect hack ps and hack logs for status."
           );
         },
         run: launch,
@@ -798,6 +818,24 @@ function mergeSpawnEnv(
   override: Record<string, string> | undefined
 ): Record<string, string> {
   return childEnvironment(process.env, override);
+}
+
+/** One line of Hack's own during a detached phase; see `onStartupNotice`. */
+function startupNotice(opts: RuntimeUpOptions, line: string): void {
+  if (opts.onStartupNotice) {
+    opts.onStartupNotice(line);
+    return;
+  }
+  process.stderr.write(`${line}\n`);
+}
+
+/** Where a detached Compose phase's client stdio goes. */
+function composeClientStdio(
+  opts: RuntimeUpOptions
+): Pick<RunOptions, "stdin" | "stdout" | "outputSink"> {
+  return opts.clientOutput === undefined
+    ? { stdout: childStdoutTarget(opts.routeStdoutToStderr) }
+    : { stdin: "ignore", outputSink: opts.clientOutput };
 }
 
 /** `--wait` for `docker compose up -d`, only when asked. */

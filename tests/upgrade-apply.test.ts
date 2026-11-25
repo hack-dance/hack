@@ -1014,6 +1014,159 @@ test("SIGKILL at every apply boundary resumes the same snapshot and rolls back e
   }
 }, 120_000);
 
+/** Runs a fixture worker and SIGKILLs it once it reports its checkpoint. */
+async function killWorkerAt(args: readonly string[]): Promise<void> {
+  const child = Bun.spawn([process.execPath, ...args], {
+    cwd: root,
+    env: privateCliEnv({
+      root,
+      home,
+      env: {
+        HACK_HOME: hackHome,
+        HACK_GLOBAL_CONFIG_PATH: join(hackHome, "hack.config.json"),
+        HACK_HOST_PROBES_DISABLE: "1",
+        HACK_SYSTEMD_DISABLE: "1",
+        HACK_NO_INTERACTIVE: "1",
+      },
+    }),
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const reader = child.stdout.getReader();
+  try {
+    const reached = await Promise.race([
+      reader.read(),
+      new Promise<never>((_resolve, reject) => {
+        setTimeout(
+          () => reject(new Error("No interruption checkpoint")),
+          15_000
+        ).unref();
+      }),
+    ]);
+    expect(new TextDecoder().decode(reached.value)).toContain("checkpoint");
+  } finally {
+    child.kill("SIGKILL");
+    await child.exited;
+    reader.releaseLock();
+  }
+}
+
+/** The one snapshot created since `known` was listed. */
+async function newSnapshot(known: ReadonlySet<string>) {
+  const fresh = (await listUpgradeSnapshots()).filter((s) => !known.has(s.id));
+  expect(fresh).toHaveLength(1);
+  const [snapshot] = fresh;
+  if (snapshot === undefined) {
+    throw new Error("Missing interrupted snapshot");
+  }
+  return snapshot;
+}
+
+const RESTORED = new Set(["restored", "moved-aside", "already-restored"]);
+
+test("a rollback straight after SIGKILL at every apply boundary reaches the exact pre-upgrade tree", async () => {
+  // HACK-2188 revert path: no resume first. Targets the killed run never
+  // recorded need overwrite (the documented contract); every other target
+  // rolls back plainly, and nothing else is refused.
+  const a = await project("app-a", 1);
+  await writeRegistry([a]);
+  const ignore = join(a.projectDir, ".gitignore");
+  await writeFile(ignore, "# keep custom rules\ncustom\n");
+  await chmod(ignore, 0o640);
+  const reportPath = join(root, "report.json");
+  await writeFile(reportPath, JSON.stringify(await check()));
+  const before = [
+    ...(await tree(join(root, "repos"))),
+    ...(await tree(join(root, "worktrees"))),
+  ];
+  for (let boundary = 1; boundary <= 7; boundary += 1) {
+    const known = new Set((await listUpgradeSnapshots()).map((s) => s.id));
+    await killWorkerAt([
+      resolve(import.meta.dir, "fixtures/upgrade-apply-worker.ts"),
+      reportPath,
+      String(boundary),
+    ]);
+    const snapshot = await newSnapshot(known);
+    const plain = await restoreUpgradeSnapshot({
+      manifestPath: snapshot.manifestPath,
+    });
+    if (plain.status === "invalid-manifest") {
+      throw new Error(plain.message);
+    }
+    for (const result of plain.results) {
+      if (!RESTORED.has(result.status)) {
+        expect({ boundary, status: result.status }).toEqual({
+          boundary,
+          status: "conflict",
+        });
+        expect(result.message).toContain("did not record what it wrote");
+      }
+    }
+    if (plain.status === "incomplete") {
+      const forced = await restoreUpgradeSnapshot({
+        manifestPath: snapshot.manifestPath,
+        overwrite: true,
+      });
+      expect({ boundary, status: forced.status }).toEqual({
+        boundary,
+        status: "restored",
+      });
+    }
+    expect([
+      ...(await tree(join(root, "repos"))),
+      ...(await tree(join(root, "worktrees"))),
+    ]).toEqual(before);
+  }
+}, 180_000);
+
+test("SIGKILL at every rollback boundary of an applied run finishes with a plain rerun", async () => {
+  // HACK-2188: a rollback killed between moving the step's output aside and
+  // publishing the snapshot's copy must finish on a plain rerun.
+  const a = await project("app-a", 1);
+  await writeRegistry([a]);
+  const ignore = join(a.projectDir, ".gitignore");
+  await writeFile(ignore, "# keep custom rules\ncustom\n");
+  await chmod(ignore, 0o640);
+  const before = [
+    ...(await tree(join(root, "repos"))),
+    ...(await tree(join(root, "worktrees"))),
+  ];
+  // Two changed targets (one rewritten, one created), each with a staged and
+  // a displaced boundary.
+  for (let boundary = 1; boundary <= 4; boundary += 1) {
+    const applied = await runUpgradeApply({
+      report: await check(),
+      home,
+      dryRun: false,
+      only: ["ignore-rules"],
+      collect: collectUpgradeSnapshotTargets,
+    });
+    if (applied.status !== "applied") {
+      throw new Error(JSON.stringify(applied));
+    }
+    const manifestPath = applied.coverage.manifest_path;
+    await killWorkerAt([
+      resolve(import.meta.dir, "fixtures/upgrade-restore-worker.ts"),
+      manifestPath,
+      String(boundary),
+    ]);
+    const resumed = await restoreUpgradeSnapshot({ manifestPath });
+    if (resumed.status === "invalid-manifest") {
+      throw new Error(resumed.message);
+    }
+    expect({
+      boundary,
+      status: resumed.status,
+      failed: resumed.results.filter((r) => !RESTORED.has(r.status)),
+    }).toEqual({ boundary, status: "restored", failed: [] });
+    expect([
+      ...(await tree(join(root, "repos"))),
+      ...(await tree(join(root, "worktrees"))),
+    ]).toEqual(before);
+  }
+}, 180_000);
+
 test("resume refuses an unknown journal and preserves edits after apply", async () => {
   const a = await project("app-a");
   await writeRegistry([a]);

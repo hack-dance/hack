@@ -844,7 +844,7 @@ test(
     expect(report.ready).toBe(false);
     expect(report.runtime_review).toEqual({ status: "completed" });
     expect(codes(report, "cli")).toEqual([
-      "build_disabled:web",
+      "build_requires_opt_in:web",
       "environment_file_input:web",
       "external_network",
       "extra_hosts_without_dependencies:web",
@@ -1231,7 +1231,7 @@ test(
         {},
         "extra_hosts_without_dependencies:web",
       ],
-      [{ build: ".." }, {}, "build_disabled:web"],
+      [{ build: ".." }, {}, "build_requires_opt_in:web"],
       [{ command: ["true"] }, {}, "missing_image:web"],
       [
         { image: IMAGE, networks: ["shared"] },
@@ -1882,7 +1882,7 @@ test(
       ...GRANT,
       HACK_NATIVE_BUILDS: "0",
     });
-    expect(codes(off.report, "cli")).toContain("build_disabled:built");
+    expect(codes(off.report, "cli")).toContain("build_requires_opt_in:built");
     expect(codes(off.report, "cli")).not.toContain("missing_image:built");
   },
   SPAWN_TIMEOUT_MS

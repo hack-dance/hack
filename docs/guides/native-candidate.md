@@ -321,14 +321,16 @@ preflight. Raw runtime stderr and startup output are not configuration findings.
   `native_adaptation_invalid`, `internal_hosts_unreadable`,
   `internal_hosts_without_dependencies`, `external_network`, `external_volume`,
   `reserved_label`, `unsupported_build`, `foreign_platform`,
-  `invalid_service_name`, `invalid_service`, `build_disabled`,
+  `invalid_service_name`, `invalid_service`, `build_requires_opt_in`,
   `unsupported_build_form`, `emulated_build`, `environment_file_input`, `missing_image`,
   `extra_hosts_without_dependencies`, `unsupported_logging`, `invalid_restart`,
   `unsupported_label`, `invalid_http_probe`, `managed_env_unreadable`,
   `environment_delivery`, `native_runtime_setup`, `shared_source_grant_required`,
   `route_probe_required`, `too_many_bridges`, `gcloud_adc_grant_required` (consent),
   `gcloud_adc_mount_refused`, `native_source_over_limit` and
-  `native_source_unmeasured`. Runtime findings use the
+  `native_source_unmeasured`. `build_requires_opt_in` keeps its name from when
+  native builds were opt-in: it now means `HACK_NATIVE_BUILDS=0` turned builds off
+  for a service that builds an image. Runtime findings use the
   review's own diagnostic codes, for example `privileged_service` or
   `invalid_mount`, and `review_incompatible` when the review does not admit the
   project and gives no finding this version can show. A code this version has
@@ -397,7 +399,7 @@ Compose backend. Native support for them is planned after v5.
 | Foreign external network | Exact external names `hack-dev` and `hack-logging` map to fresh native-owned project bridges, including logical aliases; they do not attach to Docker networks or share cross-project container DNS. Native publishes routes independently of Docker’s global Caddy. Other external networks stay refused by name. A top-level network sets `external: true` or `external: {name: ...}`. A reviewed `x-hack-isolated: true` replacement is not external: it creates an owned internal bridge. A network that the selected adaptation (`HACK_NATIVE_ADAPTATION` or the committed `.hack/native/adaptation.json`; see [Native settings files](#native-settings-files)) lists in `isolatedNetworks` gets the same replacement, so it is not external either. |
 | Duplicate Hack network aliases | Two logical declarations name the same `hack-dev` or `hack-logging` identity. Keep one declaration and attach its services to that declaration; native refuses instead of silently splitting connectivity. |
 | External volume | A top-level volume sets `external: true` or `external: {name: ...}`. The native runtime only creates volumes it owns, and there is no native replacement for an external volume. |
-| Build outside the basic form | A service `build` is not the basic form that [`hack config import --dry-run`](../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`), or the service also sets `image`. Build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. With native builds on (the default; see below), only a build field other than `context`, `dockerfile`, `target` and `args`, or `image` together with `build`, counts; native build admission reviews the values of those four fields itself. |
+| Build outside the basic form | With native builds on (the default; see below), a service `build` field other than `context`, `dockerfile`, `target` and `args`, or `image` together with `build`. Native build admission reviews the values of those four fields itself. With `HACK_NATIVE_BUILDS=0`, any `build` outside the basic form that [`hack config import --dry-run`](../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`) counts, and so does `image` together with `build`; build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. |
 | Non-native platform | A service sets a `platform` other than `linux/arm64` or `linux/arm64/v8`, for example `linux/amd64`. The native VM runs Linux arm64. A missing or `null` `platform` is unset and passes. `linux/amd64` passes only for a service that the `HACK_NATIVE_ADAPTATION` selection opts in to [amd64 emulation](#amd64-emulation-with-rosetta-2); every other platform value stays on the Compose backend. |
 
 Native `hack up` and `hack restart` check for these features after selecting the
@@ -466,8 +468,11 @@ rerun: `HACK_RUNTIME_BACKEND=compose hack config adopt --dry-run`. See
 Native image-project `up` builds Compose `build:` services by default (with the
 usual `HACK_NATIVE_SHARED_SOURCE=1`). `HACK_NATIVE_BUILDS=0` is the only off switch:
 with it, a `build:` service refuses before any hook or VM effect and names the
-variable. Any other value, including the earlier opt-in `HACK_NATIVE_BUILDS=1`, keeps
-builds on. With builds on:
+variable. Only the exact value `0` turns builds off. Any other value keeps them on,
+including the earlier opt-in `HACK_NATIVE_BUILDS=1` and words such as `false`, `off`
+or `no`. Launches that do not read your shell profile, such as login autostart and
+the daemon's lifecycle restarts, do not see a `HACK_NATIVE_BUILDS=0` set only there,
+so they build. With builds on:
 
 - Accepted forms are `build: <context>` and a mapping of `context`, `dockerfile`,
   `target` and `args`. Paths follow Compose (the context is relative to the Compose
@@ -1540,7 +1545,9 @@ record without hashing the builder, so bytes changed under an intact record stil
 read as `prepared` there; setup and builds verify the bytes. `hack doctor` on
 the native backend adds a `native image builder` check: a warning with the same
 remedy when the project has a `build:` service and the home has no image builder,
-or one whose record does not match the pinned release.
+or one whose record does not match the pinned release. With `HACK_NATIVE_BUILDS=0`
+the check is ok without asking the runtime: builds are off, so the project does not
+need the builder (`nativeBuilder.builder` is `not_checked`).
 Doctor never installs or downloads it, with `--fix` either.
 
 Every message about the image builder names one setup command: the `hack up`

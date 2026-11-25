@@ -120,6 +120,47 @@ test("a project without build services is ok and asks the runtime nothing", asyn
   ).toBe(0);
 });
 
+test("with HACK_NATIVE_BUILDS=0 a project that builds images does not need the builder and asks the runtime nothing", async () => {
+  const { requests, invoke } = inspecting("not_prepared");
+  const check = await checkNativeImageBuilder({
+    runtime,
+    cwd: "/project",
+    compose: built,
+    invoke,
+    launcher,
+    buildsEnabled: false,
+  });
+  expect(check).toEqual({
+    name: NATIVE_BUILDER_CHECK,
+    status: "ok",
+    message:
+      "2 services build an image, but HACK_NATIVE_BUILDS=0 turns native builds off, so this project does not need the native image builder.",
+    nativeBuilder: { buildServices: 2, builder: "not_checked" },
+  });
+  expect(requests).toEqual([]);
+
+  // The default reads the same switch native up reads.
+  const previous = process.env.HACK_NATIVE_BUILDS;
+  process.env.HACK_NATIVE_BUILDS = "0";
+  try {
+    const fromEnv = await checkNativeImageBuilder({
+      runtime,
+      cwd: "/project",
+      compose: built,
+      invoke,
+      launcher,
+    });
+    expect(fromEnv).toEqual(check);
+    expect(requests).toEqual([]);
+  } finally {
+    if (previous === undefined) {
+      Reflect.deleteProperty(process.env, "HACK_NATIVE_BUILDS");
+    } else {
+      process.env.HACK_NATIVE_BUILDS = previous;
+    }
+  }
+});
+
 test("a prepared builder is ok", async () => {
   const { requests, invoke } = inspecting("prepared");
   const check = await checkNativeImageBuilder({

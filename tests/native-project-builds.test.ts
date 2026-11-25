@@ -221,6 +221,11 @@ test("native builds are on by default and HACK_NATIVE_BUILDS=0 is the only off s
   expect(nativeBuildsEnabled({ HACK_NATIVE_BUILDS: "1" })).toBe(true);
   expect(nativeBuildsEnabled({ HACK_NATIVE_BUILDS: "true" })).toBe(true);
   expect(nativeBuildsEnabled({ HACK_NATIVE_BUILDS: "0" })).toBe(false);
+  // Only the exact value 0 is off, as documented, the same convention as
+  // HACK_NATIVE_BUILD_RETENTION. Other spellings keep builds on.
+  for (const value of ["false", "off", "no", " 0", "0 ", "00"]) {
+    expect(nativeBuildsEnabled({ HACK_NATIVE_BUILDS: value })).toBe(true);
+  }
   expect(nativeBuildsDisabledRefusal("web")).toContain(
     "HACK_NATIVE_BUILDS=0 turns native builds off; unset HACK_NATIVE_BUILDS"
   );

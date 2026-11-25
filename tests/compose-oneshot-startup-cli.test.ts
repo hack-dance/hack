@@ -9,6 +9,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
+import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 import { runPrivateTtyCli } from "./helpers/private-cli-tty.ts";
 
@@ -31,11 +33,38 @@ case " $* " in
   *" down "*)
     : > "$state/down-ran"
     exit 0 ;;
-  *" up "*" --no-start"*) exit 0 ;;
+  *" up --no-start "*|*" up "*" --no-start "*)
+    printf '%s\\n' 'compose-no-start-marker'
+    if [ -n "\${STUB_WARN:-}" ]; then
+      printf '%s\\n' 'WARN[0000] The "STUB_UNSET" variable is not set. Defaulting to a blank string.' >&2
+    fi
+    if [ -n "\${STUB_ASK:-}" ]; then
+      # Compose without a terminal on stdin: the question, no line break,
+      # then one read; end-of-input means its default answer.
+      printf '%s' "Volume \\"shop_db\\" exists but doesn't match configuration in compose file. Recreate (data will be lost)?"
+      if read -r answer; then : > "$state/answered"; else : > "$state/end-of-input"; fi
+      if [ -n "\${STUB_ASK_FAIL:-}" ]; then exit 1; fi
+    fi
+    exit 0 ;;
   *" up "*" -d "*|*" up -d"*)
     rm -f "$state/down-ran"
     : > "$state/up-started"
     printf '%s\\n' 'compose-up-stdout-marker'
+    if [ -n "\${STUB_WARN:-}" ]; then
+      printf '%s\\n' 'time="2026-01-01T00:00:00Z" level=warning msg="The \\"STUB_UNSET\\" variable is not set. Defaulting to a blank string."' >&2
+    fi
+    if [ -n "\${STUB_UP_FAIL:-}" ]; then
+      i=1
+      while [ "$i" -le 25 ]; do
+        printf 'client line %s\\n' "$i" >&2
+        i=$((i + 1))
+      done
+      printf '\\033[31mpull access denied for https://someone:hunter2@registry.invalid/app, token fixture-secret-value\\033[0m\\n' >&2
+      if [ -n "\${APP_PORT:-}" ]; then
+        printf 'Bind for 0.0.0.0:%s failed: port is already allocated (user %s, password %s)\\n' "$APP_PORT" "$APP_DB_USER" "$APP_DB_PASSWORD" >&2
+      fi
+      exit 1
+    fi
     sleep "\${STUB_UP_SECONDS:-1}"
     : > "$state/up-done"
     exit 0 ;;
@@ -669,9 +698,21 @@ test("Compose closes a confirmed start and stop with plain lifecycle lines", asy
   const service = output.findIndex((line) =>
     /^✓ services +api +up$/.test(line)
   );
+  const images = output.findIndex((line) =>
+    /^✓ images +ready · \d+\.\ds$/.test(line)
+  );
+  // HACK-2542: the Compose client's own lines are not passed through.
+  for (const marker of [
+    "compose-no-start-marker",
+    "compose-up-stdout-marker",
+  ]) {
+    expect(up.stdout).not.toContain(marker);
+    expect(up.stderr).not.toContain(marker);
+  }
   expect(output.indexOf("before output")).toBeGreaterThanOrEqual(0);
   expect(before).toBeGreaterThan(output.indexOf("before output"));
-  expect(migration).toBeGreaterThan(before);
+  expect(images).toBeGreaterThan(before);
+  expect(migration).toBeGreaterThan(images);
   expect(service).toBeGreaterThan(migration);
   expect(output.indexOf("after output")).toBeGreaterThan(service);
   expect(after).toBeGreaterThan(output.indexOf("after output"));
@@ -739,6 +780,11 @@ test("detached Compose up clears its transient hook and service waits on a TTY",
   );
   expect(result.stdout).toContain(`${erase}services ...${erase}✓ services`);
   expect(result.stdout).toContain(`${erase}after verify ...${erase}✓ after`);
+  // Through the terminal-group runner too, the client's lines stay captured
+  // and each detached phase shows only a transient wait.
+  expect(result.stdout).toContain(`${erase}images ...${erase}✓ images`);
+  expect(result.stdout).not.toContain("compose-no-start-marker");
+  expect(result.stdout).not.toContain("compose-up-stdout-marker");
   expect(result.stdout.indexOf("before prepare ...")).toBeLessThan(
     result.stdout.indexOf("services ...")
   );
@@ -746,3 +792,176 @@ test("detached Compose up clears its transient hook and service waits on a TTY",
     result.stdout.indexOf("after verify ...")
   );
 }, 20_000);
+
+test("a failed detached Compose start quotes the client's last lines, redacted, before the reason", async () => {
+  const result = await cli(["up", "--detach"], {
+    STUB_UP_SECONDS: "0",
+    STUB_UP_FAIL: "1",
+    STUB_API_TOKEN: "fixture-secret-value",
+  });
+  expect(result.exitCode).toBe(1);
+  expect(result.stdout).not.toContain("client line");
+  const lines = result.stderr.split("\n");
+  const heading = lines.indexOf("docker compose output (last 20 lines):");
+  expect(heading, result.stderr).toBeGreaterThanOrEqual(0);
+  const quoted = lines.slice(heading + 1, heading + 21);
+  expect(quoted[0]).toBe("  client line 7");
+  expect(quoted[18]).toBe("  client line 25");
+  expect(quoted[19]).toBe(
+    "  pull access denied for https://[REDACTED]@registry.invalid/app, token [REDACTED]"
+  );
+  expect(lines).not.toContain("  client line 6");
+  // One hint names where the whole output is.
+  expect(lines[heading + 21]).toBe(
+    "For Compose's full output, run `hack up` in the foreground or `hack up --detach --json`."
+  );
+  expect(result.stderr).not.toContain("hunter2");
+  expect(result.stderr).not.toContain("fixture-secret-value");
+  expect(result.stderr).not.toContain("\x1b[31m");
+  // Hack's own reason is still reported after the quoted lines.
+  expect(result.stdout + lines.slice(heading + 22).join("\n")).toContain(
+    "docker compose up"
+  );
+}, 60_000);
+
+test("a successful detached Compose start repeats each client warning once", async () => {
+  const result = await cli(["up", "--detach"], {
+    STUB_UP_SECONDS: "0",
+    STUB_WARN: "1",
+  });
+  expect(result.exitCode, result.stderr).toBe(0);
+  const warnings = result.stderr
+    .split("\n")
+    .filter((line) => line.startsWith("! compose"));
+  expect(warnings).toEqual([
+    '! compose  The "STUB_UNSET" variable is not set. Defaulting to a blank string.',
+  ]);
+  expect(result.stderr).not.toContain("WARN[0000]");
+  expect(result.stderr).not.toContain("level=warning");
+}, 60_000);
+
+test("a failed start's quoted lines keep non-secret env-layer values and redact secret ones", async () => {
+  const hackDir = join(project, ".hack");
+  await writeFile(join(project, PROJECT_ENV_KEY_FILENAME), "synthetic-key");
+  for (const [key, value, secret] of [
+    ["APP_PORT", "43210", false],
+    ["APP_DB_USER", "shopuser", false],
+    ["APP_DB_PASSWORD", "layer-secret-value", true],
+  ] as const) {
+    await setProjectEnvValue({
+      projectRoot: project,
+      projectDir: hackDir,
+      envName: null,
+      scope: "global",
+      key,
+      value,
+      secret,
+    });
+  }
+  const result = await cli(["up", "--detach"], {
+    STUB_UP_SECONDS: "0",
+    STUB_UP_FAIL: "1",
+  });
+  expect(result.exitCode, result.stderr).toBe(1);
+  expect(result.stderr).toContain(
+    "  Bind for 0.0.0.0:43210 failed: port is already allocated (user shopuser, password [REDACTED])"
+  );
+  expect(result.stderr).not.toContain("layer-secret-value");
+}, 60_000);
+
+test("a startup notice during a detached phase does not land on the transient wait", async () => {
+  const lines = [
+    "services:",
+    "  migrate:",
+    "    image: alpine:3.22",
+    "  level0:",
+    "    image: alpine:3.22",
+    "    depends_on:",
+    "      migrate:",
+    "        condition: service_completed_successfully",
+  ];
+  for (let level = 1; level <= 40; level += 1) {
+    lines.push(`  level${level}:`, `    extends: level${level - 1}`);
+  }
+  lines.push("  api:", "    extends: level40", "");
+  await writeFile(
+    join(project, ".hack", "docker-compose.yml"),
+    lines.join("\n")
+  );
+  const result = await runPrivateTtyCli({
+    cwd: project,
+    args: ["up", "--detach"],
+    env: fixtureEnv({ TERM: "xterm", STUB_UP_SECONDS: "0" }),
+  });
+  expect(result.exitCode, result.stderr).toBe(0);
+  const output = result.stdout.replace(/\x1b\[[\d;]*m/g, "");
+  const erase = "\r\x1b[2K";
+  expect(output).toContain(`services ...${erase}Some Compose extends chains`);
+  expect(output).not.toContain("services ...Some Compose");
+  // The wait comes back after the notice.
+  const notice = output.indexOf("Some Compose extends chains");
+  expect(output.indexOf(`${erase}services ...`, notice)).toBeGreaterThan(
+    notice
+  );
+}, 20_000);
+
+const VOLUME_QUESTION =
+  'Volume "shop_db" exists but doesn\'t match configuration in compose file. Recreate (data will be lost)?';
+const PROMPT_HINT =
+  "Compose asked a question, and a detached `hack up` cannot answer it. Run `hack up` in the foreground to answer it.";
+
+test("a question Compose answered with its default during a successful detached start is reported", async () => {
+  const result = await cli(["up", "--detach"], {
+    STUB_UP_SECONDS: "0",
+    STUB_ASK: "1",
+  });
+  expect(result.exitCode, result.stderr).toBe(0);
+  // The closed stdin gave the client end-of-input, not an answer.
+  expect(await Bun.file(join(state, "end-of-input")).exists()).toBe(true);
+  expect(await Bun.file(join(state, "answered")).exists()).toBe(false);
+  const lines = result.stderr.split("\n");
+  // The question is its own line, not joined to the next phase's output.
+  expect(lines, result.stderr).toContain(
+    `! compose  unanswered question: ${VOLUME_QUESTION}`
+  );
+  expect(lines).toContain(
+    "A detached `hack up` cannot answer Compose's questions, so Compose went on with its default answer. To answer, run `hack up` in the foreground."
+  );
+  expect(result.stderr).not.toContain("compose-up-stdout-marker");
+}, 60_000);
+
+test("a failed detached start quotes the question Compose asked with the prompt hint", async () => {
+  const result = await cli(["up", "--detach"], {
+    STUB_UP_SECONDS: "0",
+    STUB_ASK: "1",
+    STUB_ASK_FAIL: "1",
+  });
+  expect(result.exitCode).toBe(1);
+  const lines = result.stderr.split("\n");
+  const heading = lines.findIndex((line) =>
+    line.startsWith("docker compose output (last ")
+  );
+  expect(heading, result.stderr).toBeGreaterThanOrEqual(0);
+  expect(lines.slice(heading + 1, heading + 4)).toEqual([
+    "  compose-no-start-marker",
+    `  ${VOLUME_QUESTION}`,
+    PROMPT_HINT,
+  ]);
+}, 60_000);
+
+test("a failed start names a question Compose asked before its quoted lines", async () => {
+  const result = await cli(["up", "--detach"], {
+    STUB_UP_SECONDS: "0",
+    STUB_ASK: "1",
+    STUB_UP_FAIL: "1",
+  });
+  expect(result.exitCode).toBe(1);
+  const lines = result.stderr.split("\n");
+  const heading = lines.indexOf("docker compose output (last 20 lines):");
+  expect(heading, result.stderr).toBeGreaterThanOrEqual(0);
+  // The images phase asked; the start phase's 26 lines pushed it out.
+  expect(lines.slice(heading + 21, heading + 23)).toEqual([
+    `Compose asked earlier: ${VOLUME_QUESTION}`,
+    PROMPT_HINT,
+  ]);
+}, 60_000);

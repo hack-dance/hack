@@ -2,7 +2,11 @@ import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
 import { childEnvironment } from "./child-environment.ts";
 import { isRecord } from "./guards.ts";
 import { nativeComposeVolumeCreatedAt } from "./native-compose-retained-storage.ts";
-import { waitNativeComposeReady } from "./native-compose-wait-ready.ts";
+import {
+  type NativeComposeWaitClock,
+  systemNativeComposeWaitClock,
+  waitNativeComposeReady,
+} from "./native-compose-wait-ready.ts";
 import { beginNativeCpuChild } from "./native-cpu-diagnostics.ts";
 import { findExecutableInPath } from "./shell.ts";
 
@@ -436,9 +440,12 @@ export async function waitForNativeComposeNetworkMembers<T>(opts: {
   readonly signal?: AbortSignal;
   readonly now?: () => number;
   readonly sleep?: (ms: number) => Promise<unknown>;
+  /** Reads `deadline`'s epoch-millisecond scale; defaults to `Date.now`. */
+  readonly deadlineNow?: () => number;
 }): Promise<T> {
   const now = opts.now ?? (() => performance.now());
   const sleep = opts.sleep ?? ((ms) => Bun.sleep(ms));
+  const deadlineNow = opts.deadlineNow ?? (() => Date.now());
   let deadline: number | undefined;
   for (;;) {
     try {
@@ -456,14 +463,14 @@ export async function waitForNativeComposeNetworkMembers<T>(opts: {
           NETWORK_MEMBER_SETTLE_MS,
           opts.deadline === undefined
             ? Number.POSITIVE_INFINITY
-            : Math.max(0, opts.deadline - Date.now())
+            : Math.max(0, opts.deadline - deadlineNow())
         );
       const remaining = deadline - now();
       if (remaining <= 0) {
         throw error;
       }
       await sleep(Math.min(100, remaining));
-      if (opts.deadline !== undefined && Date.now() >= opts.deadline) {
+      if (opts.deadline !== undefined && deadlineNow() >= opts.deadline) {
         throw error;
       }
     }
@@ -520,6 +527,9 @@ export async function observeNativeComposeStartupOwned(
  * The settled query runs after the deadline, so it is bounded by the probe timeout.
  * In-loop acquisitions use the remaining start budget. One timed-out read may
  * restart the entire acquisition, discarding its partial proof.
+ * `clock` (tests only) replaces the wall clock that orders observations against the
+ * deadline and the backoff between them. Probe timeouts stay real time, bounded by
+ * the clock's remaining budget.
  * Never use the observation as effect authority.
  */
 export async function waitNativeComposeStartupOwned(opts: {
@@ -531,7 +541,9 @@ export async function waitNativeComposeStartupOwned(opts: {
   readonly observed?: (state: NativeComposeOwnershipObservation) => void;
   /** Post-Compose callers may re-acquire a refused member-ID observation; never admits a placeholder. */
   readonly settleNetworkMembers?: boolean;
+  readonly clock?: NativeComposeWaitClock;
 }): Promise<NativeComposeOwnershipObservation | null> {
+  const clock = opts.clock ?? systemNativeComposeWaitClock;
   const selected = startupSelection(opts.ownership, opts.restartingServices);
   const signal = opts.ownership.signal;
   // Storage proof exclusions can add fractional milliseconds. Docker probes
@@ -539,7 +551,7 @@ export async function waitNativeComposeStartupOwned(opts: {
   const deadline = Math.floor(opts.deadline);
   let retriedTimeout = false;
   const acquire = () => {
-    const remaining = deadline - Date.now();
+    const remaining = deadline - clock.now();
     if (remaining <= 0) {
       probeRefused("E_NATIVE_COMPOSE_PROBE_TIMEOUT", "timeout");
     }
@@ -564,7 +576,7 @@ export async function waitNativeComposeStartupOwned(opts: {
         retriedTimeout ||
         nativeComposeProbeFailure(error) !== "timeout" ||
         signal?.aborted ||
-        Date.now() >= deadline
+        clock.now() >= deadline
       ) {
         throw error;
       }
@@ -576,12 +588,16 @@ export async function waitNativeComposeStartupOwned(opts: {
   const state = await waitNativeComposeReady({
     deadline,
     signal,
+    clock,
     observe: async () => {
       const result = opts.settleNetworkMembers
         ? await waitForNativeComposeNetworkMembers({
             read,
             deadline,
             signal,
+            ...(opts.clock
+              ? { now: clock.now, sleep: clock.sleep, deadlineNow: clock.now }
+              : {}),
           })
         : await read();
       checkInterruption(signal, false);
@@ -590,7 +606,7 @@ export async function waitNativeComposeStartupOwned(opts: {
         return null;
       }
       opts.observed?.(result.observation);
-      return Date.now() < deadline ? result.observation : null;
+      return clock.now() < deadline ? result.observation : null;
     },
     ready: opts.ready,
     failed: opts.failed,

@@ -71,8 +71,9 @@ mount line: native reads the file after lifecycle hooks and delivers it to each
 such service as a private read-only file. An empty `HACK_NATIVE_GCLOUD_ADC=`
 withholds the consent for one command.
 
-**Image builds.** Services with `build:` need `HACK_NATIVE_BUILDS=1` on the `up`
-command, and the image builder, which `native setup` installs with the rest of
+**Image builds.** Services with `build:` build on native by default
+(`HACK_NATIVE_BUILDS=0` turns builds off). They need the image builder, which
+`native setup` installs with the rest of
 the runtime. A home that an earlier build set up does not have it yet: `up` and
 `hack doctor` say so, and `native setup --accept-downloads` adds it
 ([the image builder](setup.md#the-image-builder)). Each distinct build runs once
@@ -203,7 +204,7 @@ Finish steps 2 to 4 first: the routes and hostnames are read at `up`.
 "$CANDIDATE" ps --path /absolute/project
 ```
 
-Use `HACK_NATIVE_BUILDS=1` on `up` if the project builds images. With HTTPS selected,
+A project that builds images builds them on this `up`. With HTTPS selected,
 this first `up` creates the native CA. While the project runs, let Doctor install it
 and check one route:
 

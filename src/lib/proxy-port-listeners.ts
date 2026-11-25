@@ -6,6 +6,7 @@ import {
   parseSsListeners,
   renderProxyPortConflictMessage,
   renderProxyStartFailureHint,
+  renderProxyStartFailureNotBindHint,
 } from "./proxy-bind.ts";
 import { exec } from "./shell.ts";
 
@@ -38,11 +39,19 @@ export async function listHostTcpListeners(): Promise<
 
 /**
  * After the proxy failed to start: a message naming the listeners that hold
- * the proxy ports and the setting to change, or a generic hint naming the
- * setting when no conflicting listener is visible.
+ * the proxy ports and the setting to change. When no conflicting listener is
+ * visible, a generic hint naming the setting, unless the caller read
+ * Docker's error and it named no port bind (`bindFailure: false`); the
+ * ports are not blamed then (HACK-2673).
  */
 export async function diagnoseProxyPortConflict(opts: {
   readonly bindAddress: string | null;
+  /**
+   * Whether Docker reported a port it could not publish: true or false when
+   * its error was read, null or absent when it was not (the generic port
+   * hint is printed then, as before).
+   */
+  readonly bindFailure?: boolean | null;
   readonly listListeners?: () => Promise<readonly HostListener[] | null>;
 }): Promise<string> {
   const listeners = await (opts.listListeners ?? listHostTcpListeners)();
@@ -50,10 +59,13 @@ export async function diagnoseProxyPortConflict(opts: {
     listeners === null
       ? []
       : findProxyPortConflicts({ listeners, bindAddress: opts.bindAddress });
-  return conflicts.length === 0
-    ? renderProxyStartFailureHint(opts.bindAddress)
-    : renderProxyPortConflictMessage({
-        conflicts,
-        bindAddress: opts.bindAddress,
-      });
+  if (conflicts.length > 0) {
+    return renderProxyPortConflictMessage({
+      conflicts,
+      bindAddress: opts.bindAddress,
+    });
+  }
+  return opts.bindFailure === false
+    ? renderProxyStartFailureNotBindHint()
+    : renderProxyStartFailureHint(opts.bindAddress);
 }

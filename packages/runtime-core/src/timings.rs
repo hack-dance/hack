@@ -40,7 +40,8 @@ steps! {
     ImageEnginePreflight => "image.engine.preflight", ImageTagResolve => "image.tag.resolve",
     ImagePinVerify => "image.pin.verify",
     ImageCacheInventory => "image.cache.inventory",
-    ImageArchiveDigest => "image.archive.digest", ImageImportConnect => "image.import.connect",
+    ImageArchiveDigest => "image.archive.digest", ImageArchiveValidate => "image.archive.validate",
+    ImageImportConnect => "image.import.connect",
     ImageInspect => "image.inspect",
     Truncated => "timings.truncated",
 }

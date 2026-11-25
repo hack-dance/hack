@@ -1,0 +1,33 @@
+stateDiagram-v2
+  direction TB
+  [*] --> checking: rollback
+  checking --> settling: already the original
+  checking --> staged: step output at path
+  checking --> staged: empty, keyed output aside
+  checking --> conflict: changed, no overwrite
+  staged --> aside: rename into displaced/
+  aside --> settling: hard-link original
+  aside --> conflict: name taken meanwhile
+  aside --> conflict: late edit linked back
+  settling --> restored: drop displaced keys
+  staged --> interrupted: SIGKILL
+  aside --> interrupted: SIGKILL
+  settling --> interrupted: SIGKILL
+  interrupted --> checking: plain rerun
+  conflict --> checking: rerun with overwrite
+  restored --> [*]
+  note right of aside
+    Path is empty here
+    Output kept as keptAs
+  end note
+  note right of restored
+    No keyed file is left, so a
+    later deletion is refused
+  end note
+  note right of conflict
+    Other aside file is reported
+    Nothing is deleted
+  end note
+  class restored ok
+  class conflict fail
+  class interrupted wait

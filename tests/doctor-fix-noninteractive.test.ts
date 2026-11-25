@@ -100,6 +100,10 @@ const shellMock = await registerScopedModuleMock({
       if (cmd[0] === "docker" && cmd[1] === "info") {
         return { exitCode: dockerInfoExitCode, stdout: "", stderr: "" };
       }
+      // Doctor runs the Compose plugin, not just a PATH lookup (HACK-2673).
+      if (cmd[0] === "docker" && cmd[1] === "compose" && cmd[2] === "version") {
+        return { exitCode: 0, stdout: "2.40.3\n", stderr: "" };
+      }
       if (cmd[0] === "docker" && cmd[1] === "network" && cmd[2] === "inspect") {
         return { exitCode: 0, stdout: "[]", stderr: "" };
       }

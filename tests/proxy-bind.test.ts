@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   findProxyPortConflicts,
   type HostListener,
+  looksLikePortBindFailure,
   PROXY_BIND_CONFIG_KEY,
   parseLsofListeners,
   parseProxyBindAddress,
@@ -174,6 +175,56 @@ describe("port conflicts", () => {
       });
       expect(hint).toContain("could not start");
       expect(hint).toContain(PROXY_BIND_CONFIG_KEY);
+    }
+  });
+
+  test("a failure Docker did not report as a port bind does not blame 80/443 (HACK-2673)", async () => {
+    const hint = await diagnoseProxyPortConflict({
+      bindAddress: null,
+      bindFailure: false,
+      listListeners: async () => [],
+    });
+    expect(hint).not.toContain("could not start on ports");
+    expect(hint).not.toContain(PROXY_BIND_CONFIG_KEY);
+    expect(hint).toContain("did not report a problem with ports 80 or 443");
+    expect(hint).toContain("hack doctor");
+    // A reported bind failure, or an unread one, keeps the port hint.
+    for (const bindFailure of [true, null]) {
+      expect(
+        await diagnoseProxyPortConflict({
+          bindAddress: null,
+          bindFailure,
+          listListeners: async () => [],
+        })
+      ).toContain(PROXY_BIND_CONFIG_KEY);
+    }
+    // A visible conflict is named whatever the caller read.
+    expect(
+      await diagnoseProxyPortConflict({
+        bindAddress: null,
+        bindFailure: false,
+        listListeners: async () => [vpn],
+      })
+    ).toContain("vpn-client");
+  });
+
+  test("Docker's port publish errors are recognized and others are not (HACK-2673)", () => {
+    for (const text of [
+      "Error response from daemon: driver failed programming external connectivity on endpoint hack-dev-proxy-caddy-1: Bind for 0.0.0.0:443 failed: port is already allocated",
+      "Error starting userland proxy: listen tcp4 0.0.0.0:80: bind: address already in use",
+      "Ports are not available: exposing port TCP 0.0.0.0:443 -> 0.0.0.0:0: listen tcp 0.0.0.0:443: bind: An attempt was made to access a socket",
+      "listen tcp 10.0.0.9:443: bind: cannot assign requested address",
+    ]) {
+      expect(looksLikePortBindFailure(text)).toBe(true);
+    }
+    for (const text of [
+      "docker: 'compose' is not a docker command.",
+      "docker: unknown command: docker compose",
+      "Error response from daemon: pull access denied for caddy",
+      "network hack-dev declared as external, but could not be found",
+      "",
+    ]) {
+      expect(looksLikePortBindFailure(text)).toBe(false);
     }
   });
 });

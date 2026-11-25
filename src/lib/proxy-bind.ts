@@ -184,6 +184,29 @@ export function renderProxyStartFailureHint(
   ].join("\n");
 }
 
+/**
+ * Docker's own words for a port it could not publish: the engine's `port is
+ * already allocated`, the kernel's `address already in use`, `cannot assign
+ * requested address` and a `bind:` failure, and Docker Desktop's `ports are
+ * not available`.
+ */
+const PORT_BIND_FAILURE =
+  /port is already allocated|address already in use|ports are not available|bind: |failed to bind|cannot assign requested address/i;
+
+/** Whether Docker's error text says it could not publish a port. */
+export function looksLikePortBindFailure(text: string): boolean {
+  return PORT_BIND_FAILURE.test(text);
+}
+
+/**
+ * Printed instead of {@link renderProxyStartFailureHint} when Docker's error
+ * was read and names no port it could not publish, so the failure is not
+ * blamed on ports 80 and 443 (HACK-2673).
+ */
+export function renderProxyStartFailureNotBindHint(): string {
+  return `The proxy did not start, and Docker did not report a problem with ports ${PROXY_PORTS.join(" or ")}. Read Docker's error above, fix it, then rerun: hack global install. \`hack doctor\` checks Docker, its Compose plugin and the shared networks.`;
+}
+
 /** Human message naming each conflicting listener and the setting to change. */
 export function renderProxyPortConflictMessage(opts: {
   readonly conflicts: readonly HostListener[];

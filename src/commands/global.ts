@@ -79,6 +79,7 @@ import {
   HackCliError,
   okResult,
 } from "../lib/cli-result.ts";
+import { preflightComposePlugin } from "../lib/compose-engine-preflight.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import {
   resolveGlobalConfigPath,
@@ -156,6 +157,7 @@ import {
   isHackRenderedLoggingCompose,
   removeUnstartedProxyContainers,
   resolveManagedProxyBind,
+  type UnstartedProxyCleanup,
   writeManagedProxyCompose,
 } from "../lib/managed-proxy-compose.ts";
 import {
@@ -189,7 +191,10 @@ import { createNativeHackLocalRouteDependencies } from "../lib/native-hack-local
 import { isLinux, isMac } from "../lib/os.ts";
 import { resolveTrustedSudo } from "../lib/privileged-sudo.ts";
 import { withProcessDeadline } from "../lib/process-deadline.ts";
-import { readProxyBindFromCompose } from "../lib/proxy-bind.ts";
+import {
+  looksLikePortBindFailure,
+  readProxyBindFromCompose,
+} from "../lib/proxy-bind.ts";
 import {
   defaultIngressAddressDeps,
   resolveIngressAddresses,
@@ -1042,6 +1047,22 @@ async function ensureDockerRunning(opts?: {
 
   logger.success({ message: `${backend.name} is running` });
 }
+/**
+ * The Compose plugin check `hack global install` and `hack global up` run
+ * once the engine answers, before they write or start anything with Compose:
+ * without the plugin, `docker compose up` fails before it publishes a port,
+ * and the proxy failure would otherwise read like a port conflict
+ * (HACK-2673). Returns the coded refusal, or null to continue.
+ */
+async function globalComposePluginRefusal(): Promise<HackCliError | null> {
+  return await preflightComposePlugin({
+    deps: {
+      run: async (argv, timeoutMs) =>
+        await exec(argv, { stdin: "ignore", timeoutMs }),
+    },
+  });
+}
+
 async function waitForDocker(opts: {
   readonly timeoutMs: number;
   readonly intervalMs: number;
@@ -1352,6 +1373,11 @@ async function ensureGlobalDockerNetworks(opts: {
 }): Promise<boolean> {
   opts.spinner.start("Checking Docker…");
   await ensureDockerRunning();
+  const composeRefusal = await globalComposePluginRefusal();
+  if (composeRefusal !== null) {
+    opts.spinner.stop("Docker is running, but its Compose plugin is missing");
+    throw composeRefusal;
+  }
   opts.spinner.stop("Docker is running");
 
   opts.spinner.start("Ensuring shared networks…");
@@ -2313,7 +2339,8 @@ async function ensureHackdForGlobalUp(): Promise<void> {
 /**
  * After the proxy's `compose up` failed: a failed start can leave the proxy
  * created but never started, with no network endpoint, so remove it for the
- * next attempt to recreate (HACK-2328), then name the listeners on 80/443.
+ * next attempt to recreate (HACK-2328), then name the listeners on 80/443,
+ * or, when Docker's start error names no port, say so (HACK-2673).
  */
 async function reportProxyStartFailure(opts: {
   readonly composeFile: string;
@@ -2327,8 +2354,26 @@ async function reportProxyStartFailure(opts: {
       bindAddress: readProxyBindFromCompose(
         (await readTextFile(opts.composeFile)) ?? ""
       ),
+      bindFailure: proxyBindFailure(cleanup),
     }),
   });
+}
+
+/**
+ * Whether the failed `compose up` was Docker failing to publish the proxy's
+ * ports. Only `caddy` publishes ports, and Docker creates its container
+ * before it publishes them: a failed publish leaves it `created`, with the
+ * reason in its start error. So no never-started `caddy` means the failure
+ * was elsewhere (false); a recorded error is classified; anything unread is
+ * unknown (null).
+ */
+function proxyBindFailure(cleanup: UnstartedProxyCleanup): boolean | null {
+  if (cleanup.kind === "none") {
+    return false;
+  }
+  return cleanup.startError === null
+    ? null
+    : looksLikePortBindFailure(cleanup.startError);
 }
 
 /**
@@ -2791,6 +2836,10 @@ async function runGlobalUpChange(opts: UpOptions): Promise<GlobalUpResult> {
   const logging = await upLoggingChoice({ opts, paths, login });
 
   await ensureDockerRunning({ login });
+  const composeRefusal = await globalComposePluginRefusal();
+  if (composeRefusal !== null) {
+    return { exit: 1, failedStage: "routing", error: composeRefusal };
+  }
   await assertGlobalLoginRoutingImages({
     composeFile: paths.caddyCompose,
     login,

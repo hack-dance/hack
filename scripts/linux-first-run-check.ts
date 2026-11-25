@@ -3,8 +3,9 @@
  * Linux first-run check for the Compose path, without sudo (HACK-2329).
  *
  * Runs a built `hack` the way a new Linux user would, in a fresh private HOME:
- * doctor, global install (and the `proxy.bind_address` retry when :443 is
- * taken), init, up/ps/logs/open/exec/run/restart/down with `--json` shape
+ * doctor, global install without the Compose plugin (a `docker` wrapper that
+ * rejects `compose` must get the plugin's code, not a port hint), global
+ * install (and the `proxy.bind_address` retry when :443 is taken), init, up/ps/logs/open/exec/run/restart/down with `--json` shape
  * checks, routed HTTPS against Hack's CA, env and a secret (never printed),
  * host exec, a branch instance, foreground `up` with Ctrl-C in a pty, the
  * daemon, the update check and `native setup`. It prints one Markdown table
@@ -748,6 +749,98 @@ async function httpsHealth(
   ]);
 }
 
+/**
+ * A `docker` that has no Compose plugin: `docker compose …` fails the way
+ * Docker's CLI does without it, and every other command runs `docker` (an
+ * absolute path to the real CLI).
+ */
+export function noComposeDockerScript(docker: string): string {
+  const quoted = `'${docker.replaceAll("'", "'\\''")}'`;
+  return [
+    "#!/bin/sh",
+    'if [ "$1" = compose ]; then',
+    "  echo \"docker: 'compose' is not a docker command.\" >&2",
+    "  exit 1",
+    "fi",
+    `exec ${quoted} "$@"`,
+    "",
+  ].join("\n");
+}
+
+/**
+ * Pass when `hack global install` without the Compose plugin failed, named
+ * the plugin with its code, and did not blame ports 80/443 (HACK-2673).
+ */
+export function noComposeInstallVerdict(ran: {
+  readonly exit: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+}): { readonly ok: boolean; readonly note: string } {
+  const text = plain(`${ran.stdout}\n${ran.stderr}`);
+  if (ran.exit === 0) {
+    return { ok: false, note: "install succeeded without the Compose plugin" };
+  }
+  if (text.includes("could not start on ports")) {
+    return { ok: false, note: "blamed ports 80/443" };
+  }
+  const named =
+    text.includes("E_DOCKER_UNAVAILABLE") &&
+    text.includes("Docker Compose v2 plugin");
+  return named
+    ? { ok: true, note: "E_DOCKER_UNAVAILABLE names the Compose plugin" }
+    : {
+        ok: false,
+        note: `did not name the plugin: ${firstError({ ...ran, seconds: 0, killedAtLimitMs: null })}`,
+      };
+}
+
+/**
+ * `hack global install` with a `docker` on PATH that has no Compose plugin
+ * (see {@link noComposeDockerScript}). It refuses once the engine answers,
+ * before it creates networks or starts the proxy, so it leaves nothing for
+ * the real install that follows (HACK-2673).
+ */
+async function composePluginMissingStep(run: FirstRun): Promise<void> {
+  const name = "2 global install (no Compose plugin)";
+  const command = "hack global install  # docker without compose on PATH";
+  const docker = Bun.which("docker", { PATH: run.env.PATH });
+  if (docker === null) {
+    run.record({
+      step: name,
+      command,
+      exit: null,
+      result: "fail",
+      note: "no docker on PATH",
+    });
+    return;
+  }
+  const bin = join(run.opts.scratch, "no-compose-bin");
+  await mkdir(bin, { recursive: true, mode: 0o700 });
+  await writeFile(join(bin, "docker"), noComposeDockerScript(docker), {
+    mode: 0o700,
+  });
+  try {
+    const ran = await run.hack(["global", "install"], {
+      env: { PATH: `${bin}:${run.env.PATH}` },
+      timeoutMs: 300_000,
+    });
+    const verdict =
+      ran.killedAtLimitMs === null
+        ? noComposeInstallVerdict(ran)
+        : { ok: false, note: "killed by the step's command limit" };
+    run.record({
+      step: name,
+      command,
+      exit: ran.exit,
+      seconds: ran.seconds,
+      result: verdict.ok ? "pass" : "fail",
+      note: verdict.note,
+    });
+  } finally {
+    await rm(bin, { recursive: true, force: true });
+  }
+}
+
 async function globalSetup(run: FirstRun): Promise<boolean> {
   await run.step("2 doctor (fresh)", ["doctor"], (r) => ({
     ok: "info",
@@ -764,6 +857,7 @@ async function globalSetup(run: FirstRun): Promise<boolean> {
           : "not one JSON value",
     })
   );
+  await composePluginMissingStep(run);
   const install = await run.step(
     "2 global install",
     ["global", "install"],

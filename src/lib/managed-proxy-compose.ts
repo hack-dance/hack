@@ -267,13 +267,20 @@ async function copyToFreshBackup(opts: {
 /** Outcome of {@link removeUnstartedProxyContainers}. */
 export type UnstartedProxyCleanup =
   | { readonly kind: "none" }
-  | { readonly kind: "removed"; readonly ids: readonly string[] }
+  | {
+      readonly kind: "removed";
+      readonly ids: readonly string[];
+      /** Why Docker could not start them; see {@link readStartErrors}. */
+      readonly startError: string | null;
+    }
   | {
       readonly kind: "failed";
       /** Ids that could not be removed; empty when listing itself failed. */
       readonly ids: readonly string[];
       /** What the user can run instead. */
       readonly message: string;
+      /** Why Docker could not start them; null when listing failed. */
+      readonly startError: string | null;
     };
 
 const DOCKER_CLEANUP_TIMEOUT_MS = 15_000;
@@ -313,6 +320,7 @@ export async function removeUnstartedProxyContainers(): Promise<UnstartedProxyCl
       kind: "failed",
       ids: [],
       message: `Could not list never-started proxy containers; check with: docker ps --all --filter label=com.docker.compose.project=${GLOBAL_CADDY_PROJECT_NAME} --filter label=com.docker.compose.service=caddy --filter status=created, and remove any with docker rm <id> before retrying`,
+      startError: null,
     };
   }
   const ids = listed.stdout
@@ -322,6 +330,7 @@ export async function removeUnstartedProxyContainers(): Promise<UnstartedProxyCl
   if (ids.length === 0) {
     return { kind: "none" };
   }
+  const startError = await readStartErrors(ids);
   const removed = await exec(["docker", "rm", ...ids], {
     stdin: "ignore",
     timeoutMs: DOCKER_CLEANUP_TIMEOUT_MS,
@@ -331,7 +340,30 @@ export async function removeUnstartedProxyContainers(): Promise<UnstartedProxyCl
       kind: "failed",
       ids,
       message: `Could not remove the never-started proxy container (${ids.join(", ")}); it would start with no network next time. Remove it with: docker rm ${ids.join(" ")}`,
+      startError,
     };
   }
-  return { kind: "removed", ids };
+  return { kind: "removed", ids, startError };
+}
+
+/**
+ * The error Docker recorded when it could not start these containers
+ * (`.State.Error`, for example a port it could not publish), one line per
+ * container that has one. Null when the read failed or none recorded one,
+ * so callers cannot tell why the start failed. Read before the containers
+ * are removed, for the port hint (HACK-2673).
+ */
+async function readStartErrors(ids: readonly string[]): Promise<string | null> {
+  const inspected = await exec(
+    ["docker", "inspect", "--format", "{{.State.Error}}", ...ids],
+    { stdin: "ignore", timeoutMs: DOCKER_CLEANUP_TIMEOUT_MS }
+  );
+  if (inspected.exitCode !== 0) {
+    return null;
+  }
+  const lines = inspected.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  return lines.length === 0 ? null : lines.join("\n");
 }

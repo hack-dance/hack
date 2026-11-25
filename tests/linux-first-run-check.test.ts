@@ -1,14 +1,66 @@
 import { expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   countJsonValues,
   globalContainersVerdict,
   groupWritableAncestors,
   installedLauncher,
+  noComposeDockerScript,
+  noComposeInstallVerdict,
   parseCheckArgs,
   pathWithoutHack,
   renderStepTable,
 } from "../scripts/linux-first-run-check.ts";
+
+test("the no-Compose docker wrapper rejects only compose and runs the real CLI otherwise (HACK-2673)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "first-run-no-compose-"));
+  try {
+    // A stand-in for the real docker, at a path that needs quoting.
+    const real = join(dir, "real docker's bin");
+    await writeFile(real, '#!/bin/sh\necho "real $*"\n', { mode: 0o700 });
+    const wrapper = join(dir, "docker");
+    await writeFile(wrapper, noComposeDockerScript(real), { mode: 0o700 });
+    const run = (args: string[]) =>
+      Bun.spawnSync([wrapper, ...args], { stdout: "pipe", stderr: "pipe" });
+    const compose = run(["compose", "version"]);
+    expect(compose.exitCode).toBe(1);
+    expect(compose.stderr.toString()).toContain(
+      "'compose' is not a docker command"
+    );
+    const info = run(["info", "--format", "x y"]);
+    expect(info.exitCode).toBe(0);
+    expect(info.stdout.toString()).toBe("real info --format x y\n");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the no-Compose install passes only when it names the plugin and not the ports (HACK-2673)", () => {
+  const refusal =
+    "E_DOCKER_UNAVAILABLE: Docker is running, but `docker compose version` failed: Hack needs the Docker Compose v2 plugin.\n";
+  expect(
+    noComposeInstallVerdict({ exit: 1, stdout: "", stderr: refusal })
+  ).toEqual({
+    ok: true,
+    note: "E_DOCKER_UNAVAILABLE names the Compose plugin",
+  });
+  expect(
+    noComposeInstallVerdict({
+      exit: 1,
+      stdout: "",
+      stderr: `${refusal}The proxy could not start on ports 80 and 443.\n`,
+    })
+  ).toEqual({ ok: false, note: "blamed ports 80/443" });
+  expect(noComposeInstallVerdict({ exit: 0, stdout: "", stderr: "" }).ok).toBe(
+    false
+  );
+  expect(
+    noComposeInstallVerdict({ exit: 1, stdout: "", stderr: "boom\n" }).note
+  ).toContain("did not name the plugin");
+});
 
 test("counts one document, line-delimited values, and refuses garbage", () => {
   expect(countJsonValues('{\n  "ok": true\n}\n')).toBe(1);

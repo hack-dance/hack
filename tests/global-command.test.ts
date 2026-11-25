@@ -1290,6 +1290,145 @@ test(
   { timeout: 20_000 }
 );
 
+/** A Docker CLI without the Compose v2 plugin, as on a fresh Linux host. */
+const NO_COMPOSE_PLUGIN = {
+  exitCode: 1,
+  stdout: "",
+  stderr: "docker: 'compose' is not a docker command.\nSee 'docker --help'\n",
+} as const;
+
+function isComposeVersion(cmd: readonly string[]): boolean {
+  return cmd[0] === "docker" && cmd[1] === "compose" && cmd[2] === "version";
+}
+
+function composeUpRuns(): string[][] {
+  return runCalls.filter(
+    (cmd) => cmd.includes("compose") && cmd.includes("up")
+  );
+}
+
+test(
+  "global install without the Compose plugin names it with a stable code, not ports 80/443 (HACK-2673)",
+  async () => {
+    await writeInstallStubs();
+    execMockResponder = (cmd) =>
+      isComposeVersion(cmd) ? NO_COMPOSE_PLUGIN : null;
+
+    const { code, output } = await runNonInteractiveInstall();
+
+    expect(code).not.toBe(0);
+    expect(output).toContain("E_DOCKER_UNAVAILABLE");
+    expect(output).toContain("Docker Compose v2 plugin");
+    expect(output).toContain("docker-compose-plugin");
+    expect(output).not.toContain("could not start on ports");
+    expect(output).not.toContain("proxy.bind_address");
+    expect(output).not.toContain("Next:");
+    // Refused once Docker answered: no network, no proxy start, no host DNS.
+    expect(execCalls.some(isComposeVersion)).toBe(true);
+    expect(
+      execCalls.some((cmd) => cmd[0] === "docker" && cmd[1] === "network")
+    ).toBe(false);
+    expect(composeUpRuns()).toEqual([]);
+    expect(linuxDnsPrivileged).toEqual([]);
+  },
+  { timeout: 20_000 }
+);
+
+test("global up --json without the Compose plugin fails routing with E_DOCKER_UNAVAILABLE before Compose runs (HACK-2673)", async () => {
+  const caddyCompose = globalCaddyComposePath();
+  await writeComposeFile(caddyCompose);
+  execMockResponder = (cmd) =>
+    isComposeVersion(cmd) ? NO_COMPOSE_PLUGIN : null;
+  process.env.HACK_DAEMON_AUTOSTART_DISABLE = "1";
+  const out: string[] = [];
+  const stdout = spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    out.push(String(chunk));
+    return true;
+  });
+  const stderr = spyOn(process.stderr, "write").mockImplementation(() => true);
+  try {
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "up", "--json"])).toBe(1);
+  } finally {
+    stdout.mockRestore();
+    stderr.mockRestore();
+    resetStdoutReservationForTests();
+  }
+  const error = machineError(out.join(""), "E_DOCKER_UNAVAILABLE");
+  expect(error.message).toContain("Docker Compose v2 plugin");
+  expect(error.detail).toMatchObject({ failedStage: "routing" });
+  expect(composeUpRuns()).toEqual([]);
+});
+
+test(
+  "global install whose proxy start fails for another reason does not blame ports 80/443 (HACK-2673)",
+  async () => {
+    await writeInstallStubs();
+    const caddyCompose = globalCaddyComposePath();
+    // Compose failed before it created the proxy container (a pull or
+    // network error, say): no never-started caddy, so no failed publish.
+    runExitResponder = (cmd) =>
+      cmd.includes(caddyCompose) && cmd.includes("up") ? 1 : null;
+
+    const { code, output } = await runNonInteractiveInstall();
+
+    expect(code).not.toBe(0);
+    expect(output).toContain("did not report a problem with ports 80 or 443");
+    expect(output).not.toContain("could not start on ports");
+    expect(output).not.toContain("proxy.bind_address");
+    expect(output).toContain("Global install did not finish");
+  },
+  { timeout: 20_000 }
+);
+
+test(
+  "global install keeps the port hint when Docker recorded a failed publish on the never-started proxy (HACK-2673)",
+  async () => {
+    await writeInstallStubs();
+    const caddyCompose = globalCaddyComposePath();
+    runExitResponder = (cmd) =>
+      cmd.includes(caddyCompose) && cmd.includes("up") ? 1 : null;
+    execMockResponder = (cmd) => {
+      if (
+        cmd[0] === "docker" &&
+        cmd[1] === "ps" &&
+        cmd.includes("status=created")
+      ) {
+        return { exitCode: 0, stdout: "0123456789ab\n", stderr: "" };
+      }
+      if (
+        cmd[0] === "docker" &&
+        cmd[1] === "inspect" &&
+        cmd.includes("{{.State.Error}}")
+      ) {
+        return {
+          exitCode: 0,
+          stdout:
+            "driver failed programming external connectivity on endpoint hack-dev-proxy-caddy-1: Bind for 0.0.0.0:443 failed: port is already allocated\n",
+          stderr: "",
+        };
+      }
+      return null;
+    };
+
+    const { code, output } = await runNonInteractiveInstall();
+
+    expect(code).not.toBe(0);
+    expect(output).toContain("could not start on ports 80 and 443");
+    expect(output).toContain("proxy.bind_address");
+    // The start error was read before the container was removed.
+    const inspect = execCalls.findIndex(
+      (cmd) => cmd[1] === "inspect" && cmd.includes("{{.State.Error}}")
+    );
+    const removal = execCalls.findIndex(
+      (cmd) => cmd[1] === "rm" && cmd.includes("0123456789ab")
+    );
+    expect(inspect).toBeGreaterThanOrEqual(0);
+    expect(removal).toBeGreaterThan(inspect);
+  },
+  { timeout: 20_000 }
+);
+
 test(
   "global install without a TTY applies a new proxy.bind_address to the existing proxy file (HACK-2328)",
   async () => {

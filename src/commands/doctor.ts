@@ -89,6 +89,7 @@ import {
   resolveGlobalCaddyIp,
 } from "../lib/caddy-hosts.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
+import { inspectComposePlugin } from "../lib/compose-engine-preflight.ts";
 import {
   adoptedComposeEnvOverrideNextStep,
   composeEnvAtRestRepairs,
@@ -323,7 +324,10 @@ import {
   scopeRuntimeHygieneToProject,
 } from "../lib/project-runtime-hygiene.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
-import { readProxyBindFromCompose } from "../lib/proxy-bind.ts";
+import {
+  looksLikePortBindFailure,
+  readProxyBindFromCompose,
+} from "../lib/proxy-bind.ts";
 import { withIngressChange } from "../lib/proxy-ingress-addresses.ts";
 import {
   inspectProxyLoopback,
@@ -977,9 +981,9 @@ async function runDoctorAudit(
     )
   );
   results.push(
-    await runCheck(s, "docker compose", () =>
-      checkTool({ name: "docker compose", cmd: "docker" })
-    )
+    await runCheck(s, "docker compose", () => checkComposePlugin(), {
+      timeoutMs: 10_000,
+    })
   );
   results.push(
     await runCheck(s, "brew", () =>
@@ -2485,6 +2489,38 @@ async function checkMutagenBinary(): Promise<CheckResult> {
     status: "ok",
     message: firstLine && firstLine.length > 0 ? firstLine : mutagen,
   };
+}
+
+/**
+ * `docker compose version`, not just `docker` on PATH: a Docker CLI without
+ * the Compose v2 plugin passed this check before, while `hack global
+ * install` and `hack up` failed (HACK-2673).
+ */
+async function checkComposePlugin(): Promise<CheckResult> {
+  if (!(await findExecutableInPath("docker"))) {
+    return {
+      name: "docker compose",
+      status: "error",
+      message: "docker not found in PATH",
+    };
+  }
+  const inspection = await inspectComposePlugin({
+    deps: {
+      run: async (argv, timeoutMs) =>
+        await exec(argv, { stdin: "ignore", timeoutMs }),
+    },
+  });
+  return inspection.ok
+    ? {
+        name: "docker compose",
+        status: "ok",
+        message: inspection.version || "docker compose version succeeded",
+      }
+    : {
+        name: "docker compose",
+        status: "error",
+        message: inspection.error.message,
+      };
 }
 
 async function checkDockerRunning(): Promise<CheckResult> {
@@ -5912,6 +5948,11 @@ async function maybeStartGlobalCaddyCompose(opts: {
       await diagnoseProxyPortConflict({
         bindAddress: readProxyBindFromCompose(
           (await readTextFile(opts.paths.caddyCompose)) ?? ""
+        ),
+        // Compose's own error was captured: blame the ports only when it
+        // names one Docker could not publish (HACK-2673).
+        bindFailure: looksLikePortBindFailure(
+          `${started.stderr}\n${started.stdout}`
         ),
       }),
       "runtime repair"

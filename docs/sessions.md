@@ -59,7 +59,7 @@ picker from inside tmux.
 | `hack session start my-project --service api` | `my-project.svc-api` |
 | `hack session start my-project --env qa --service api` | `my-project.env-qa.svc-api` |
 | `hack up` in a project with lifecycle processes | `my-project--lifecycle` |
-| the same, in a branch instance | `my-project--lifecycle-<branch>` |
+| the same, in a branch instance | `my-project--<branch>--lifecycle` |
 
 ```mermaid
 ---

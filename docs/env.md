@@ -555,7 +555,7 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | --- | --- | --- | --- | --- |
 | `hack up` | `--env`, `--target` | Once, when services are created; values go into Compose containers and lifecycle hooks/processes, and the selection is recorded for the running stack. | `hack restart` or `hack env apply --service <service>`; editing env files does not change running containers. | Authored native projects receive the same selection before dispatch. |
 | `hack pull` | `--env` | Selects the environment used to interpolate image references before pulling. | Rerun `hack pull` to refresh images. | Applies to Compose and native projects. |
-| `hack down` | `--env`, `--target` | At teardown, for lifecycle down hooks and for Compose itself (interpolation and `COMPOSE_PROFILES`); omitted reuses the selection recorded for the running stack (base included), else the configured default. Down also enables every profile the stack's last `up` activated, so a profiled service started through `COMPOSE_PROFILES` is stopped even after the env changed. | None; nothing is delivered to containers. | The native runtime backend refuses `--env`. |
+| `hack down` | `--env`, `--service`, `--target` | At teardown, for Compose interpolation and `COMPOSE_PROFILES`, and for lifecycle down hooks when stopping the whole copy. Omitted reuses the running stack's recorded selection, including base, or uses the configured default. Down also enables every profile the stack's last `up` activated. | None; nothing is delivered to containers. | With `--service`, only that service stops on the local Compose backend. The native runtime backend refuses `--env`. |
 | `hack restart` | `--env`, `--target` | When services are recreated; omitted reuses the selection recorded for the running stack (base included), else the configured default, and an explicit `--env` (including `base`) wins. | This is the refresh path for the whole stack or the named services. | Authored native projects receive the same selection before dispatch. |
 | `hack run` | `--env` | Per invocation, for the new one-off container; omitted reuses the selection recorded for the running stack, else the configured default, so the run can use the running dependencies. | Each run resolves again. | The native backend accepts only the running selection: an `--env` that differs, or an empty one, is refused; restart with the selection first. An authored `.hack/hack.project.json` project (experimental, a bounded subset) on the Compose backend does not yet reuse the recorded selection: omitted `--env` resolves the configured default, so pass the running overlay explicitly. |
 | `hack exec` | `--env` | Omitted uses the env recorded for the running stack (base included), else the configured default; an explicit `--env` is checked against it. The command runs with the env the container was created with. Compose exec and native-runtime exec (Compose-file and authored native projects) warn on stderr when the service's resolved env changed since it started. | `hack restart <service>` (or `hack restart --env <name>`); native projects restart as a whole with `hack restart` | Compose refuses an explicit `--env` that differs from the env recorded for the running stack, naming the running env and the two ways out (omit `--env`, or restart with the requested env); the native runtime backend refuses `--env` and always uses the running selection. |
@@ -1892,13 +1892,20 @@ process environment. The in-memory backend is cleared after each test.
 
 Declare sign-in requirements in `.hack/hack.config.json`. A remote target's
 `requires` array names those requirements. Hack checks the default target's
-requirements before running Compose lifecycle hooks for `up`, `restart`, or
-`run`. When you select services explicitly, Hack checks the remotes whose
-mapped env names match an `environment` key or a Compose interpolation
-reference in a selected service or its dependencies. With no service selection, Hack checks every default
-remote. Hack also checks every default remote when it cannot determine the
-selected services' environment keys, including when a service uses `env_file`
-or the checkout has managed env layers.
+requirements before starting the whole project with `hack up`. Use
+`hack up --use db=TARGET` to choose a target for one start, or save a checkout
+preference with `hack use db=TARGET` while the project is stopped. For projects
+with remotes, scoped `up`, `restart`, and `run` refuse until they can preserve
+remote bindings. Use `hack down` followed by whole-project `hack up` to restart.
+For Compose interpolation supplied only by a remote binding, use a default such
+as `${DB_HOST:-}` so commands like `hack down` can read the Compose file without
+the binding. If a later edit introduces a missing required variable, Compose
+can refuse `hack down` until you fix the file or supply the variable.
+Teardown hooks omit a remote binding when its declared address, port, or
+binding templates differ from startup. For an `env_ref` hostname, the digest
+covers the variable name. The hook resolves its current value.
+
+
 Doctor runs preset checks and shows each declared login command. It reports
 custom checks as `not checked` after looking up their executables.
 
@@ -1928,7 +1935,8 @@ declarations.
 ### Declared remote targets in Compose status
 
 When a project declares remotes, `hack ps` adds a row for each configured
-default target beside the Compose service rows. The `USE` column names the
+remote beside the Compose service rows. The running selection is shown as
+`unknown` when it cannot be recovered. The `USE` column names the
 target and `POINTS AT` shows its address and port. An environment-backed
 hostname appears as the variable name, such as `$REMOTE_DB_HOST:5432`.
 

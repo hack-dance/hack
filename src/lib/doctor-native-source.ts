@@ -31,7 +31,7 @@ export async function checkNativeSourceSize(opts: {
   readonly projectRoot: string;
   readonly invoke?: typeof invokeNativeRuntime;
 }): Promise<{
-  readonly name: string;
+  readonly name: typeof NATIVE_SOURCE_CHECK;
   readonly status: "ok" | "warn";
   readonly message: string;
   readonly nativeSource?: NativeSourceReport;

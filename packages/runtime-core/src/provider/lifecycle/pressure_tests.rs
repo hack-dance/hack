@@ -462,7 +462,7 @@ fn down_samples_the_host_beside_the_stop_and_settles_it_after() {
         "let stopped = provider_stopped(&owner.phase, initial.process_alive);",
         "admission::opening::StopSample::beside(",
         "artifact::verify(candidate)?;",
-        "super::hostname_authority::managed::stop(candidate, &owner)?;",
+        "super::hostname_authority::managed::stop(candidate, owner)?;",
         "super::publication::release(",
         "guest_stop(candidate, &mut owner)",
         "stop_sample.settle(&root(candidate), &lock, &admission::opening::System);",

@@ -1,11 +1,13 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { link, lstat, mkdir, readdir, rename, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
 import {
   type ComposeEnvOverrideContent,
   classifyComposeEnvOverrideText,
+  EMPTY_COMPOSE_ENV_REFERENCE_OVERRIDE,
 } from "./compose-managed-env.ts";
+import { COMPOSE_ENV_OVERRIDE_WAIT_MS } from "./compose-startup-budget.ts";
 import { isRecord } from "./guards.ts";
 import {
   inspectLegacyComposeAdoptionSelectionDetail,
@@ -16,6 +18,8 @@ import {
   readReplaceablePrivateFile,
   replacePrivateFileAtomic,
 } from "./private-file.ts";
+import { withTerminationAbort } from "./project-shared-helpers.ts";
+import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
 
 /**
  * At-rest ownership of `.hack/.internal/compose.env.override.yml`.
@@ -51,6 +55,11 @@ export const COMPOSE_ENV_OVERRIDE_FILENAME = "compose.env.override.yml";
 
 const REFUSAL =
   "Refused the generated Compose env override: it, .hack or .hack/.internal is a symlink or not a regular file or directory. Replace it with a regular file or directory and retry; values omitted.";
+const MAX_REFERENCE_PROOF_BYTES = 1024 * 1024;
+const REFERENCE_DIGEST = /^[0-9a-f]{64}$/;
+const EMPTY_REFERENCE_DIGEST = createHash("sha256")
+  .update(EMPTY_COMPOSE_ENV_REFERENCE_OVERRIDE)
+  .digest("hex");
 
 /** Absolute path of the generated env override for a project directory. */
 export function composeEnvOverridePath(opts: {
@@ -147,30 +156,163 @@ export async function writeComposeEnvOverride(opts: {
   /** Clock for the stale-aside age check; tests only, no authority. */
   readonly now?: () => number;
 }): Promise<string> {
+  return await withTerminationAbort((signal) =>
+    withComposeEnvOverride({ ...opts, signal, run: async (path) => path })
+  );
+}
+
+/**
+ * Keep a generated reference file paired with its process environment while
+ * Compose reads it. The path stays stable for existing container labels.
+ */
+export async function withComposeEnvOverride<T>(opts: {
+  readonly projectDir: string;
+  readonly text: string;
+  readonly now?: () => number;
+  readonly signal?: AbortSignal;
+  readonly run: (path: string) => Promise<T>;
+}): Promise<T> {
+  return await withReferenceFile({
+    ...opts,
+    path: composeEnvOverridePath(opts),
+  });
+}
+
+/**
+ * Attached scoped starts keep their own value-free references without holding
+ * the shared override lock for the terminal lifetime. The content path stays
+ * available for Docker's config_files labels after the command exits.
+ */
+export async function prepareForegroundComposeEnvOverride(opts: {
+  readonly projectDir: string;
+  readonly text?: string;
+}): Promise<string | undefined> {
+  const current = await inspectComposeEnvOverrideAtRest(opts);
+  const text =
+    opts.text ??
+    (current.kind === "references" || current.kind === "plaintext"
+      ? EMPTY_COMPOSE_ENV_REFERENCE_OVERRIDE
+      : undefined);
+  if (text === undefined) {
+    return undefined;
+  }
+  // Keep the ordered canonical file used by existing containers and adoption.
+  // Replace old literal content atomically so its path remains usable.
+  if (!(await composeEnvOverrideAdoptionBound(opts))) {
+    await writeComposeEnvOverride({ ...opts, text });
+  }
+  const path = foregroundComposeEnvPath({
+    ...opts,
+    digest: createHash("sha256").update(text).digest("hex"),
+  });
+  return await withTerminationAbort((signal) =>
+    withReferenceFile({ ...opts, text, path, signal, run: async () => path })
+  );
+}
+
+function foregroundComposeEnvPath(opts: {
+  readonly projectDir: string;
+  readonly digest: string;
+}): string {
+  return join(
+    dirname(composeEnvOverridePath(opts)),
+    `foreground-env.${opts.digest}.override.yml`
+  );
+}
+
+/**
+ * An attached start can label a container with a content-addressed alias
+ * of its canonical generated override. A full start can omit an empty
+ * override. Both cases must preserve Compose's service config hash.
+ */
+export async function isEquivalentRetainedComposeEnvOverride(opts: {
+  readonly projectDir: string;
+  readonly observedPath?: string;
+  readonly releasedReferenceDigest?: string;
+}): Promise<boolean> {
+  const { observedPath, releasedReferenceDigest } = opts;
+  // Rollback restores original sources using saved container and hash proofs.
+  // It deliberately releases the env files themselves.
+  if (releasedReferenceDigest !== undefined) {
+    if (observedPath === undefined) {
+      return releasedReferenceDigest === EMPTY_REFERENCE_DIGEST;
+    }
+    return (
+      REFERENCE_DIGEST.test(releasedReferenceDigest) &&
+      observedPath ===
+        foregroundComposeEnvPath({ ...opts, digest: releasedReferenceDigest })
+    );
+  }
+  try {
+    const canonical = await readReplaceablePrivateFile({
+      ...fileOptions(composeEnvOverridePath(opts)),
+      maxBytes: MAX_REFERENCE_PROOF_BYTES,
+    });
+    if (observedPath === undefined) {
+      return canonical?.text === EMPTY_COMPOSE_ENV_REFERENCE_OVERRIDE;
+    }
+    if (
+      !canonical ||
+      classifyComposeEnvOverrideText(canonical.text).kind !== "references" ||
+      observedPath !==
+        foregroundComposeEnvPath({
+          ...opts,
+          digest: createHash("sha256").update(canonical.text).digest("hex"),
+        })
+    ) {
+      return false;
+    }
+    const observed = await readReplaceablePrivateFile({
+      ...fileOptions(observedPath),
+      maxBytes: MAX_REFERENCE_PROOF_BYTES,
+    });
+    return (
+      observed !== null &&
+      (observed.mode & 0o077) === 0 &&
+      observed.text === canonical.text
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function withReferenceFile<T>(opts: {
+  readonly path: string;
+  readonly text: string;
+  readonly now?: () => number;
+  readonly signal?: AbortSignal;
+  readonly run: (path: string) => Promise<T>;
+}): Promise<T> {
   if (classifyComposeEnvOverrideText(opts.text).kind !== "references") {
     throw new Error(
       "Refused to write a Compose env override that holds literal values; values omitted."
     );
   }
-  const path = composeEnvOverridePath(opts);
+  const { path } = opts;
   // Refuse a linked `.hack` or `.internal` before mkdir can create anything
   // through it; the read and replace below check both again.
   if ((await holdOverrideDirectories(path)).kind === "refused") {
     throw new Error(REFUSAL);
   }
-  await mkdir(dirname(path), { recursive: true });
-  const options = fileOptions(path);
-  const existing = await readReplaceablePrivateFile(options);
-  if (existing?.text !== opts.text || (existing.mode & 0o077) !== 0) {
-    await replacePrivateFileAtomic({ ...options, text: opts.text });
-  }
-  // An aside left by a crashed removal can hold values, so a rendering command
-  // sweeps stale ones too, once the directories passed the symlink checks
-  // above. Best effort: `hack doctor` reports what remains.
-  await removeStaleAsidesIfOwned({ path, now: opts.now ?? Date.now }).catch(
-    () => 0
-  );
-  return path;
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  return await withProjectsRegistryLock({
+    lockPath: `${path}.lock`,
+    label: "Compose env override",
+    timeoutMs: COMPOSE_ENV_OVERRIDE_WAIT_MS,
+    signal: opts.signal,
+    run: async () => {
+      const options = fileOptions(path);
+      const existing = await readReplaceablePrivateFile(options);
+      if (existing?.text !== opts.text || (existing.mode & 0o077) !== 0) {
+        await replacePrivateFileAtomic({ ...options, text: opts.text });
+      }
+      // An interrupted removal can leave an older literal file beside this one.
+      await removeStaleAsidesIfOwned({ path, now: opts.now ?? Date.now }).catch(
+        () => 0
+      );
+      return await opts.run(path);
+    },
+  });
 }
 
 /**

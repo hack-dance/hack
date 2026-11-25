@@ -112,6 +112,13 @@ If writable source sharing asks for consent, review the exact source roots and
 [sharing limits](full-reference.md#explicit-writable-development-source) before
 opting in. Check the app and saved data yourself; a running VM is not acceptance.
 
+**Build base registry refusal (`registry_image`).** Foreground and detached
+starts can report `Image unavailable: could not resolve build base` when the
+registry cannot resolve a Dockerfile base. Check the reported reason, restore
+registry access, then retry `hack up`. `Already present` lists images Hack
+confirmed in the running guest. It does not confirm that the named build base
+can be resolved offline.
+
 Since next.17, use
 `"$CANDIDATE" exec api -- /bin/sh` from a foreground terminal for a live shell.
 Terminal stdin and stdout are required; redirects or `HACK_NO_INTERACTIVE=1`
@@ -121,7 +128,21 @@ launchers if requested. After an uncertain outcome, inspect
 `"$CANDIDATE" exec-sessions` and follow the
 [recovery instructions](https://github.com/hack-dance/hack/blob/5002cf87bb50686b17ceae8a4c835f524ee1b3a5/docs/guides/native-candidate.md#normal-native-exec).
 
-Native `up --detach` and `up --json` wait for the background owner to report ready.
+Native `up`, `up --detach` and `up --json` return once every container has started;
+the closing line counts the routes still warming, and `--json` says
+`readiness: "warming"`. `up --wait` returns once every service is ready, as before.
+`up.after` hooks run at started: a hook that calls a project URL needs `--wait`.
+`hack exec` and `hack run` wait for ready on their own; `hack open` does not.
+A loopback port can accept connections as soon as its own service is ready.
+During startup, `hack ps` shows verified loopback publications, and
+`hack open <service>` can open a service with one verified loopback address.
+Other services can still be starting. If the start fails or is cancelled,
+the owner retires the ports it has already published. HTTPS addresses still
+depend on the HTTPS frontend being ready.
+Once HTTPS is ready for a project, starting or stopping another project in the
+same native home leaves its routes available.
+Text output reports each build as it finishes, including its service names,
+outcome and elapsed time. Build output stays with foreground `hack up`.
 See [native command forms and startup limits](https://github.com/hack-dance/hack/blob/next/docs/native/limits.md) for the
 separate detached and graph readiness limits. If detached startup times out,
 run `down` next. It waits up to two minutes for a pending owner and stops what
@@ -134,9 +155,23 @@ Stop with the **same version and native home**:
 "$CANDIDATE" down --path /absolute/project
 ```
 
+If the foreground owner exited during startup, run `"$CANDIDATE" down --recover
+--path /absolute/project` while the original pool is still running. Recovery
+retains project data and requires matching records for this run. If those
+records cannot prove ownership, keep the old home and use a separate checkout
+with a [fresh manual native home](setup.md#manual-homes). This starts a separate
+run without transferring the old run’s data.
+
 If stop reports retained or unknown cleanup, follow its inspection instructions
 before switching. Keep the home and receipts; use the
 [cleanup reference](full-reference.md#manual-candidate-upgrade-and-rollback).
+
+If startup was interrupted just after creating a container, cleanup records
+the container it verified before removing it. Once cleanup finishes with data
+retained, `hack up` can restore the run with its existing named volumes.
+This applies when cleanup records the ID. Runs already stopped with a missing
+container ID still refuse restore. Earlier builds cannot read receipts that
+contain the new cleanup observation field. Native homes are per version.
 
 After installing a newer version, its native home is new, but the project still
 records its last run in the old one. If you did not stop the project with the old
@@ -146,6 +181,17 @@ message names the exact command that releases the old mapping
 (`hack doctor --native-run-mapping release --expect-selection <sha> [--branch <name>]`);
 run it, then `hack up` again. The project's data stays in the old home. If the old
 run is still live or its stop cannot be proven, stop it with the old version first.
+
+If the old home is no longer at its path (deleted, or on a disk that is not
+mounted), its records cannot be read there. The same refusal then names the same
+release command: it releases the mapping once no process of this user still names
+the old home's path or works inside it, and keeps the mapping in an audit file
+beside it. If the home is on a disk that is not mounted (the message names a missing
+directory under `/Volumes`, `/mnt` or `/media` when it can tell), mount it and stop
+the run there instead; its data is still on that disk. A home that was moved rather
+than deleted, and started again from its new path, has processes that name only the
+new path, so this check cannot see it; in that case release again from the moved
+home afterwards.
 
 ## Back to Compose
 
@@ -162,3 +208,17 @@ in Compose volumes. This switch does not copy either database.
 
 [The command contract](authored-commands.md) and
 [full reference](full-reference.md) cover advanced configuration and recovery.
+
+### Read the startup timeline
+
+Run `hack up --detach --timings` to see the native startup timeline on stderr.
+It shows when every container started and when all services met their readiness
+conditions. A service with a health check must pass it. A completed one-shot
+service must exit successfully. A milestone appears only when this invocation
+observed it. A project that is still warming may have a start time without a
+readiness time.
+
+Native `hack up --json` includes the same `hack.timings/1` records
+in `data.timings`. Add `--timings-file <file>` to save those records as JSONL
+in a new file. Times overlap when steps run together, so use `command.total`
+for elapsed startup time.

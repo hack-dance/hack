@@ -6,9 +6,9 @@
 use std::collections::BTreeMap;
 
 use crate::models::{
-    Autostart, AutostartFailures, BranchRuntime, Container, DaemonApiStatus, DoctorCheck,
-    DoctorReport, InputDiagnostic, LogEntry, ProjectRow, ProjectRuntime, ProjectsPayload,
-    RuntimeService,
+    Autostart, AutostartFailures, BranchCheckout, BranchCopy, BranchRuntime, Container,
+    DaemonApiStatus, DoctorCheck, DoctorReport, InputDiagnostic, LogEntry, ProjectRow,
+    ProjectRuntime, ProjectsPayload, RuntimeService, Worktree,
 };
 use crate::source::{Snapshot, SourceError};
 use crate::state::{Action, LocalContext};
@@ -26,6 +26,7 @@ pub enum Fixture {
     EnvRunning,
     EnvLong,
     EnvEdit,
+    EnvRevealed,
     // List states.
     Loading,
     Empty,
@@ -41,6 +42,8 @@ pub enum Fixture {
     Stopped,
     Starting,
     Running,
+    Remotes,
+    Files,
     Degraded,
     Stopping,
     FailedStart,
@@ -48,15 +51,53 @@ pub enum Fixture {
     /// The selected project's base instance is stopped while two branch
     /// instances (`hack up --branch <name>`) run.
     Branches,
+    ConfigProject,
+    ConfigGlobal,
+    ConfigInvalid,
+    ConfigSaved,
+    ConfigError,
+    ConfigLoading,
+    ResourcesUnavailable,
+    ResourcesEmpty,
+    ResourcesReady,
+    ResourcesInventory,
+    ResourcesConfirm,
+    GroupedSidebar,
+    CatalogNative,
+    CatalogNativeSaved,
+    CatalogAll,
+    CatalogEmpty,
+    CatalogPreview,
+    CatalogSearch,
+    CatalogDiff,
+    CatalogSaved,
+    ChangesError,
+    ChangesLoading,
+    ChangesClean,
+    ChangesDirty,
+    CopiesEmpty,
+    CopiesError,
+    CopiesLoading,
+    CopiesPartial,
+    CopiesReady,
     // Doctor pane.
     /// Findings across areas, machine and project scoped, one failed run.
     Doctor,
     /// Every check passed.
     DoctorClean,
+    PoolUnknown,
+    PoolStopped,
+    PoolRunning,
+    PoolIdle,
     /// A project whose header links to its doctor findings.
     DoctorLink,
     /// No projects registered: the Doctor pane still shows machine checks.
     DoctorEmpty,
+    BannerDns,
+    BannersSheet,
+    DoctorHealth,
+    DoctorFixAll,
+    ErrorsSheet,
     // hackd pane (HACK-2288 item 6).
     /// hackd running, a login run under way, always-on projects in every
     /// state the summary shows.
@@ -73,7 +114,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 76] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -84,6 +125,7 @@ impl Fixture {
         Self::EnvRunning,
         Self::EnvLong,
         Self::EnvEdit,
+        Self::EnvRevealed,
         Self::Loading,
         Self::Empty,
         Self::DaemonDown,
@@ -95,15 +137,55 @@ impl Fixture {
         Self::Stopped,
         Self::Starting,
         Self::Running,
+        Self::Remotes,
+        Self::Files,
         Self::Degraded,
         Self::Stopping,
         Self::FailedStart,
         Self::NeedsAttention,
         Self::Branches,
+        Self::ConfigProject,
+        Self::ConfigGlobal,
+        Self::ConfigInvalid,
+        Self::ConfigSaved,
+        Self::ConfigError,
+        Self::ConfigLoading,
+        Self::ResourcesUnavailable,
+        Self::ResourcesEmpty,
+        Self::ResourcesReady,
+        Self::ResourcesInventory,
+        Self::ResourcesConfirm,
+        Self::GroupedSidebar,
+        Self::CatalogNative,
+        Self::CatalogNativeSaved,
+        Self::CatalogAll,
+        Self::CatalogEmpty,
+        Self::CatalogPreview,
+        Self::CatalogSearch,
+        Self::CatalogDiff,
+        Self::CatalogSaved,
+        Self::ChangesError,
+        Self::ChangesLoading,
+        Self::ChangesClean,
+        Self::ChangesDirty,
+        Self::CopiesEmpty,
+        Self::CopiesError,
+        Self::CopiesLoading,
+        Self::CopiesPartial,
+        Self::CopiesReady,
         Self::Doctor,
         Self::DoctorClean,
+        Self::PoolUnknown,
+        Self::PoolStopped,
+        Self::PoolRunning,
+        Self::PoolIdle,
         Self::DoctorLink,
         Self::DoctorEmpty,
+        Self::BannerDns,
+        Self::BannersSheet,
+        Self::DoctorHealth,
+        Self::DoctorFixAll,
+        Self::ErrorsSheet,
         Self::Hackd,
         Self::HackdOff,
         Self::Upgrade,
@@ -124,6 +206,7 @@ impl Fixture {
             Self::EnvRunning => "env-running",
             Self::EnvLong => "env-long",
             Self::EnvEdit => "env-edit",
+            Self::EnvRevealed => "env-revealed",
             Self::Loading => "loading",
             Self::Empty => "empty",
             Self::DaemonDown => "daemon-down",
@@ -135,15 +218,55 @@ impl Fixture {
             Self::Stopped => "stopped",
             Self::Starting => "starting",
             Self::Running => "running",
+            Self::Remotes => "remotes",
+            Self::Files => "files",
             Self::Degraded => "degraded",
             Self::Stopping => "stopping",
             Self::FailedStart => "failed-start",
             Self::NeedsAttention => "needs-attention",
             Self::Branches => "branches",
+            Self::ConfigProject => "config-project",
+            Self::ConfigGlobal => "config-global",
+            Self::ConfigInvalid => "config-invalid",
+            Self::ConfigSaved => "config-saved",
+            Self::ConfigError => "config-error",
+            Self::ConfigLoading => "config-loading",
+            Self::ResourcesUnavailable => "resources-unavailable",
+            Self::ResourcesEmpty => "resources-empty",
+            Self::ResourcesReady => "resources-ready",
+            Self::ResourcesInventory => "resources-inventory",
+            Self::ResourcesConfirm => "resources-confirm",
+            Self::GroupedSidebar => "grouped-sidebar",
+            Self::CatalogNative => "catalog-native",
+            Self::CatalogNativeSaved => "catalog-native-saved",
+            Self::CatalogAll => "catalog-all",
+            Self::CatalogEmpty => "catalog-empty",
+            Self::CatalogPreview => "catalog-preview",
+            Self::CatalogSearch => "catalog-search",
+            Self::CatalogDiff => "catalog-diff",
+            Self::CatalogSaved => "catalog-saved",
+            Self::ChangesError => "changes-error",
+            Self::ChangesLoading => "changes-loading",
+            Self::ChangesClean => "changes-clean",
+            Self::ChangesDirty => "changes-dirty",
+            Self::CopiesEmpty => "copies-empty",
+            Self::CopiesError => "copies-error",
+            Self::CopiesLoading => "copies-loading",
+            Self::CopiesPartial => "copies-partial",
+            Self::CopiesReady => "copies-ready",
             Self::Doctor => "doctor",
             Self::DoctorClean => "doctor-clean",
+            Self::PoolUnknown => "pool-unknown",
+            Self::PoolStopped => "pool-stopped",
+            Self::PoolRunning => "pool-running",
+            Self::PoolIdle => "pool-idle",
             Self::DoctorLink => "doctor-link",
             Self::DoctorEmpty => "doctor-empty",
+            Self::BannerDns => "h17-app-banner-dns",
+            Self::BannersSheet => "h18-banners-sheet",
+            Self::DoctorHealth => "h19-doctor",
+            Self::DoctorFixAll => "h20-doctor-fix-all",
+            Self::ErrorsSheet => "h25-errors-sheet",
             Self::Hackd => "hackd",
             Self::HackdOff => "hackd-off",
             Self::Upgrade => "upgrade",
@@ -162,12 +285,10 @@ pub const CLI_VERSION: &str = "5.0.0";
 
 fn container(state: &str, status: &str) -> Container {
     Container {
-        id: None,
-        name: None,
         state: state.into(),
         status: status.into(),
         labels: BTreeMap::new(),
-        working_dir: None,
+        ..Container::default()
     }
 }
 
@@ -193,21 +314,32 @@ fn checkout_dir(branch: &str) -> String {
 
 /// A running branch instance of storefront with web and api routes.
 fn running_branch(branch: &str) -> BranchRuntime {
+    let mut api = routed(
+        "running",
+        "Up 2 hours (healthy)",
+        &format!("api.{branch}.storefront.hack"),
+    );
+    api.name = Some(format!("storefront--{branch}-api-1"));
+    api.image = Some("storefront-api:dev".into());
+    api.labels
+        .insert("caddy.reverse_proxy".into(), "{{upstreams 3000}}".into());
+    api.labels.insert(
+        "com.docker.compose.project".into(),
+        format!("storefront--{branch}"),
+    );
+    api.mounts.push(crate::models::ContainerMount {
+        source: checkout_dir(branch).trim_end_matches("/.hack").into(),
+        destination: "/app".into(),
+        kind: "bind".into(),
+        name: None,
+    });
     BranchRuntime {
-        owner: None,
         branch: branch.into(),
         runtime: ProjectRuntime {
             project: Some(format!("storefront--{branch}")),
             working_dir: Some(checkout_dir(branch)),
             services: vec![
-                svc(
-                    "api",
-                    routed(
-                        "running",
-                        "Up 20 minutes (healthy)",
-                        &format!("api.{branch}.storefront.hack"),
-                    ),
-                ),
+                svc("api", api),
                 svc("db", container("running", "Up 20 minutes")),
                 svc(
                     "web",
@@ -219,13 +351,13 @@ fn running_branch(branch: &str) -> BranchRuntime {
                 ),
             ],
         },
+        ..BranchRuntime::default()
     }
 }
 
 /// A branch instance whose api exited non-zero.
 fn failed_branch(branch: &str) -> BranchRuntime {
     BranchRuntime {
-        owner: None,
         branch: branch.into(),
         runtime: ProjectRuntime {
             project: Some(format!("storefront--{branch}")),
@@ -242,6 +374,7 @@ fn failed_branch(branch: &str) -> BranchRuntime {
                 svc("db", container("exited", "Exited (0) 5 minutes ago")),
             ],
         },
+        ..BranchRuntime::default()
     }
 }
 
@@ -259,7 +392,6 @@ fn subdomain_branch(branch: &str) -> BranchRuntime {
         )
     };
     BranchRuntime {
-        owner: None,
         branch: branch.into(),
         runtime: ProjectRuntime {
             project: Some(format!("storefront--{branch}")),
@@ -270,6 +402,7 @@ fn subdomain_branch(branch: &str) -> BranchRuntime {
                 routed_at("temporal-server"),
             ],
         },
+        ..BranchRuntime::default()
     }
 }
 
@@ -433,7 +566,7 @@ pub fn project(f: Fixture) -> ProjectsPayload {
             r.runtime = None;
             r
         }
-        Fixture::Running => {
+        Fixture::Running | Fixture::Files => {
             let mut r = storefront(all_up(), "running");
             r.branch_runtime = owned(vec![
                 running_branch("feature-search"),
@@ -445,7 +578,30 @@ pub fn project(f: Fixture) -> ProjectsPayload {
             }];
             r
         }
-        Fixture::Branches => {
+        Fixture::CatalogNative | Fixture::CatalogNativeSaved => {
+            let mut row = storefront(vec![], "stopped");
+            row.backend = Some("native".into());
+            if f == Fixture::CatalogNative {
+                row.input_diagnostic = Some(crate::models::InputDiagnostic {
+                    code: crate::models::NATIVE_PROJECT_CODE.into(),
+                    message: "This project declares native workloads.".into(),
+                });
+            }
+            row
+        }
+        Fixture::Remotes => {
+            let mut row = storefront(all_up(), "running");
+            row.remotes = serde_json::from_str(r#"[
+              {"service":"redis","target":"unknown","state":"declared","probe":"not checked",
+               "address":null},
+              {"service":"database","target":"staging","state":"declared","probe":"not checked",
+               "address":{"kind":"env_ref","name":"STAGING_DB_HOST","port":5432}},
+              {"service":"search","target":"preview","state":"tunnel not started by this version",
+               "probe":"not checked","address":{"kind":"hostname","hostname":"search.example.invalid","port":443}}
+            ]"#).expect("remote descriptors fixture");
+            row
+        }
+        Fixture::Branches | Fixture::ResourcesReady => {
             let mut r = storefront(vec![], "stopped");
             r.branch_runtime = owned(vec![
                 running_branch("feature-search"),
@@ -458,10 +614,47 @@ pub fn project(f: Fixture) -> ProjectsPayload {
             }];
             r
         }
+        Fixture::GroupedSidebar => {
+            let mut r = storefront(vec![], "stopped");
+            let root = "/work/storefront/.worktrees/feature-search";
+            let mut feature = running_branch("feature-search");
+            feature.runtime.working_dir = Some(format!("{root}/.hack"));
+            feature
+                .runtime
+                .services
+                .push(svc("worker", container("exited", "Exited (0) an hour ago")));
+            r.worktrees = vec![
+                Worktree {
+                    path: Some(root.into()),
+                    branch: Some("feature-search".into()),
+                },
+                Worktree {
+                    path: Some(STOREFRONT_WORKTREE.into()),
+                    branch: Some("fix-login".into()),
+                },
+            ];
+            r.branch_runtime = owned(vec![feature, failed_branch("fix-login")]);
+            r.branch_copies = vec![BranchCopy {
+                branch: Some("release-2".into()),
+                branch_name: "release-2".into(),
+                checkout: BranchCheckout {
+                    root: "/work/storefront".into(),
+                    kind: "primary".into(),
+                },
+                url: Some("https://release-2.storefront.hack".into()),
+                defined_services: vec!["deploy".into()],
+                ..BranchCopy::default()
+            }];
+            r.runtime_status = Some("stopped".into());
+            r
+        }
         _ => storefront(all_up(), "running"),
     };
     let mut projects = vec![main];
     projects.extend(others());
+    if f == Fixture::GroupedSidebar {
+        projects.push(simple("example-sync", "stopped", "compose", false));
+    }
     if f == Fixture::NeedsAttention {
         // Unrelated: a second way to need attention.
         projects[3].input_diagnostic = Some(InputDiagnostic {
@@ -485,6 +678,7 @@ pub fn project(f: Fixture) -> ProjectsPayload {
         generated_at: Some("2026-01-01T09:00:00Z".into()),
         detail_level: None,
         runtime_ok: Some(f != Fixture::EngineDown),
+        runtime_checked_at: None,
         runtime_error: (f == Fixture::EngineDown)
             .then(|| "Cannot connect to the Docker daemon".into()),
         projects,
@@ -504,11 +698,11 @@ pub fn local(f: Fixture) -> LocalContext {
     match f {
         Fixture::Starting => LocalContext {
             in_flight: Some(Action::Start),
-            last_failed: vec![],
+            ..LocalContext::default()
         },
         Fixture::Stopping => LocalContext {
             in_flight: Some(Action::Stop),
-            last_failed: vec![],
+            ..LocalContext::default()
         },
         _ => LocalContext::default(),
     }
@@ -517,6 +711,7 @@ pub fn local(f: Fixture) -> LocalContext {
 fn doctor(f: Fixture) -> DoctorReport {
     let mut checks = vec![
         DoctorCheck {
+            native_pool: None,
             id: "docker daemon".into(),
             status: if f == Fixture::EngineDown {
                 "error"
@@ -525,18 +720,23 @@ fn doctor(f: Fixture) -> DoctorReport {
             }
             .into(),
             detail: String::new(),
+            fix: None,
         },
         DoctorCheck {
+            native_pool: None,
             id: "caddy local ca".into(),
             status: "warn".into(),
             detail: "Local CA is not trusted by the system".into(),
+            fix: None,
         },
     ];
     if f == Fixture::NeedsAttention {
         checks.push(DoctorCheck {
+            native_pool: None,
             id: "project config".into(),
             status: "error".into(),
             detail: "notes: hack.config.json is not valid JSON".into(),
+            fix: None,
         });
     }
     DoctorReport {
@@ -566,8 +766,35 @@ pub fn snapshot(f: Fixture) -> Result<Snapshot, SourceError> {
     if matches!(f, Fixture::Hackd | Fixture::HackdOff) {
         always_on_fixture(&mut projects);
     }
-    if matches!(f, Fixture::Empty | Fixture::DoctorEmpty) {
+    if matches!(
+        f,
+        Fixture::Empty | Fixture::DoctorEmpty | Fixture::ResourcesEmpty
+    ) {
         projects.projects.clear();
+    }
+    if f == Fixture::ResourcesReady
+        && let Some(project) = projects.projects.first_mut()
+    {
+        let mut id = 0_u32;
+        for branch in &mut project.branch_runtime {
+            for service in &mut branch.runtime.services {
+                for container in &mut service.containers {
+                    container.name =
+                        Some(format!("storefront-{}-{}", branch.branch, service.service));
+                    id += 1;
+                    container.id = Some(format!("{id:012x}"));
+                    container.image = Some("example.invalid/storefront:1".into());
+                    container.mounts = vec![crate::models::ContainerMount {
+                        kind: "volume".into(),
+                        name: Some("storefront-cache".into()),
+                        ..Default::default()
+                    }];
+                    container.networks = vec![crate::models::ContainerNetwork {
+                        name: format!("storefront-{}", branch.branch),
+                    }];
+                }
+            }
+        }
     }
     if f == Fixture::ManyProjects {
         // The selected project also has more services than fit (scrolling).
@@ -655,7 +882,13 @@ pub fn log_tail(f: Fixture) -> Vec<LogEntry> {
 pub fn opens_doctor(f: Fixture) -> bool {
     matches!(
         f,
-        Fixture::Doctor | Fixture::DoctorClean | Fixture::DoctorEmpty
+        Fixture::Doctor
+            | Fixture::DoctorClean
+            | Fixture::DoctorEmpty
+            | Fixture::PoolIdle
+            | Fixture::PoolRunning
+            | Fixture::PoolStopped
+            | Fixture::PoolUnknown
     )
 }
 
@@ -680,7 +913,9 @@ pub fn service_usage(_f: Fixture) -> Result<crate::usage::UsageReport, String> {
             {"composeProject": "storefront", "service": "db", "containers": 1, "cpuPercent": 1.4, "memUsedBytes": 388 * MIB, "memLimitBytes": null},
             {"composeProject": "storefront", "service": "web", "containers": 1, "cpuPercent": 0.6, "memUsedBytes": 96 * MIB, "memLimitBytes": null},
             {"composeProject": "storefront", "service": "worker", "containers": 1, "cpuPercent": 87.5, "memUsedBytes": 640 * MIB, "memLimitBytes": null},
-            {"composeProject": "storefront--feature-search", "service": "api", "containers": 1, "cpuPercent": 2.0, "memUsedBytes": 180 * MIB, "memLimitBytes": null}
+            {"composeProject": "storefront--feature-search", "service": "api", "containers": 1, "cpuPercent": 2.0, "memUsedBytes": 180 * MIB, "memLimitBytes": null},
+            {"composeProject": "storefront--feature-search", "service": "web", "containers": 1, "cpuPercent": 0.4, "memUsedBytes": 96 * MIB, "memLimitBytes": null},
+            {"composeProject": "storefront--feature-search", "service": "db", "containers": 1, "cpuPercent": 0.9, "memUsedBytes": 212 * MIB, "memLimitBytes": null}
         ]
     }))
 }
@@ -891,9 +1126,11 @@ pub fn loads_doctor(f: Fixture) -> bool {
 pub fn doctor_runs(f: Fixture) -> Vec<crate::doctor::DoctorRun> {
     use crate::doctor::DoctorRun;
     let c = |id: &str, status: &str, detail: &str| DoctorCheck {
+        native_pool: None,
         id: id.into(),
         status: status.into(),
         detail: detail.into(),
+        fix: None,
     };
     let report = |checks: Vec<DoctorCheck>| {
         Ok(DoctorReport {
@@ -913,6 +1150,41 @@ pub fn doctor_runs(f: Fixture) -> Vec<crate::doctor::DoctorRun> {
             c("dnsmasq:53", "ok", ""),
         ]
     };
+    use crate::models::{NativePoolReport, NativePoolState};
+    let pool = match f {
+        Fixture::PoolIdle => Some((NativePoolState::Idle, "warn", "The native VM pool is idle.")),
+        Fixture::PoolRunning => Some((
+            NativePoolState::InUse,
+            "ok",
+            "The native VM pool is in use.",
+        )),
+        Fixture::PoolStopped => Some((
+            NativePoolState::Stopped,
+            "ok",
+            "The native VM pool is stopped.",
+        )),
+        Fixture::PoolUnknown => Some((
+            NativePoolState::Unknown,
+            "warn",
+            "Native VM pool status unavailable.",
+        )),
+        _ => None,
+    };
+    if let Some((state, status, detail)) = pool {
+        let running = matches!(state, NativePoolState::Idle | NativePoolState::InUse);
+        let mut check = c("native pool idle", status, detail);
+        check.native_pool = Some(NativePoolReport {
+            state,
+            graph_runs: if running {
+                Some(u64::from(state == NativePoolState::InUse))
+            } else {
+                None
+            },
+            memory_bytes: running.then_some(512 * 1024 * 1024),
+            guest_memory_mib: running.then_some(4096),
+        });
+        return vec![DoctorRun::machine(report(vec![check]))];
+    }
     if f == Fixture::DoctorEmpty {
         let mut machine = ok_machine();
         machine[5] = c(
@@ -1042,7 +1314,10 @@ mod tests {
                 | (Fixture::Error, Err(SourceError::Cli { .. })) => {}
                 (_, Ok(s)) => assert_eq!(
                     s.projects.projects.is_empty(),
-                    matches!(f, Fixture::Empty | Fixture::DoctorEmpty)
+                    matches!(
+                        f,
+                        Fixture::Empty | Fixture::DoctorEmpty | Fixture::ResourcesEmpty
+                    )
                 ),
                 (f, other) => panic!("{f:?}: {other:?}"),
             }

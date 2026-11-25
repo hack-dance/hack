@@ -30,6 +30,10 @@ import {
 } from "../src/lib/native-config-import-inputs.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { managedEnvCompilerFixture } from "./helpers/managed-env-compiler.ts";
+import {
+  mkdirOwnedFixture,
+  writeOwnedFixture,
+} from "./helpers/owned-fixture.ts";
 
 const CANARY = "synthetic-typed-local-private-canary";
 const KEYS = [
@@ -49,7 +53,7 @@ beforeEach(async () => {
     Reflect.deleteProperty(process.env, key);
   }
   root = await realpath(await mkdtemp(join(tmpdir(), "adoption-local-")));
-  await mkdir(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".hack"));
   await writeFile(
     join(root, ".hack/hack.config.json"),
     '{"name":"fixture","env":{"default_overlay":"qa"}}'
@@ -260,7 +264,7 @@ test("unsupported primary refuses even if checkout shadows its effective selecti
   await refusal(() => admission(checkout));
 });
 test("refusal report preserves duplicate role/pointer without literal selection or private candidate", async () => {
-  await writeFile(
+  await writeOwnedFixture(
     localPath(),
     `{"schema_version":1,"environment":{"default_overlay":"${CANARY}","default_overlay":"qa"}}`
   );

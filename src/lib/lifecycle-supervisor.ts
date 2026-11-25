@@ -50,7 +50,9 @@ type Instance = {
 };
 
 const LIMIT = 1024 * 1024;
-const REQUEST_TIMEOUT_MS = 35_000;
+// Stop can spend 19 s on lock admission and then 17 s on guard and orphan
+// confirmation. Leave time for the framed reply as well.
+const REQUEST_TIMEOUT_MS = 40_000;
 
 /** Control capabilities must never be published through checkout bind mounts. */
 export function resolveLifecycleSupervisorRoot(opts: {

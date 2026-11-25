@@ -72,11 +72,14 @@ fn check_using(
     for config in requested.values() {
         budget.add(config)?;
     }
+    if except.is_none() {
+        super::archive::make_room(candidate, engine)?;
+    }
     let runs = storage_inventory::runs(&candidate.state_root.join("run/graphs"))?;
     if runs.len() == 64 && except.is_none() {
         return Err(error(
             "graph_retention_budget",
-            "64 graph attempts are retained; explicit archival is required.",
+            "64 graph attempts that keep data are retained, so no fresh run fits; remove the data of a project you no longer use (`hack down --remove-data` there) and start again.",
         ));
     }
     for run in runs {
@@ -91,14 +94,8 @@ fn check_using(
                 "An interrupted graph journal retains its reservation.",
             ));
         }
-        if ["removed", "stopped-data-retained"].contains(&receipt.phase.as_str()) {
+        if !holds_capacity(&receipt.phase)? {
             continue;
-        }
-        if receipt.phase != "ready-observed" {
-            return Err(error(
-                "graph_capacity_reserved",
-                "An active or uncertain graph requires recovery before admitting more work.",
-            ));
         }
         for resource in receipt
             .resources
@@ -146,9 +143,45 @@ pub(super) fn unchanged(actual: &Value, expected: &Value) -> Result<(), Candidat
     Ok(())
 }
 
+/// How another graph's phase counts for admission: `false` when it holds nothing
+/// (removed or retained), `true` when its containers count (ready, or every service
+/// started: the same resources), and a refusal for any start or cleanup in progress.
+fn holds_capacity(phase: &str) -> Result<bool, CandidateError> {
+    match phase {
+        "removed" | "stopped-data-retained" => Ok(false),
+        "ready-observed" | STARTED_OBSERVED => Ok(true),
+        _ => Err(error(
+            "graph_capacity_reserved",
+            "An active or uncertain graph requires recovery before admitting more work.",
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_started_graph_counts_for_admission_like_a_ready_one() {
+        for phase in ["ready-observed", "started-observed"] {
+            assert!(holds_capacity(phase).unwrap(), "{phase}");
+        }
+        for phase in ["removed", "stopped-data-retained"] {
+            assert!(!holds_capacity(phase).unwrap(), "{phase}");
+        }
+        for phase in [
+            "preparing",
+            "restoring",
+            "restarting",
+            "failed-retained",
+            "cleanup-intent",
+        ] {
+            assert_eq!(
+                holds_capacity(phase).unwrap_err().code,
+                "graph_capacity_reserved",
+                "{phase}"
+            );
+        }
+    }
     fn config(memory: u64, cpu: u64) -> Value {
         json!({"HostConfig":{"Memory":memory,"NanoCpus":cpu}})
     }

@@ -101,7 +101,9 @@ pub use network_update::{enable_internet, extend_network};
 mod project_share;
 pub use project_share::{MAX_PROJECT_SHARES, ProjectShareIntent};
 mod share_update;
-pub use share_update::{add_project_share, remove_project_share};
+pub use share_update::{
+    add_project_share, add_project_share_stopping_idle_pool, remove_project_share,
+};
 mod network_tools;
 pub mod prepared_base;
 mod prepared_inventory;

@@ -1,8 +1,9 @@
 //! Explicit public bytes, never a request to read an ignored host file.
+use super::private_files::generated_state_child;
 use super::{CandidateError, PlanData, problem};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::{ffi::OsStr, path::Path};
 
 pub(super) fn refused() -> CandidateError {
     problem(
@@ -45,10 +46,10 @@ pub(super) fn declarations(files: &BTreeMap<String, String>) -> Result<(), Candi
                     || lower == ".env"
                     || lower.starts_with(".env.")
             })
-            || path == ".hack/.internal"
-            || path == ".hack/.branch"
-            || path.starts_with(".hack/.internal/")
-            || path.starts_with(".hack/.branch/")
+            || path.split_once('/').is_some_and(|(parent, tail)| {
+                let child = tail.split('/').next().unwrap_or(tail);
+                generated_state_child(OsStr::new(parent), OsStr::new(child))
+            })
             || content.len() > 16384
             || content
                 .chars()

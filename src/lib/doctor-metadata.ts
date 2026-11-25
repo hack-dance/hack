@@ -32,7 +32,20 @@ const DEV_REPORT_ONLY = new Set([
   "dev image tags",
   "shared source installs",
 ]);
-const PROJECT_AREAS: Readonly<Record<string, DoctorArea>> = {
+const PROJECT_AREAS = {
+  // Error rows can use the short probe label instead of the optional tool ID.
+  brew: "other",
+  dnsmasq: "other",
+  mkcert: "other",
+  gum: "other",
+  fzf: "other",
+  tmux: "other",
+  go: "other",
+  caddy: "other",
+  asdf: "other",
+  prerequisites: "other",
+  "lifecycle supervisor": "other",
+  "native temporary aliases": "other",
   "browser local network": "routing_dns",
   "native https route": "native",
   "native host dns": "routing_dns",
@@ -40,6 +53,7 @@ const PROJECT_AREAS: Readonly<Record<string, DoctorArea>> = {
   "sessions mux": "project_files",
   "generated files": "project_files",
   "hack gitignore": "project_files",
+  "root-owned checkout files": "project_files",
   "runtime hygiene": "engine",
   "lifecycle hygiene": "engine",
   "worktree instances": "engine",
@@ -67,8 +81,8 @@ const PROJECT_AREAS: Readonly<Record<string, DoctorArea>> = {
   "shared volume architectures": "engine",
   "dev image tags": "project_files",
   "shared source installs": "project_files",
-};
-const MACHINE_AREAS: Readonly<Record<string, DoctorArea>> = {
+} as const satisfies Readonly<Record<string, DoctorArea>>;
+const MACHINE_AREAS = {
   bun: "engine",
   docker: "engine",
   "docker compose": "engine",
@@ -104,7 +118,36 @@ const MACHINE_AREAS: Readonly<Record<string, DoctorArea>> = {
   "native hack.local route": "routing_dns",
   "native hack.local repair": "routing_dns",
   "native pool idle": "native",
-};
+  "native disk usage": "native",
+} as const satisfies Readonly<Record<string, DoctorArea>>;
+
+const ROUTING_CHECK_PREFIXES = [
+  "network:",
+  "resolver:",
+  "dnsmasq.conf:",
+  "dnsmasq:",
+  "dns:",
+] as const;
+const CHECK_PREFIXES = [...ROUTING_CHECK_PREFIXES, "prerequisite "] as const;
+
+/** Fixed IDs and dynamic ID families (marked with a trailing asterisk). */
+export const DOCTOR_CHECK_IDS = [
+  ...Object.keys(PROJECT_AREAS),
+  ...Object.keys(MACHINE_AREAS),
+  ...CHECK_PREFIXES.map((prefix) => `${prefix}*`),
+] as const;
+
+export type DoctorCheckId =
+  | keyof typeof PROJECT_AREAS
+  | keyof typeof MACHINE_AREAS
+  | `${(typeof CHECK_PREFIXES)[number]}${string}`;
+
+function checkArea(
+  areas: Readonly<Record<string, DoctorArea>>,
+  id: string
+): DoctorArea | undefined {
+  return Object.hasOwn(areas, id) ? areas[id] : undefined;
+}
 
 /** Closed IDs and prefixes only; never parse executable instructions from diagnostic text. */
 export function doctorMetadata(opts: {
@@ -112,24 +155,16 @@ export function doctorMetadata(opts: {
   /** Mixed project/global checks set their actual scope at the observation site. */
   readonly scope?: DoctorScope;
 }): DoctorMetadata {
-  const projectArea = Object.hasOwn(PROJECT_AREAS, opts.id)
-    ? PROJECT_AREAS[opts.id]
-    : undefined;
-  const machineArea = Object.hasOwn(MACHINE_AREAS, opts.id)
-    ? MACHINE_AREAS[opts.id]
-    : undefined;
+  const projectArea = checkArea(PROJECT_AREAS, opts.id);
+  const machineArea = checkArea(MACHINE_AREAS, opts.id);
   let area = projectArea ?? machineArea ?? "other";
-  const network = [
-    "network:",
-    "resolver:",
-    "dnsmasq.conf:",
-    "dnsmasq:",
-    "dns:",
-  ].some((prefix) => opts.id.startsWith(prefix));
+  const network = ROUTING_CHECK_PREFIXES.some((prefix) =>
+    opts.id.startsWith(prefix)
+  );
   if (network) {
     area = "routing_dns";
   }
-  const knownMachine = Object.hasOwn(MACHINE_AREAS, opts.id) || network;
+  const knownMachine = machineArea !== undefined || network;
   const scope = opts.scope ?? (knownMachine ? "machine" : "project");
   const adminTrust = [
     "local ca trust",

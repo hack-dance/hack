@@ -55,6 +55,7 @@ use std::{
 
 mod fsat;
 pub(super) mod ignore;
+pub(super) mod private;
 pub(super) mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -603,6 +604,7 @@ pub(super) fn digest(
     bounds: Bounds,
 ) -> Result<ContextDigest, CandidateError> {
     let rules = ignore::Rules::parse(ignore)?;
+    let private = private::PrivateFiles::new()?;
     let id = context_id(context);
     let mut walk = Walk {
         bounds,
@@ -656,7 +658,13 @@ pub(super) fn digest(
             read_error,
         )?;
         walk.keep(listing)?;
+        let parent = Path::new(std::ffi::OsStr::from_bytes(&relative))
+            .file_name()
+            .or_else(|| context.file_name());
         for name in names {
+            if private.excludes_child(parent, std::ffi::OsStr::from_bytes(&name))? {
+                continue;
+            }
             let mut child = relative.clone();
             if !child.is_empty() {
                 child.push(b'/');

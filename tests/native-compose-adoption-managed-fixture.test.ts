@@ -28,6 +28,7 @@ import {
   ownedAdoptionFixtureObservation,
 } from "./e2e/scenarios/native-compose-adoption-worktrees.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -49,7 +50,7 @@ async function fixture() {
   });
   const primary = { root: base.root, name: `${base.name}-main` };
   const write = async (checkout: { root: string; name: string }) => {
-    await mkdir(join(checkout.root, ".hack"), { recursive: true });
+    await mkdirOwnedFixture(join(checkout.root, ".hack"), true);
     await writeFile(
       join(checkout.root, ".hack/hack.config.json"),
       JSON.stringify({

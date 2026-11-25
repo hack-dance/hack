@@ -408,3 +408,7 @@ mod state_component_tests {
         std::fs::remove_dir_all(&home).unwrap();
     }
 }
+
+/// Experimental guest transport. Lifecycle callers still use the provider.
+#[cfg(all(unix, feature = "guest-agent-client"))]
+pub use hack_vm_protocol as guest_agent;

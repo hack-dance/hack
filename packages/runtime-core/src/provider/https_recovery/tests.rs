@@ -301,53 +301,146 @@ fn wildcard_port_probe_refuses_ipv4_and_ipv6_listeners() {
     drop(ipv6);
 }
 
+/// A listener on 127.0.0.1 alone. macOS lets a same-user SO_REUSEADDR wildcard bind
+/// succeed beside a listener on one specific address, so the reuse claim's first
+/// refusal is its exact loopback guard. The strict claim's wildcard guard has no
+/// SO_REUSEADDR and conflicts with any listener on the port, so its first refusal is
+/// the IPv4 wildcard. `port_absent` tries the reuse claim first.
 #[test]
-fn port_probe_diagnostic_reports_the_owned_ipv4_listener() {
-    use ports::observation_diagnostic as diagnostic;
+fn port_probe_diagnostic_names_the_first_refusal_of_each_claim() {
+    use ports::observation_diagnostic::{self as diagnostic, Address};
 
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    diagnostic::clear();
-    assert!(port_absent(listener.local_addr().unwrap().port()).is_err());
-    assert_eq!(
-        diagnostic::take(),
+    let port = listener.local_addr().unwrap().port();
+    let refused = |address| {
         Some(diagnostic::Facts {
             stage: diagnostic::Stage::Bind,
-            wildcard: true,
+            address,
             family: libc::AF_INET,
             errno: Some(libc::EADDRINUSE),
         })
-    );
-}
-
-#[test]
-fn port_probe_diagnostic_keeps_only_the_first_refusal() {
-    use ports::observation_diagnostic as diagnostic;
-
+    };
     diagnostic::clear();
-    assert!(diagnostic::take().is_none());
-    diagnostic::record(
-        diagnostic::Stage::Socket,
-        true,
-        libc::AF_INET,
-        Some(libc::EMFILE),
-    );
-    diagnostic::record(
-        diagnostic::Stage::Bind,
-        false,
-        libc::AF_INET6,
-        Some(libc::EADDRINUSE),
-    );
-    assert_eq!(
-        diagnostic::take(),
-        Some(diagnostic::Facts {
-            stage: diagnostic::Stage::Socket,
-            wildcard: true,
-            family: libc::AF_INET,
-            errno: Some(libc::EMFILE),
-        })
-    );
-    assert!(diagnostic::take().is_none());
+    assert!(port_absent(port).is_err());
+    assert_eq!(diagnostic::take(), refused(Address::Loopback));
+    diagnostic::clear();
+    assert!(ports::claim(port, false).is_err());
+    assert_eq!(diagnostic::take(), refused(Address::Wildcard));
 }
+
+/// The port of a guard built as a competing listener.
+fn port_of(guard: &std::os::fd::OwnedFd) -> u16 {
+    std::net::TcpListener::from(guard.try_clone().unwrap())
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// HACK-2550: the reuse claim binds each interface address exactly, so another
+/// listener on one of them refuses it whether that listener set SO_REUSEADDR,
+/// SO_REUSEPORT, both or neither. Tried on the first IPv4 and the first link-local
+/// IPv6 interface address (with its scope id). Each case prints its first refusal.
+#[test]
+fn a_listener_on_an_interface_address_refuses_the_reuse_claim() {
+    use ports::observation_diagnostic::{self as diagnostic, Address};
+    use std::net::IpAddr;
+
+    let addresses = ports::local_addresses().unwrap();
+    let picks = [
+        addresses.iter().find(|(ip, _)| ip.is_ipv4()),
+        addresses.iter().find(|(ip, scope)| {
+            matches!(ip, IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80) && *scope != 0
+        }),
+    ];
+    assert!(
+        picks.iter().all(Option::is_some),
+        "no IPv4 or link-local IPv6 interface address: {addresses:?}"
+    );
+    for &local in picks.into_iter().flatten() {
+        for (reuse_address, reuse_port) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let other =
+                ports::bind(local, 0, Address::Interface, reuse_address, reuse_port).unwrap();
+            diagnostic::clear();
+            let claimed = port_absent(port_of(&other));
+            let first = diagnostic::take();
+            eprintln!(
+                "interface listener {local:?} reuseaddr={reuse_address} reuseport={reuse_port}: claimed={} first refusal {first:?}",
+                claimed.is_ok()
+            );
+            assert!(claimed.is_err());
+            assert_eq!(
+                first.map(|facts| (facts.stage, facts.address, facts.errno)),
+                Some((
+                    diagnostic::Stage::Bind,
+                    Address::Interface,
+                    Some(libc::EADDRINUSE)
+                ))
+            );
+        }
+    }
+}
+
+/// A wildcard listener with SO_REUSEPORT (and SO_REUSEADDR): the wildcard guard does
+/// not set SO_REUSEPORT, so it cannot share that exact binding.
+#[test]
+fn a_wildcard_listener_with_reuse_port_refuses_the_reuse_claim() {
+    use ports::observation_diagnostic::{self as diagnostic, Address};
+
+    for (ip, family) in [
+        (std::net::IpAddr::from([0_u8; 4]), libc::AF_INET),
+        (std::net::IpAddr::from([0_u8; 16]), libc::AF_INET6),
+    ] {
+        let other = ports::bind((ip, 0), 0, Address::Wildcard, true, true).unwrap();
+        diagnostic::clear();
+        let claimed = port_absent(port_of(&other));
+        let first = diagnostic::take();
+        eprintln!(
+            "wildcard listener {ip} reuseport: claimed={} first refusal {first:?}",
+            claimed.is_ok()
+        );
+        assert!(claimed.is_err());
+        assert_eq!(
+            first,
+            Some(diagnostic::Facts {
+                stage: diagnostic::Stage::Bind,
+                address: Address::Wildcard,
+                family,
+                errno: Some(libc::EADDRINUSE),
+            })
+        );
+    }
+}
+
+/// The addresses are listed again after binding: one that appeared or went away
+/// meanwhile, or a list that cannot be read, refuses; an unchanged list claims.
+#[test]
+fn an_address_change_while_claiming_refuses_the_reuse_claim() {
+    let real = ports::local_addresses().unwrap();
+    let mut appeared = real.clone();
+    // A documentation address (TEST-NET-1): listed, never bound.
+    appeared.insert((std::net::IpAddr::from([192, 0, 2, 1]), 0));
+    let mut gone = real.clone();
+    gone.pop_first().expect("an interface address");
+    for after in [Some(appeared), Some(gone), None] {
+        let mut calls = 0;
+        let claimed = ports::reuse_claim(0, || {
+            calls += 1;
+            if calls == 1 {
+                Some(real.clone())
+            } else {
+                after.clone()
+            }
+        });
+        assert!(claimed.is_err(), "{after:?}");
+        assert_eq!(calls, 2);
+    }
+    assert!(ports::reuse_claim(0, || None).is_err());
+    let guards = ports::reuse_claim(0, || Some(real.clone())).unwrap();
+    assert!((4..=4 + real.len()).contains(&guards.len()));
+}
+
 #[test]
 fn symlinked_configuration_and_wrong_selectors_refuse_before_mutation() {
     let f = fixture();
@@ -511,8 +604,10 @@ fn successful_port_guards_own_all_four_allocated_addresses_during_observation() 
     // Zero asks the kernel to allocate each guard independently. These ports can
     // differ: this proves successful reservation/lifetime, not one common port.
     // No released ephemeral port is presumed to remain globally unoccupied.
+    // The four wildcard and loopback guards come first; one guard per interface
+    // address follows them.
     let guards = port_absent(0).unwrap();
-    assert_eq!(guards.len(), 4);
+    assert!((4..=4 + ports::local_addresses().unwrap().len()).contains(&guards.len()));
     let expected = [
         IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
         IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
@@ -523,7 +618,8 @@ fn successful_port_guards_own_all_four_allocated_addresses_during_observation() 
         .iter()
         .map(AsRawFd::as_raw_fd)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(descriptors.len(), 4);
+    // Every guard, interface addresses included, owns its own descriptor.
+    assert_eq!(descriptors.len(), guards.len());
     for (guard, ip) in guards.iter().zip(expected) {
         let listener = std::net::TcpListener::from(guard.try_clone().unwrap());
         let address = listener.local_addr().unwrap();
@@ -732,4 +828,42 @@ fn full_legacy_command_child() {
         inode(&f.root.join("data/caddy/pki/authorities/local/root.crt")).unwrap(),
         f.journal.ca
     );
+}
+
+/// HACK-2550: a Caddy that just stopped leaves its side of recent connections in
+/// TIME_WAIT. The strict claim refuses then; the reuse claim, which binds every
+/// local address exactly, claims the port at once, because no listener is left.
+#[test]
+fn a_port_left_in_time_wait_by_a_stopped_server_is_claimed_at_once() {
+    use std::io::Read;
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+
+    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    let (server, _) = listener.accept().unwrap();
+    // The server side closes first, so its address enters TIME_WAIT.
+    drop(server);
+    let mut byte = [0_u8; 1];
+    assert_eq!(client.read(&mut byte).unwrap(), 0);
+    drop(client);
+    drop(listener);
+    assert!(
+        ports::claim(port, false).is_err(),
+        "the server's TIME_WAIT should refuse a bind without address reuse"
+    );
+    let started = Instant::now();
+    ports::observation_diagnostic::clear();
+    let guards = port_absent(port).unwrap_or_else(|_| {
+        panic!(
+            "the reuse claim refused over TIME_WAIT; first refusal {:?}",
+            ports::observation_diagnostic::take()
+        )
+    });
+    assert!((4..=4 + ports::local_addresses().unwrap().len()).contains(&guards.len()));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    drop(guards);
+    // A live listener still refuses, through either claim.
+    let live = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    assert!(port_absent(live.local_addr().unwrap().port()).is_err());
 }

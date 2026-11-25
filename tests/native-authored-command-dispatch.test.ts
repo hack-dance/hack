@@ -53,6 +53,32 @@ else console.log(JSON.stringify({transport_version:1,ok:false,diagnostics:[{code
   await chmod(compiler, 0o700);
   return { root, native, compiler };
 }
+test("timed setup inspection leaves the runtime effect marker absent", async () => {
+  const selected = await fixture();
+  const child = Bun.spawn(
+    [
+      selected.native,
+      `--internal-timings=3:${"1".repeat(32)}:${"2".repeat(16)}:1:runtime`,
+      "--candidate-root",
+      join(selected.root, "candidate"),
+      "runtime",
+      "setup",
+      "inspect",
+      "--json",
+    ],
+    { stdout: "pipe", stderr: "pipe" }
+  );
+  const output = await new Response(child.stdout).text();
+  expect(await child.exited).toBe(0);
+  expect(JSON.parse(output)).toMatchObject({
+    setup_only: true,
+    state: "ready",
+  });
+  expect(await Bun.file(join(selected.root, "runtime-called")).exists()).toBe(
+    false
+  );
+});
+
 async function invoke(opts: {
   readonly selected: Awaited<ReturnType<typeof fixture>>;
   readonly args: readonly string[];
@@ -69,9 +95,13 @@ async function invoke(opts: {
       ...opts.args,
     ],
     {
+      cwd: root,
       env: {
         PATH: process.env.PATH ?? "",
         HOME: root,
+        // Bun loads dotenv from the working directory even with an explicit
+        // environment. Keep the launcher and its re-exec on fixture settings.
+        BUN_OPTIONS: "--no-env-file",
         CI: "1",
         HACK_EXECUTION_MODE: "ci",
         HACK_DAEMON_AUTOSTART_DISABLE: "1",
@@ -249,6 +279,9 @@ test.each([
   flags,
 }) => {
   const selected = await fixture();
+  // If Bun loads this, the setup probe carries --step-store and misses the
+  // fixture's exact setup argv, before any detached startup is attempted.
+  await Bun.write(join(selected.root, ".env"), "HACK_STEP_STORE=on\n");
   const value = await invoke({
     selected,
     args: ["up", ...flags],

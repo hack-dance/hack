@@ -16,6 +16,7 @@ import type { NativePreflightReport } from "../src/backends/native-preflight.ts"
 import { nativePreflightProbeFromReport } from "../src/lib/upgrade-check-probes.ts";
 import { nativeSetupInspection } from "./helpers/native-setup-inspection.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
+import { writeOwnedFixture } from "./helpers/owned-fixture.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -68,6 +69,7 @@ async function fixture(compose: Record<string, unknown>) {
   await writeFile(
     binary,
     `#!/bin/sh
+case "$1" in --internal-timings=*) shift;; esac
 printf '%s\\n' "$*" >> '${stub}/calls'
 if [ "$3" = runtime ] && [ "$4" = setup ]; then
   if [ "$#" != 6 ] || [ "$5" != inspect ] || [ "$6" != --json ]; then
@@ -2399,7 +2401,7 @@ test(
     await f.review([], { services: { app: { active: true } } });
     await f.reply("project-source-size.out", nativeSourceSizeReceipt());
     const env = { ...f.native, ...GRANT, HACK_NATIVE_GCLOUD_ADC: "file" };
-    await writeFile(
+    await writeOwnedFixture(
       join(f.projectDir, "app.env"),
       "GOOGLE_APPLICATION_CREDENTIALS=/config/adc.json\n"
     );
@@ -2407,7 +2409,7 @@ test(
     expect(matching.report.blockers).toEqual([]);
     expect(matching.report.consent_needed).toEqual([]);
     // A selector naming another path still refuses.
-    await writeFile(
+    await writeOwnedFixture(
       join(f.projectDir, "app.env"),
       "GOOGLE_APPLICATION_CREDENTIALS=/elsewhere.json\n"
     );

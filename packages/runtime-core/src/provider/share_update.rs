@@ -289,6 +289,55 @@ pub fn add_project_share(
     update(candidate, Operation::Add, share)
 }
 
+/// Add one exactly approved project root to an owned development pool that is running
+/// but idle, by stopping it first (HACK-2535). Nothing is stopped when the root is
+/// already shared, when the pool cannot take another share, or when an earlier update
+/// is unfinished: those go straight to the stopped-pool update, which answers them as
+/// usual. Otherwise the pool is stopped only if nothing uses it live
+/// (`lifecycle::stop_idle_pool`, checked twice under the provider lease), then the
+/// share is added as on any stopped pool and the caller's next start boots it. A start
+/// that boots the pool between the stop and the update makes the update refuse
+/// (`project_share_extension_required`).
+pub fn add_project_share_stopping_idle_pool(
+    candidate: &Candidate,
+    project: &Path,
+) -> Result<Value, CandidateError> {
+    let share = addition(candidate, project, true)?;
+    let owner = Owner::load(candidate)?;
+    let stopped = stop_before_add(&owner, &share, require_complete(candidate).is_ok())?;
+    if stopped {
+        lifecycle::stop_idle_pool(candidate)?;
+    }
+    let mut receipt = update(candidate, Operation::Add, share)?;
+    receipt["stopped_idle_pool"] = json!(stopped);
+    Ok(receipt)
+}
+
+/// Whether adding `share` first needs the running pool stopped. A root already shared,
+/// or an unfinished earlier update (`complete` false), needs no stop: the stopped-pool
+/// update answers them. A full or conflicting share set refuses before anything stops.
+fn stop_before_add(
+    owner: &Owner,
+    share: &ProjectShareIntent,
+    complete: bool,
+) -> Result<bool, CandidateError> {
+    let shares = owner.project_shares();
+    if !complete || shares.contains(&share) {
+        return Ok(false);
+    }
+    if shares.len() >= MAX_PROJECT_SHARES
+        || shares
+            .iter()
+            .any(|s| s.project == share.project || s.guest_path == share.guest_path)
+    {
+        return Err(CandidateError::new(
+            "project_share_limit",
+            "The native pool cannot share another project folder: it already shares the most it can, or one that conflicts with this one. It was not stopped; nothing was changed.",
+        ));
+    }
+    Ok(owner.phase == "running")
+}
+
 /// The share one add operates on. An interrupted addition names its own exact share:
 /// it resumes with that recorded receipt without checking the root live, because the
 /// root may since have moved, been deleted or been recreated with another identity.

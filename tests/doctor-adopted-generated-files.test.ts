@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { inspectLegacyComposeAdoptionSelection } from "../src/lib/native-compose-adoption-marker.ts";
+import { ownedFixtureCommand } from "./helpers/owned-fixture.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 import {
   retainedSourceBindFixture,
@@ -30,7 +31,7 @@ const GIT_ENV = {
 } as const;
 
 function git(args: readonly string[]): void {
-  const result = Bun.spawnSync(["/usr/bin/git", ...args], {
+  const result = Bun.spawnSync(ownedFixtureCommand(["/usr/bin/git", ...args]), {
     cwd: h.root,
     env: { PATH: "/usr/bin:/bin", HOME: h.outer, ...GIT_ENV },
     stdout: "ignore",

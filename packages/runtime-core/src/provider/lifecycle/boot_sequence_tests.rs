@@ -410,9 +410,9 @@ fn down_reads_the_memory_peak_before_the_stop_and_keeps_it_only_after() {
     let down = source.find("pub fn down(candidate: &Candidate)").unwrap();
     let wrapper = &source[down..down + source[down..].find("\n}\n").unwrap()];
     assert!(wrapper.contains("crate::timings::Step::VmStop"));
-    assert!(wrapper.contains("down_observed(candidate)"));
+    assert!(wrapper.contains("down_observed(candidate, None)"));
     let down = source
-        .find("fn down_observed(candidate: &Candidate)")
+        .find("fn down_observed(\n    candidate: &Candidate,")
         .unwrap();
     let body = &source[down..down + source[down..].find("\n}\n").unwrap()];
     let live = body.find("verify_live(candidate, &owner)?;").unwrap();
@@ -420,6 +420,17 @@ fn down_reads_the_memory_peak_before_the_stop_and_keeps_it_only_after() {
     let stop = body.find("guest_stop(candidate, &mut owner)").unwrap();
     let keep = body.find("keep_memory_peak(").unwrap();
     assert!(live < read && read < stop && stop < keep);
+    // HACK-2535: the idle check runs under the lease before any effect, and again right
+    // before the guest stops. In that mode the host-side releases follow the second
+    // check, so a refusal at either check has changed nothing.
+    let build = body.find("require_no_active_build(candidate)?;").unwrap();
+    let first = body.find("idle()?;").unwrap();
+    let second = body.rfind("idle()?;").unwrap();
+    let defined = body.find("hostname_authority::managed::stop(").unwrap();
+    let released = body.rfind("release(&owner)?;").unwrap();
+    assert!(build < first && first < defined && first < second);
+    assert!(read < second && second < released && released < stop);
+    assert_eq!(body.matches("release(&owner)?;").count(), 3);
     // The record is written from one place, after every stop path in `down`.
     assert!(body[keep..].find("stop_silent_guest").is_none());
     assert_eq!(source.matches("guest_memory_peak::record(").count(), 1);

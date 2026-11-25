@@ -15,14 +15,28 @@ use hack_desktop_core::logs::fixtures::LogsFixture;
 
 use crate::view::HackApp;
 
-pub fn run(dir: &Path, fixture: Option<Fixture>) {
-    std::fs::create_dir_all(dir).expect("create screenshot dir");
+fn fixture_context() -> HeadlessAppContext {
     let mut cx = HeadlessAppContext::with_platform(
         gpui_kit::platform::current_platform(true).text_system(),
         Arc::new(hack_desktop_ui::icons::Assets),
         gpui_kit::platform::current_headless_renderer,
     );
-    cx.update(gpui_kit::init);
+    cx.update(|cx| {
+        crate::theme::init(cx);
+        #[cfg(target_os = "linux")]
+        crate::theme::capture_fonts(cx);
+    });
+    cx
+}
+
+#[cfg(hack_terminal)]
+pub(crate) fn run_command_drawer(dir: &Path) {
+    crate::command_control::capture(dir, &mut fixture_context());
+}
+
+pub fn run(dir: &Path, fixture: Option<Fixture>) {
+    std::fs::create_dir_all(dir).expect("create screenshot dir");
+    let mut cx = fixture_context();
     // Every app fixture, then every Logs tab fixture on its base project state.
     let mut shots: Vec<(&'static str, Fixture, Option<LogsFixture>)> =
         Fixture::ALL.iter().map(|f| (f.name(), *f, None)).collect();
@@ -34,6 +48,7 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
         };
         shots.push((l.name(), base, Some(l)));
     }
+    shots.push(("service-stats", Fixture::Usage, None));
     for mode in [ThemeMode::Light, ThemeMode::Dark] {
         for &(name, f, logs) in shots
             .iter()
@@ -43,7 +58,7 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
             let opts = WindowOptions {
                 focus: false,
                 show: false,
-                ..crate::window_options()
+                ..crate::health_fixtures::window_options(Some(f))
             };
             let (handle, _app) = cx
                 .update(|cx| {
@@ -52,6 +67,12 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                             let mut app =
                                 HackApp::new(crate::source_for(Some(f)), false, window, cx);
                             app.select(fixtures::selected(f));
+                            crate::health_fixtures::open(&mut app, f, window, cx);
+                            // No controls are clicked during capture. Show the
+                            // enabled appearance of checked fixture commands.
+                            if matches!(f, Fixture::DoctorHealth | Fixture::ErrorsSheet) {
+                                app.live = true;
+                            }
                             if fixtures::loads_doctor(f) {
                                 app.show_doctor_now();
                                 if !fixtures::opens_doctor(f) {
@@ -67,8 +88,37 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                             if fixtures::loads_usage(f) {
                                 app.show_usage_now();
                             }
+                            if f.name().starts_with("config-") {
+                                app.show_configuration_fixture(f.name(), window, cx);
+                            }
+                            if f.name().starts_with("resources-") {
+                                if f.name() == "resources-unavailable" {
+                                    app.simulate_daemon_unavailable(false);
+                                }
+                                app.show_resources(cx);
+                                if matches!(f.name(), "resources-inventory" | "resources-confirm") {
+                                    app.show_resource_inventory_fixture(
+                                        f.name() == "resources-confirm",
+                                    );
+                                }
+                            }
+                            if f.name().starts_with("catalog-") {
+                                app.show_catalog_fixture(f.name(), window, cx);
+                            }
+                            if f.name().starts_with("changes-") {
+                                app.show_changes_fixture(f.name());
+                            }
+                            if name == "service-stats" {
+                                app.show_stats_fixture(window, cx);
+                            }
+                            if f.name().starts_with("copies-") {
+                                app.show_copies_fixture(f.name());
+                            }
                             if f.name().starts_with("env-") {
                                 app.show_env_fixture(f.name(), window, cx);
+                            }
+                            if f == Fixture::Files {
+                                app.show_files_fixture(window, cx);
                             }
                             if matches!(
                                 f,
@@ -93,11 +143,41 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
             // output arrive, then draw again.
             #[cfg(hack_terminal)]
             cx.update_window(handle, |_, window, cx| {
-                _app.update(cx, |app, cx| app.settle_terminals(cx));
+                if f == Fixture::Files {
+                    _app.update(cx, HackApp::toggle_panel);
+                    window.render_frame(cx);
+                }
+                _app.update(cx, |app, cx| {
+                    app.settle_terminals(cx);
+                    if f == Fixture::DoctorFixAll {
+                        app.settle_command_fixture(cx);
+                    }
+                });
                 window.render_frame(cx);
                 window.render_frame(cx);
             })
             .expect("settle");
+            if f == Fixture::GroupedSidebar {
+                cx.update_window(handle, |_, window, cx| {
+                    window.click("copy-storefront-1", cx);
+                    assert_eq!(
+                        _app.read(cx)
+                            .model
+                            .selected_key()
+                            .and_then(|key| key.branch),
+                        Some("feature-search".into()),
+                    );
+                    _app.update(cx, |app, _cx| {
+                        app.show_usage_now();
+                        #[cfg(hack_terminal)]
+                        app.toggle_panel(_cx);
+                    });
+                    window.render_frame(cx);
+                    assert!(window.find(("other-copy", 2_usize)).visible());
+                    window.hover("service-web", cx);
+                })
+                .expect("select worktree and hover a service");
+            }
             let img = cx
                 .capture_screenshot(handle)
                 .expect("offscreen rendering must be available");
@@ -109,8 +189,142 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
             let path = dir.join(format!("{name}-{suffix}.png"));
             img.save(&path).expect("write png");
             println!("{}", path.display());
-            cx.update_window(handle, |_, window, _| window.remove_window())
-                .ok();
+            if f == Fixture::GroupedSidebar {
+                cx.update_window(handle, |_, window, cx| {
+                    window.hover("service-api", cx);
+                    window.within("service-api").click("select-service", cx);
+                    let selected = _app
+                        .read(cx)
+                        .model
+                        .selected_service()
+                        .expect("service selected");
+                    assert_eq!(selected.name, "api");
+                    assert_eq!(
+                        selected.destination,
+                        hack_desktop_core::viewmodel::ServiceDestination::Logs
+                    );
+                    assert_eq!(_app.read(cx).selected_service(), Some("api"));
+                    {
+                        use hack_desktop_core::state::Action;
+                        let app = _app.read(cx);
+                        let detail = app.model.detail().expect("selected copy detail");
+                        let mut row = detail
+                            .services
+                            .iter()
+                            .find(|row| row.name == "api")
+                            .expect("running service")
+                            .clone();
+                        assert!(app.can_run_service_action(&detail, &row, Action::Stop));
+                        row.running = false;
+                        assert!(app.can_run_service_action(&detail, &row, Action::Restart));
+                        assert!(!app.can_run_service_action(&detail, &row, Action::Stop));
+                        row.compose_container = false;
+                        assert!(!app.can_run_service_action(&detail, &row, Action::Restart));
+                    }
+                    _app.update(cx, |app, cx| {
+                        app.set_service_tab(crate::service_view::ServiceTab::Info, window, cx);
+                    });
+                    window.within("service-api").click("service-more", cx);
+                    assert_eq!(_app.read(cx).sidebar_menu.as_deref(), Some("api"));
+                    assert!(window.try_find(("service-command", 4_usize)).is_some());
+                })
+                .expect("open the service row menu");
+                let path = dir.join(format!("service-row-menu-{suffix}.png"));
+                cx.capture_screenshot(handle)
+                    .expect("capture service row menu")
+                    .save(&path)
+                    .expect("write service menu png");
+                println!("{}", path.display());
+                cx.update_window(handle, |_, window, cx| {
+                    window.click(("service-command", 3_usize), cx);
+                    let selection = _app
+                        .read(cx)
+                        .model
+                        .selected_service()
+                        .expect("service selected");
+                    assert_eq!(selection.name, "api");
+                    assert_eq!(
+                        selection.destination,
+                        hack_desktop_core::viewmodel::ServiceDestination::Files
+                    );
+                    assert_eq!(
+                        _app.read(cx).service_pane.tab,
+                        crate::service_view::ServiceTab::Files
+                    );
+                    window.hover("service-web", cx);
+                    window.within("service-web").click("service-more", cx);
+                    window.click(("service-command", 3_usize), cx);
+                    let app = _app.read(cx);
+                    let detail = app.model.detail().expect("copy detail");
+                    assert_eq!(app.files_service(&detail).map(String::as_str), Some("web"));
+                    window.click("copy-storefront-3", cx);
+                    assert!(_app.read(cx).model.selected_service().is_none());
+                    assert!(window.try_find("service-api").is_none());
+                    assert!(window.try_find("service-deploy").is_some());
+                    assert_eq!(
+                        _app.read(cx).model.detail().and_then(|d| d.url),
+                        Some("https://release-2.storefront.hack".into())
+                    );
+                    window.click("copy-storefront-1", cx);
+                    window.hover("service-api", cx);
+                    window.within("service-api").click("service-more", cx);
+                    window.click(("service-command", 1_usize), cx);
+                    assert_eq!(_app.read(cx).logs.model.service.as_deref(), Some("api"));
+                    _app.update(cx, |app, cx| {
+                        let mut snapshot = app.model.snapshot().expect("fixture snapshot").clone();
+                        let project = snapshot
+                            .projects
+                            .projects
+                            .iter_mut()
+                            .find(|project| project.name == "storefront")
+                            .expect("fixture project");
+                        let instance = project
+                            .branch_runtime
+                            .iter_mut()
+                            .find(|runtime| runtime.branch == "feature-search")
+                            .expect("fixture branch");
+                        instance
+                            .runtime
+                            .services
+                            .retain(|service| service.service != "api");
+                        let refresh = app.model.begin_refresh();
+                        assert!(app.apply_refresh(refresh, Ok(snapshot), cx));
+                        assert!(app.model.selected_service().is_none());
+                        assert!(app.logs.model.service.is_none());
+                    });
+                    window.hover("service-web", cx);
+                    window.within("service-web").click("service-more", cx);
+                    window.click(("service-command", 3_usize), cx);
+                    _app.update(cx, |app, cx| {
+                        let mut snapshot = app.model.snapshot().expect("fixture snapshot").clone();
+                        let project = snapshot
+                            .projects
+                            .projects
+                            .iter_mut()
+                            .find(|project| project.name == "storefront")
+                            .expect("fixture project");
+                        project.defined_services = vec!["api".into(), "web".into()];
+                        project
+                            .branch_runtime
+                            .retain(|row| row.branch != "feature-search");
+                        let refresh = app.model.begin_refresh();
+                        assert!(app.apply_refresh(refresh, Ok(snapshot), cx));
+                        let detail = app.model.detail().expect("primary copy detail");
+                        assert!(detail.key.is_main());
+                        assert!(detail.services.iter().any(|service| service.name == "web"));
+                        assert_eq!(app.files_service(&detail).map(String::as_str), Some("api"));
+                    });
+                })
+                .expect("activate Files and switch to a stopped copy");
+            }
+            cx.update_window(handle, |_, window, _cx| {
+                #[cfg(hack_terminal)]
+                if f == Fixture::DoctorFixAll {
+                    _app.update(_cx, |app, cx| app.reset_command_drawer(window, cx));
+                }
+                window.remove_window();
+            })
+            .ok();
         }
     }
     if fixture.is_none() {
@@ -284,4 +498,218 @@ pub fn sequence(dir: &Path) {
         img.save(&path).expect("write png");
         println!("{}", path.display());
     }
+}
+
+/// Render the four service detail states through the app's own fixture harness.
+pub fn service_pane(dir: &Path) {
+    use crate::service_view::{SERVICE_TAB_KEYS, ServiceMenu, ServiceTab};
+    use gpui_kit::{Bounds, WindowBounds, px, size};
+    use hack_desktop_core::viewmodel::InstanceKey;
+
+    std::fs::create_dir_all(dir).expect("create service screenshot directory");
+    let mut cx = HeadlessAppContext::with_platform(
+        gpui_kit::platform::current_platform(true).text_system(),
+        Arc::new(hack_desktop_ui::icons::Assets),
+        gpui_kit::platform::current_headless_renderer,
+    );
+    cx.update(gpui_kit::init);
+    cx.update(crate::view::bind_keys);
+    for (mode, suffix) in [(ThemeMode::Light, "light"), (ThemeMode::Dark, "dark")] {
+        cx.update(|cx| Theme::change(mode, None, cx));
+        let (handle, app) = cx
+            .update(|cx| {
+                gpui_kit::open_window(
+                    WindowOptions {
+                        focus: false,
+                        show: false,
+                        window_bounds: Some(WindowBounds::Windowed(Bounds {
+                            origin: Default::default(),
+                            size: size(px(1280.), px(800.)),
+                        })),
+                        ..crate::window_options()
+                    },
+                    cx,
+                    |window, cx| {
+                        cx.new(|cx| {
+                            HackApp::new(
+                                crate::source_for(Some(Fixture::Branches)),
+                                false,
+                                window,
+                                cx,
+                            )
+                        })
+                    },
+                )
+            })
+            .expect("open service fixture");
+        for (shot, tab, menu, key) in [
+            ("before", None, None, None),
+            ("m02-service-logs", Some(ServiceTab::Logs), None, None),
+            (
+                "m07-logs-menu",
+                Some(ServiceTab::Logs),
+                Some(ServiceMenu::LogOptions),
+                Some(3),
+            ),
+            (
+                "m06-service-info",
+                Some(ServiceTab::Info),
+                Some(ServiceMenu::Actions),
+                Some(1),
+            ),
+            (
+                "m04-service-terminal",
+                Some(ServiceTab::Terminal),
+                None,
+                Some(4),
+            ),
+            ("service-stats", Some(ServiceTab::Stats), None, Some(2)),
+            ("service-files", Some(ServiceTab::Files), None, Some(5)),
+        ] {
+            cx.update_window(handle, |_, window, cx| {
+                if let Some(key) = key {
+                    let keystroke = gpui_kit::Keystroke::parse(SERVICE_TAB_KEYS[key - 1])
+                        .expect("service shortcut");
+                    window.dispatch_keystroke(keystroke, cx);
+                }
+                app.update(cx, |app, cx| {
+                    let key = InstanceKey::branch("storefront", "feature-search");
+                    match tab {
+                        None => app.select_instance(key, cx),
+                        Some(ServiceTab::Logs) if menu.is_none() => {
+                            let key = app.model.selected_key().expect("selected copy");
+                            app.select_service(key, "api".into(), window, cx);
+                            app.logs.show_service_fixture();
+                        }
+                        #[cfg(hack_terminal)]
+                        Some(ServiceTab::Terminal) => {
+                            assert_eq!(app.service_pane.tab, ServiceTab::Terminal);
+                            app.show_service_terminal_fixture(window, cx);
+                        }
+                        _ => {}
+                    }
+                    if let Some(tab) = tab {
+                        assert_eq!(app.service_pane.tab, tab, "{shot}: service shortcut");
+                    }
+                });
+                window.render_frame(cx);
+                #[cfg(hack_terminal)]
+                if tab == Some(ServiceTab::Terminal) {
+                    app.update(cx, |app, cx| app.settle_terminals(cx));
+                    window.render_frame(cx);
+                }
+                window.render_frame(cx);
+                match menu {
+                    Some(ServiceMenu::LogOptions) => window.click("service-log-options", cx),
+                    Some(ServiceMenu::Actions) => window.click("service-actions", cx),
+                    _ => {}
+                }
+                assert_eq!(app.read(cx).service_pane.menu, menu);
+            })
+            .expect("render service fixture");
+            let path = dir.join(format!("{shot}-{suffix}.png"));
+            cx.capture_screenshot(handle)
+                .expect("read service screenshot")
+                .save(&path)
+                .expect("write service png");
+            println!("{}", path.display());
+            cx.update_window(handle, |_, window, cx| {
+                if shot == "m02-service-logs" {
+                    assert_eq!(app.read(cx).logs.model.service.as_deref(), Some("api"));
+                    window.click("service-log-pause", cx);
+                    assert!(app.read(cx).logs.model.paused);
+                    window.click("service-log-pause", cx);
+                    assert!(!app.read(cx).logs.model.paused);
+                }
+                if shot == "m07-logs-menu" {
+                    window.click("log-all-services", cx);
+                    assert!(app.read(cx).logs.model.service.is_none());
+                    assert!(app.read(cx).service_pane.menu.is_none());
+                }
+                if shot == "m06-service-info" {
+                    assert!(window.try_find("service-health-dot").is_some());
+                }
+                #[cfg(hack_terminal)]
+                if shot == "m04-service-terminal" {
+                    assert_eq!(app.read(cx).drive_tab_count(cx), Some(3));
+                    let plus = window.find("term-new").bounds().origin.x;
+                    window.click("term-new", cx);
+                    window.render_frame(cx);
+                    let plus_menu = window.find("term-menu").bounds().origin.x;
+                    assert_eq!(plus_menu, plus);
+                    window.click("term-dock-menu", cx);
+                    window.render_frame(cx);
+                    let more_menu = window.find("term-menu").bounds().origin.x;
+                    assert!(more_menu > plus_menu);
+                    window.click("term-dock-close", cx);
+                    let drawer_key = if cfg!(target_os = "macos") {
+                        "cmd-j"
+                    } else {
+                        "ctrl-shift-j"
+                    };
+                    window.press(drawer_key, cx);
+                    assert_eq!(app.read(cx).drive_tab_count(cx), Some(3));
+                }
+            })
+            .expect("exercise service pane controls");
+        }
+        #[cfg(hack_terminal)]
+        capture_service_shell_reopen(&mut cx, handle, &app, dir, suffix);
+        cx.update_window(handle, |_, window, _| window.remove_window())
+            .ok();
+    }
+}
+
+#[cfg(hack_terminal)]
+fn capture_service_shell_reopen(
+    cx: &mut HeadlessAppContext,
+    handle: gpui_kit::AnyWindowHandle,
+    app: &gpui_kit::Entity<HackApp>,
+    dir: &Path,
+    suffix: &str,
+) {
+    use crate::service_view::ServiceTab;
+    use crate::terminal::ServiceShellFixture;
+    use hack_desktop_term::view::Status;
+
+    let fixture = ServiceShellFixture::new();
+    cx.update_window(handle, |_, window, cx| {
+        app.update(cx, |app, cx| {
+            app.close_all_terminals(window, cx);
+            fixture.install(app, Fixture::Branches, cx);
+        });
+    })
+    .expect("install shell screenshot fixture");
+    for (shot, active) in [("service-shell-ended", 1), ("service-shell-reopened", 2)] {
+        cx.update_window(handle, |_, window, cx| {
+            window.click(("service-tab", 3_usize), cx);
+            let app = app.read(cx);
+            assert_eq!(app.service_pane.tab, ServiceTab::Terminal);
+            let key = app.model.selected_key().expect("selected branch");
+            let sessions = app.panels.by_key[&key].sessions.clone();
+            let shell = sessions.read(cx).tab(active).expect("active shell").clone();
+            if active == 1 {
+                ServiceShellFixture::exit(&shell, cx);
+            } else {
+                ServiceShellFixture::wait_for(&shell, "/app #", false, cx);
+            }
+            window.render_frame(cx);
+            let sessions = sessions.read(cx);
+            assert_eq!(sessions.tab_count(), active + 1);
+            assert_eq!(sessions.active_index(), Some(active));
+            let ended = sessions.tab(1).expect("original shell").read(cx);
+            assert!(matches!(ended.status(), Status::Ended(_)));
+        })
+        .expect("exercise service shell reopen");
+        let path = dir.join(format!("{shot}-{suffix}.png"));
+        cx.capture_screenshot(handle)
+            .expect("read shell screenshot")
+            .save(&path)
+            .expect("write shell png");
+        println!("{}", path.display());
+    }
+    cx.update_window(handle, |_, window, cx| {
+        app.update(cx, |app, cx| app.close_all_terminals(window, cx));
+    })
+    .expect("close shell screenshot PTYs");
 }

@@ -5,6 +5,7 @@ import {
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
+import { awaitNativeEndedBootOwner } from "./native-ended-boot-owner.ts";
 import {
   nativeFrontendGone,
   nativeFrontendGoneSettled,
@@ -14,10 +15,16 @@ import {
   captureNativeProjectFinalization,
   inspectNativeProjectFinalizationLifetime,
   type NativeProjectFinalizationToken,
+  nativeFinalizationLeaseAdded,
+  orphanNativeProjectLifetime,
   recoverNativeProjectFinalization,
   waitNativeProjectFinalization,
 } from "./native-project-finalization.ts";
-import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
+import {
+  inspectNativeProjectGraph,
+  isNativeProviderBusy,
+  observeStartingNativeProjectGraph,
+} from "./native-project-inspect.ts";
 import { recoverNativeInterruptedStartupCleanup } from "./native-project-interrupted-cleanup.ts";
 import {
   retireNativeRecoveredPublisher,
@@ -46,6 +53,7 @@ import {
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
+import { recoverExitedNativeRuntime } from "./native-runtime-preflight.ts";
 
 function refused(): Error {
   return new ClosedCliError(
@@ -108,6 +116,17 @@ const RECEIPT_SHA = /^[a-f0-9]{64}$/;
 const RECOVERY_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 const FOREGROUND_STATES = new Set(["absent", "running", "exited", "uncertain"]);
+/**
+ * Graph phases in which an exited foreground owner is recovered: ready, or every
+ * service started with some goal still unmet (`started-observed`, written only
+ * under `--report-started`). Only a run with a saved mapping gets here. A fresh
+ * start saves its mapping only at ready today, so in the started phase this is a
+ * restored run; PR B saves the mapping at started.
+ */
+const RECOVERABLE_LIVE_PHASES: ReadonlySet<string> = new Set([
+  "ready-observed",
+  "started-observed",
+]);
 
 /** What `graph foreground-owner` selected; it grants no recovery authority. */
 type ForegroundOwnerSelection = {
@@ -212,7 +231,7 @@ function optionalBoolean(value: unknown): boolean {
 
 /**
  * After selected predecessor recovery is handled, dispatch a live/absent owner
- * to ordinary authenticated cleanup, or a dead ready owner to same-boot
+ * to ordinary authenticated cleanup, or a provably recoverable dead owner to same-boot
  * recovery. The runtime revalidates process death and exact inventories itself;
  * this observation grants no recovery authority.
  */
@@ -408,11 +427,11 @@ function requireRecoverableOwner(selection: ForegroundOwnerSelection): void {
   }
   if (
     selection.foreground === "exited" &&
-    selection.phase !== "ready-observed" &&
-    !(selection.phase === "failed-retained" && selection.failedStartRecoverable)
+    !RECOVERABLE_LIVE_PHASES.has(selection.phase) &&
+    !selection.failedStartRecoverable
   ) {
     throw new ClosedCliError(
-      "Native down --recover found a foreground owner that exited before its start was confirmed. Nothing was changed. Run hack ps --json to inspect this run's retained state."
+      `Native down --recover found a foreground owner that exited before its start was confirmed. The runtime could not prove which resources to retire. ${nativeRecoveryGuidance("graph_live_owner_recovery")}`
     );
   }
 }
@@ -527,7 +546,7 @@ async function awaitPendingStartup(opts: {
     if (!waited) {
       // Say what this command waits for, once (HACK-2550).
       (opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)))(
-        `Waiting up to ${Math.ceil(waitMs / 1000)} s for an earlier start of this instance to end; a start whose native runtime stopped ends on its own within about 15 s.`
+        `Waiting up to ${Math.ceil(waitMs / 1000)} s for an earlier start of this instance to end; a start whose native runtime stopped ends on its own within about 11 s.`
       );
     }
     waited = true;
@@ -598,7 +617,7 @@ async function deadOwnerOfLiveRun(opts: {
     }
     if (
       selection.foreground === "exited" &&
-      (selection.phase === "ready-observed" ||
+      (RECOVERABLE_LIVE_PHASES.has(selection.phase) ||
         selection.deadOwnerRecovery !== null)
     ) {
       return true;
@@ -637,17 +656,53 @@ async function inspectOrStartStoppedPool(opts: {
   readonly projectRoot: string;
   readonly run: NativeProjectRun;
   readonly invoke: typeof invokeNativeRuntime;
+  /** Where the one-line wait notice goes; stderr by default. */
+  readonly notice?: (line: string) => void;
+  readonly poolBootEnded?: (home: string) => Promise<boolean>;
+  readonly endedBootOwnerWaitMs?: number;
 }): Promise<unknown> {
   try {
     return await opts.inspect();
   } catch (error) {
+    // HACK-2579: the pool's provider exited while its record still says running.
+    // `runtime recover` records it stopped (under the lease, identity checked);
+    // the down then begins again on a stopped pool.
     if (
-      !(
-        opts.startStoppedPool &&
-        isNativeRuntimeNotRunning(error) &&
-        (await deadOwnerOfLiveRun(opts))
-      )
+      error instanceof NativeRuntimeRequestError &&
+      error.nativeCode === "process_identity_unavailable" &&
+      (await recoverExitedNativeRuntime({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        invoke: opts.invoke,
+      }))
     ) {
+      throw new ExitedPoolRecovered();
+    }
+    if (!isNativeRuntimeNotRunning(error)) {
+      throw error;
+    }
+    // HACK-2572: the run's owner of a boot that has ended may still be exiting;
+    // wait for it, bounded, before deciding as before.
+    const ended = opts.poolBootEnded;
+    await awaitNativeEndedBootOwner({
+      home: opts.runtime.home,
+      waitMs: opts.endedBootOwnerWaitMs,
+      read: ended
+        ? async (home) =>
+            (await ended(home)) ? { token: "", phase: "stopped" } : undefined
+        : undefined,
+      notice:
+        opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)),
+      // Running, or ending (HACK-2572): an exited but unreaped process, or a
+      // publication read mid-change, shows as uncertain for a moment.
+      ownerRunning: async () => {
+        const foreground = (
+          await selectForegroundOwner(opts).catch(() => undefined)
+        )?.foreground;
+        return foreground === "running" || foreground === "uncertain";
+      },
+    });
+    if (!(opts.startStoppedPool && (await deadOwnerOfLiveRun(opts)))) {
       throw error;
     }
   }
@@ -657,6 +712,15 @@ async function inspectOrStartStoppedPool(opts: {
     args: [...nativeProjectRuntimeUpArgs(opts.projectRoot), "--json"],
   });
   throw new StoppedPoolStarted();
+}
+
+/** Raised inside a down that recovered a pool whose provider exited (HACK-2579). */
+class ExitedPoolRecovered extends Error {
+  constructor() {
+    super(
+      "The native runtime's provider had exited and the pool was recovered, but this down still found it unavailable; nothing else was changed. Run hack down again."
+    );
+  }
 }
 
 /** Whether an inspected graph is stopped with its data retained. */
@@ -688,7 +752,12 @@ async function downRun(opts: {
     waitMs: opts.startupWaitMs,
     untilPublished: true,
   });
-  return await loadNativeProjectRun(opts.scope);
+  // A start that crashed after registering its lifetime and before publishing
+  // its mapping is still found, from the lifetime record (same run identity).
+  return (
+    (await loadNativeProjectRun(opts.scope)) ??
+    (await orphanNativeProjectLifetime(opts.scope))
+  );
 }
 
 async function nativeProjectDownOnce(opts: {
@@ -737,6 +806,9 @@ async function nativeProjectDownOnce(opts: {
    * under a dead owner's live run may be started once (HACK-2456).
    */
   readonly startStoppedPool?: boolean;
+  /** Test seams of the HACK-2572 wait: the pool record proof and its bound. */
+  readonly poolBootEnded?: (home: string) => Promise<boolean>;
+  readonly endedBootOwnerWaitMs?: number;
 }) {
   const run = await downRun(opts);
   if (!run) {
@@ -747,13 +819,41 @@ async function nativeProjectDownOnce(opts: {
     } as const;
   }
   const invoke = withNativeRecoveryGuidance(opts.invoke ?? invokeNativeRuntime);
-  const inspect = () =>
+  const leased = (busyWaitMs?: number) =>
     inspectNativeProjectGraph({
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       run: run.run,
       invoke,
+      busyWaitMs,
     });
+  // A start that returned at started holds the provider lease until its ready
+  // line. Seen lease-free as `started-observed`, the run is checked from that
+  // snapshot and stopped through its owner (`graph cleanup` reaches the owner's
+  // socket without the lease); any other busy lease is waited out as before.
+  const inspect = async () => {
+    try {
+      return await leased(0);
+    } catch (error) {
+      if (!isNativeProviderBusy(error)) {
+        throw error;
+      }
+      const observed = await observeStartingNativeProjectGraph({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        run: run.run,
+        invoke,
+      }).catch(() => undefined);
+      if (
+        isRecord(observed) &&
+        isRecord(observed.receipt) &&
+        observed.receipt.phase === "started-observed"
+      ) {
+        return observed;
+      }
+      return await leased();
+    }
+  };
   let initial = await inspectOrStartStoppedPool({
     inspect,
     startStoppedPool: opts.startStoppedPool === true,
@@ -762,9 +862,32 @@ async function nativeProjectDownOnce(opts: {
     projectRoot: opts.scope.projectRoot,
     run,
     invoke,
+    poolBootEnded: opts.poolBootEnded,
+    endedBootOwnerWaitMs: opts.endedBootOwnerWaitMs,
   });
   verify(initial, run, false);
-  const finalization = opts.deferFinalization
+  // A failure after started is kept beside the receipt until `down` clears it
+  // (the restart coordinator's down leaves it to the next start).
+  const failureRecorded =
+    isRecord(initial) && initial.failed_after_started !== undefined;
+  const clearFailure = async () => {
+    if (failureRecorded && !opts.deferFinalization) {
+      await invoke({
+        runtime: opts.runtime,
+        cwd: opts.scope.projectRoot,
+        args: [
+          "graph",
+          "clear-failure-after-started",
+          "--run-id",
+          run.run,
+          "--json",
+        ],
+      });
+    }
+  };
+  // A start that returned at started may still add its HTTPS lease to this
+  // same lifetime (version 2 to 3, same attempt) before the stop; see below.
+  let finalization = opts.deferFinalization
     ? undefined
     : await captureFinalization({ scope: opts.scope, run });
   const frontendGone =
@@ -796,23 +919,22 @@ async function nativeProjectDownOnce(opts: {
     verify(initial, run, false);
   }
   const wait = async () => {
-    if (finalization === undefined) {
+    // The lifetime as last captured (it may have gained its HTTPS lease).
+    const token = finalization;
+    if (token === undefined) {
       return;
     }
     try {
       await waitNativeProjectFinalization({
         scope: opts.scope,
         run,
-        token: finalization,
+        token,
         timeoutMs: frontendGone ? 1 : opts.finalizationTimeoutMs,
       });
     } catch {
       // The wait just saw the frontend gone without completion; one unreadable
       // `ps` row under load must not turn that into "still running" (HACK-2372).
-      if (
-        finalization.version === 1 ||
-        !(await nativeFrontendGoneSettled(finalization))
-      ) {
+      if (token.version === 1 || !(await nativeFrontendGoneSettled(token))) {
         throw finalizationRefused();
       }
       // Exact captured attempt, dead frontend, stopped graph and all frontend
@@ -821,16 +943,15 @@ async function nativeProjectDownOnce(opts: {
       await recoverNativeProjectFinalization({
         scope: opts.scope,
         run,
-        token: finalization,
-        expectAttempt: finalization.attempt,
+        token,
+        expectAttempt: token.attempt,
         verifyEffects: () =>
           verifyNativeFrontendRecovery({
             runtime: opts.runtime,
             scope: opts.scope,
             run,
-            httpsPort: finalization.httpsPort,
-            httpsLease:
-              finalization.version === 3 ? finalization.httpsLease : undefined,
+            httpsPort: token.httpsPort,
+            httpsLease: token.version === 3 ? token.httpsLease : undefined,
             legacy: false,
             invoke,
             cleanupLifecycle: async () => {
@@ -841,7 +962,7 @@ async function nativeProjectDownOnce(opts: {
       await waitNativeProjectFinalization({
         scope: opts.scope,
         run,
-        token: finalization,
+        token,
         timeoutMs: 1,
       });
       return;
@@ -878,6 +999,7 @@ async function nativeProjectDownOnce(opts: {
     await opts.retireHostProcesses?.(run);
     await wait();
     await owedAfterStop();
+    await clearFailure();
     return {
       backend: "native",
       status: "stopped",
@@ -908,6 +1030,7 @@ async function nativeProjectDownOnce(opts: {
     await opts.retireHostProcesses?.(run);
     await wait();
     await owedAfterStop();
+    await clearFailure();
     return {
       backend: "native",
       status: "stopped",
@@ -931,14 +1054,13 @@ async function nativeProjectDownOnce(opts: {
   }
   // Recheck after hooks, which may run arbitrary user-authorized commands.
   verify(await inspect(), run, false);
-  if (
-    finalization !== undefined &&
-    !isDeepStrictEqual(
-      finalization,
-      await captureFinalization({ scope: opts.scope, run })
-    )
-  ) {
-    throw finalizationRefused();
+  if (finalization !== undefined) {
+    const current = await captureFinalization({ scope: opts.scope, run });
+    if (nativeFinalizationLeaseAdded(finalization, current)) {
+      finalization = current;
+    } else if (!isDeepStrictEqual(finalization, current)) {
+      throw finalizationRefused();
+    }
   }
   await opts.beforeCleanup?.(run);
   await requestOwnedStop({
@@ -958,6 +1080,7 @@ async function nativeProjectDownOnce(opts: {
     );
   }
   await wait();
+  await clearFailure();
   return {
     backend: "native",
     status: "stopped",
@@ -994,6 +1117,7 @@ export async function nativeProjectDown(
   let started = false;
   let startupWaitMs = opts.startupWaitMs;
   let resumed = false;
+  let recovered = false;
   for (;;) {
     try {
       const result = await nativeProjectDownOnce({
@@ -1005,6 +1129,10 @@ export async function nativeProjectDown(
     } catch (error) {
       if (error instanceof StoppedPoolStarted && !started) {
         started = true;
+        continue;
+      }
+      if (error instanceof ExitedPoolRecovered && !recovered) {
+        recovered = true;
         continue;
       }
       if (error instanceof RetainedRunResumed && !resumed) {
@@ -1083,6 +1211,15 @@ function removalRefused(cause?: unknown): Error {
     NATIVE_CODE.test(cause.nativeCode)
       ? ` (${cause.nativeCode})`
       : "";
+  // The owner of a run that returned at started refuses removal until ready.
+  if (
+    cause instanceof NativeRuntimeRequestError &&
+    cause.nativeCode === "graph_starting"
+  ) {
+    return new ClosedCliError(
+      "Native data removal waits for the project to finish starting (graph_starting); nothing was removed. Run `hack down` to stop it with data retained, then `hack down --remove-data`."
+    );
+  }
   return new ClosedCliError(
     `Native data removal is unconfirmed${code}; the run mapping is kept. Run \`hack down --remove-data\` again to resume from re-inspection.`
   );

@@ -443,7 +443,7 @@ fn complete_graph(proof: &Proof<'_>, journal: &mut Journal) -> Result<(), Candid
     for probe in cleaned.probes.values_mut() {
         probe.phase = "retired".into();
     }
-    cleaned.phase = "stopped-data-retained".into();
+    cleaned.set_phase("stopped-data-retained");
     for resource in proof
         .original
         .resources
@@ -551,7 +551,7 @@ fn validate_finished<'a>(
         return Err(refused());
     }
     let mut expected_receipt = record.original.clone();
-    expected_receipt.phase = "stopped-data-retained".into();
+    expected_receipt.set_phase("stopped-data-retained");
     for resource in expected_receipt.resources.values_mut() {
         if resource.kind != Kind::Volume {
             resource.phase = "absent".into();

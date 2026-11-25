@@ -8,6 +8,10 @@ import {
   checkLegacyProjectAgentArtifacts,
   checkLegacyUserAgentArtifacts,
 } from "../agents/legacy-artifacts.ts";
+import {
+  describeNativeDiskBytes,
+  readNativeDiskUsage,
+} from "../backends/native-disk-usage.ts";
 import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import { runNativeProjectCleanupCommand } from "../backends/native-project-cleanup-command.ts";
 import {
@@ -144,6 +148,7 @@ import {
 } from "../lib/doctor-generated-files.ts";
 import { checkMacHostTlsTrust } from "../lib/doctor-host-tls.ts";
 import {
+  type DoctorCheckId,
   type DoctorMetadata,
   type DoctorScope,
   doctorMetadata,
@@ -174,6 +179,10 @@ import {
   type NativeSourceReport,
 } from "../lib/doctor-native-source.ts";
 import { POLLING_FIX_ID } from "../lib/doctor-polling-fix.ts";
+import {
+  checkRootOwnedCheckout,
+  ROOT_OWNED_CHECK,
+} from "../lib/doctor-root-owned.ts";
 import {
   DOCTOR_SAFE_FIX_ID,
   runDoctorSafeFix,
@@ -377,7 +386,7 @@ type CheckStatus = "ok" | "warn" | "error";
 const NATIVE_TEMP_ALIASES_CHECK = "native temporary aliases";
 
 interface CheckResult {
-  readonly name: string;
+  readonly name: DoctorCheckId;
   readonly status: CheckStatus;
   readonly message: string;
   readonly scope?: DoctorScope;
@@ -484,6 +493,13 @@ const optBrowserResult = defineOption({
     "Your manual browser observation for --browser-url (default: unknown)",
 } as const);
 const doctorOptions = [
+  defineOption({
+    name: "disk",
+    type: "boolean",
+    long: "--disk",
+    description:
+      "Audit host file usage for the selected native home without starting the pool",
+  } as const),
   optPath,
   optFix,
   defineOption({
@@ -831,6 +847,9 @@ async function runNativePreflightMode(
 const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   args,
 }): Promise<number> => {
+  if (args.options.disk) {
+    return await reportNativeDiskAudit(args.options);
+  }
   if (args.options.machine) {
     assertMachineDoctorOptions(args.options);
   }
@@ -839,6 +858,40 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   }
   return await runDoctorAudit(args);
 };
+
+async function reportNativeDiskAudit(
+  options: Parameters<
+    CommandHandlerFor<typeof doctorSpec>
+  >[0]["args"]["options"]
+): Promise<number> {
+  const allowed = new Set(["disk", "json", "noInteractive"]);
+  for (const [key, value] of Object.entries(options)) {
+    if (value !== undefined && value !== false && !allowed.has(key)) {
+      throw new CliUsageError(
+        "--disk is a standalone read-only audit. Combine it with --json for machine output."
+      );
+    }
+  }
+  const started = performance.now();
+  const usage = await readNativeDiskUsage(process.cwd());
+  const detail = `${describeNativeDiskBytes(usage)}${usage.complete ? "" : " · incomplete scan"}`;
+  if (options.json) {
+    return finishDoctorJson({
+      results: [
+        {
+          name: "native disk usage",
+          status: usage.complete ? "ok" : "warn",
+          message: detail,
+          durationMs: Math.round(performance.now() - started),
+        },
+      ],
+      hasError: false,
+      machine: false,
+    });
+  }
+  process.stdout.write(`Native home disk usage · ${detail}\n`);
+  return 0;
+}
 
 async function runDoctorAudit(
   args: Parameters<CommandHandlerFor<typeof doctorSpec>>[0]["args"]
@@ -1020,11 +1073,14 @@ async function runDoctorAudit(
     // (isolated HACK_HOME, HACK_SYSTEMD_DISABLE=1); read failures are reported.
     const serviceCheck = await resolveSystemdSummary({
       paths: resolveDaemonPaths({}),
-    }).then(buildDaemonServiceCheck, (error: unknown) => ({
-      name: DAEMON_SERVICE_CHECK,
-      status: "warn" as const,
-      message: `Could not read the hackd systemd service: ${error instanceof Error ? error.message : String(error)}`,
-    }));
+    }).then(
+      buildDaemonServiceCheck,
+      (error: unknown): CheckResult => ({
+        name: DAEMON_SERVICE_CHECK,
+        status: "warn" as const,
+        message: `Could not read the hackd systemd service: ${error instanceof Error ? error.message : String(error)}`,
+      })
+    );
     if (serviceCheck) {
       results.push(await runCheck(s, DAEMON_SERVICE_CHECK, () => serviceCheck));
     }
@@ -1343,7 +1399,7 @@ async function collectPrerequisiteChecks(
   );
   return await Promise.all(
     observed.map(({ name, state, check, login, tools }) => {
-      const checkName = `prerequisite ${name}`;
+      const checkName = `prerequisite ${name}` as const;
       const label =
         state.state === "missing" ? `${state.bin} not found` : state.state;
       return runCheck(progress, checkName, () =>
@@ -2290,7 +2346,7 @@ export function bunCheckOptional(main: string = Bun.main): boolean {
 }
 
 async function checkTool(opts: {
-  readonly name: string;
+  readonly name: DoctorCheckId;
   readonly cmd: string;
   readonly optional?: boolean;
 }): Promise<CheckResult> {
@@ -2843,7 +2899,7 @@ export async function checkHackLocalDns(
 ): Promise<CheckResult> {
   const domain = opts.domain ?? DEFAULT_NEW_PROJECT_TLD;
   const host = `doctor.${domain}`;
-  const name = `dns:${domain}`;
+  const name = `dns:${domain}` as const;
   try {
     const { address } = await (opts.lookup ?? lookup)(host);
     let ok = [DEFAULT_CADDY_IP, DEFAULT_HOST_DNS_IP, "::1"].includes(address);
@@ -4153,6 +4209,15 @@ async function runProjectChecks(opts: {
       )
     );
     return results;
+  }
+  if (isLinux() && process.getuid?.() !== 0) {
+    const project = await findProjectContext(startDir);
+    if (project) {
+      const observe = () => checkRootOwnedCheckout(project);
+      results.push(
+        await runCheck(s, ROOT_OWNED_CHECK, observe, { timeoutMs: 700 })
+      );
+    }
   }
   if (dockerOk) {
     results.push(
@@ -6484,7 +6549,7 @@ async function canConnectTcp(opts: {
 // (Called from the command handler.)
 async function runCheck(
   _s: DoctorProgress,
-  name: string,
+  name: DoctorCheckId,
   fn: () => CheckResult | Promise<CheckResult>,
   opts?: { readonly timeoutMs?: number }
 ): Promise<TimedCheckResult> {

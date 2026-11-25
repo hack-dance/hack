@@ -33,6 +33,8 @@ pub enum Glyph {
     Folder,
     /// Error / CLI missing.
     CircleAlert,
+    WifiOff,
+    Minus,
     /// Daemon recovery.
     Power,
     /// Loading.
@@ -58,6 +60,8 @@ pub enum Glyph {
     Upgrade,
     /// Sidebar and header: a branch instance.
     Branch,
+    Worktree,
+    ChevronRight,
     /// Header: copy the URL.
     /// Env tab: reveal and hide a secret value.
     Eye,
@@ -67,8 +71,23 @@ pub enum Glyph {
     /// Env tab: edit a value.
     Pencil,
     Copy,
+    Lock,
+    More,
     /// Header: copied.
     Check,
+    Link,
+    Pause,
+    Filter,
+    Wrap,
+    Braces,
+    ListFilter,
+    Layers,
+    /// Service file browser.
+    Directory,
+    FileText,
+    Server,
+    Ellipsis,
+    Info,
 }
 
 impl Glyph {
@@ -87,6 +106,8 @@ impl Glyph {
             Self::Alert => "icons/triangle-alert.svg",
             Self::Folder => "icons/folder-plus.svg",
             Self::CircleAlert => "icons/circle-alert.svg",
+            Self::WifiOff => "icons/wifi-off.svg",
+            Self::Minus => "icons/minus.svg",
             Self::Power => "icons/power.svg",
             Self::Loader => "icons/loader-circle.svg",
             Self::Logs => "icons/list.svg",
@@ -100,12 +121,28 @@ impl Glyph {
             Self::ChevronUp => "icons/chevron-up.svg",
             Self::Upgrade => "icons/circle-arrow-up.svg",
             Self::Branch => "icons/git-branch.svg",
+            Self::Worktree => "icons/tree-structure.svg",
+            Self::ChevronRight => "icons/chevron-right.svg",
             Self::Copy => "icons/copy.svg",
+            Self::Lock => "icons/lock-keyhole.svg",
+            Self::More => "icons/ellipsis.svg",
             Self::Check => "icons/check.svg",
+            Self::Link => "icons/link.svg",
+            Self::Pause => "icons/pause.svg",
+            Self::Filter => "icons/list-filter.svg",
+            Self::Wrap => "icons/text-wrap.svg",
+            Self::Braces => "icons/braces.svg",
+            Self::ListFilter => "icons/rows-2.svg",
+            Self::Layers => "icons/layers.svg",
             Self::Eye => "icons/eye.svg",
             Self::EyeOff => "icons/eye-off.svg",
             Self::Key => "icons/key-round.svg",
             Self::Pencil => "icons/pencil.svg",
+            Self::Directory => "icons/folder.svg",
+            Self::FileText => "icons/file-text.svg",
+            Self::Server => "icons/server.svg",
+            Self::Ellipsis => "icons/ellipsis.svg",
+            Self::Info => "icons/info.svg",
         }
     }
 }
@@ -125,6 +162,8 @@ icon_assets!(
         TriangleAlert,
         FolderPlus,
         CircleAlert,
+        WifiOff,
+        Minus,
         Power,
         LoaderCircle,
         List,
@@ -138,12 +177,26 @@ icon_assets!(
         ChevronUp,
         CircleArrowUp,
         GitBranch,
+        ChevronRight,
         Copy,
+        LockKeyhole,
+        Ellipsis,
         Check,
+        Link,
+        Pause,
+        TextWrap,
+        Braces,
+        ListFilter,
+        Rows2,
+        Layers,
         Eye,
         EyeOff,
         KeyRound,
         Pencil,
+        Folder,
+        FileText,
+        Server,
+        Info,
     ]
 );
 
@@ -153,6 +206,11 @@ pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> gpui_kit::Result<Option<Cow<'static, [u8]>>> {
+        if path == Glyph::Worktree.path() {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/tree-structure.svg"
+            ))));
+        }
         if let Some(bytes) = AppIcons.load(path)? {
             return Ok(Some(bytes));
         }
@@ -161,6 +219,9 @@ impl AssetSource for Assets {
 
     fn list(&self, path: &str) -> gpui_kit::Result<Vec<SharedString>> {
         let mut all = AppIcons.list(path)?;
+        if Glyph::Worktree.path().starts_with(path) {
+            all.push(Glyph::Worktree.path().into());
+        }
         all.extend(gpui_kit::assets::Assets.list(path)?);
         Ok(all)
     }
@@ -185,6 +246,9 @@ mod tests {
             Glyph::Alert,
             Glyph::Folder,
             Glyph::CircleAlert,
+            Glyph::Info,
+            Glyph::WifiOff,
+            Glyph::Minus,
             Glyph::Power,
             Glyph::Loader,
             Glyph::Logs,
@@ -198,7 +262,11 @@ mod tests {
             Glyph::ChevronUp,
             Glyph::Upgrade,
             Glyph::Branch,
+            Glyph::Worktree,
+            Glyph::ChevronRight,
             Glyph::Copy,
+            Glyph::Lock,
+            Glyph::More,
             Glyph::Check,
             Glyph::Eye,
             Glyph::EyeOff,

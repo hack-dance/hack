@@ -17,6 +17,7 @@ export type PullRequestPlan = ReturnType<typeof scopeOutputs> & {
   readonly test_shards: string;
   readonly selection_mode: string;
   readonly docker_suite: boolean;
+  readonly resource_e2e: boolean;
   readonly defer_macos: boolean;
   readonly build_smoke: boolean;
 };
@@ -65,6 +66,7 @@ export function fullPushPlan(
     test_shards: "[1,2,3,4,5,6,7,8]",
     selection_mode: "full",
     docker_suite: true,
+    resource_e2e: true,
     defer_macos: false,
     build_smoke: true,
   };
@@ -72,7 +74,7 @@ export function fullPushPlan(
 
 /** Inputs copied/compiled by the candidate job, including its qualification scripts. */
 export function touchesCandidate(path: string): boolean {
-  return /^(?:packages\/(?:runtime-core|config-compiler|relay-guest)\/|hack-local$|scripts\/(?:build-hack-local|native-|.*candidate|.*provider)|mise\.toml$|\.github\/|(?:.*\/)?(?:Cargo\.(?:toml|lock)|rust-toolchain(?:\.toml)?)$)/.test(
+  return /^(?:tests\/models\/tla\/guest-execution\/|packages\/(?:runtime-core|hack-vm-(?:agent|protocol)|config-compiler|relay-guest)\/|hack-local$|scripts\/(?:build-hack-local|native-|.*candidate|.*provider)|mise\.toml$|\.github\/|(?:.*\/)?(?:Cargo\.(?:toml|lock)|rust-toolchain(?:\.toml)?)$)/.test(
     path
   );
 }
@@ -87,8 +89,11 @@ export function touchesCompilerHost(path: string): boolean {
 /** Rust crate inputs retain Linux checks even when the PR defers macOS. */
 export function touchesRustInput(path: string): boolean {
   return (
+    /^tests\/models\/tla\/guest-execution\//.test(path) ||
     /^packages\/relay-guest\//.test(path) ||
-    (/^packages\/(?:runtime-core|config-compiler)\//.test(path) &&
+    (/^packages\/(?:runtime-core|config-compiler|hack-vm-(?:agent|protocol))\//.test(
+      path
+    ) &&
       !path.endsWith(".md"))
   );
 }
@@ -115,6 +120,13 @@ export function isDockerExemptDiff(paths: readonly string[] | null): boolean {
         /^(?:tests\/models|packages\/runtime-core|docs)\//.test(path)
     ) ??
       false)
+  );
+}
+
+/** Match the independent workflow path guard for the dedicated Docker check. */
+function touchesResourceInventory(path: string): boolean {
+  return /^(?:src\/lib\/resource|src\/commands\/resources\.ts$|apps\/desktop\/.+\/src\/resource|apps\/desktop\/core\/tests\/resource_inventory_cli\.rs$|apps\/desktop\/screenshots\/resources-inventory-|tests\/e2e\/resource-inventory\.test\.ts$)/.test(
+    path
   );
 }
 
@@ -192,6 +204,7 @@ export async function planPullRequest(opts: {
     test_shards: JSON.stringify([...macos, ...linux]),
     selection_mode: selection.mode,
     docker_suite: e2e && coarse.suite,
+    resource_e2e: full || opts.changed?.some(touchesResourceInventory) === true,
     defer_macos: !mac,
     build_smoke: !opts.draft && (integration || full),
   };

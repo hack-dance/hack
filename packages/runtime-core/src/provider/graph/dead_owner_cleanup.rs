@@ -2,6 +2,7 @@
 //! ready owner (including a journal-bound one-off) from an earlier boot of the same
 //! pool: the one boot its receipt's evidence names (`boot_match`), never the current one.
 //! No endpoint-file deletion is treated as a relay retirement acknowledgement.
+pub(super) use super::cleanup_enrollment::immutable;
 use super::*;
 use crate::provider::{identity, lifecycle, state::Owner};
 use sha2::{Digest, Sha256};
@@ -55,18 +56,12 @@ fn selected(receipt: &Receipt) -> Result<String, CandidateError> {
         &serde_json::to_vec_pretty(receipt).map_err(|_| refused())?,
     ))
 }
-pub(super) fn immutable(receipt: &Receipt) -> Result<Value, CandidateError> {
-    let mut value = serde_json::to_value(receipt).map_err(|_| refused())?;
-    value.as_object_mut().ok_or_else(refused)?.remove("phase");
-    for group in ["resources", "probes"] {
-        if let Some(items) = value.get_mut(group).and_then(Value::as_object_mut) {
-            for item in items.values_mut() {
-                item.as_object_mut().ok_or_else(refused)?.remove("phase");
-            }
-        }
-    }
-    Ok(value)
+/// A graph whose start completed: ready, or (with `--report-started`) every service
+/// started. Both are live runs a dead owner may leave behind across a boot.
+fn live(phase: &str) -> bool {
+    matches!(phase, "ready-observed" | STARTED_OBSERVED)
 }
+
 fn validate(
     intent: &Intent,
     receipt: &Receipt,
@@ -75,12 +70,12 @@ fn validate(
 ) -> Result<(), CandidateError> {
     if let Some(enrollment) = &intent.enrollment {
         enrollment.validate(&intent.original)?;
-        if intent.original.phase != "ready-observed" {
+        if !live(&intent.original.phase) {
             return Err(refused());
         }
     }
     if intent.version != if intent.enrollment.is_some() { 2 } else { 1 }
-        || (intent.original.phase == "ready-observed"
+        || (live(&intent.original.phase)
             && intent.original.relay_cleanup.is_some()
             && intent.enrollment.is_none())
         || intent.original_sha256 != expected
@@ -88,7 +83,7 @@ fn validate(
         || intent.owner_sha256 != owner
         || !hex(owner, 64)
         || intent.old_boot.is_empty()
-        || immutable(&intent.original)? != immutable(receipt)?
+        || !cleanup_enrollment::matches_cleanup_progress(&intent.original, receipt)?
     {
         return Err(refused());
     }
@@ -143,10 +138,11 @@ pub(super) fn recovery_selection(
     }
     if exists(&root.join(FILE))? {
         let intent: Intent = state::read(&root.join(FILE))?;
-        if intent.complete_sha256.is_none() && immutable(&intent.original)? != immutable(receipt)? {
+        let matches = cleanup_enrollment::matches_cleanup_progress(&intent.original, receipt)?;
+        if intent.complete_sha256.is_none() && !matches {
             return Err(refused());
         }
-        if immutable(&intent.original)? == immutable(receipt)?
+        if matches
             && earlier.contains(&intent.old_boot)
             && intent.new_boot.as_ref() == Some(current)
         {
@@ -170,7 +166,7 @@ pub(super) fn recovery_selection(
     // A new selection may recover only the phases admitted by execute. Retained
     // stops without an intent keep their existing unadmitted/ordinary path.
     if !publication_present
-        || (!matches!(receipt.phase.as_str(), "ready-observed" | "cleanup-intent")
+        || (!(live(&receipt.phase) || receipt.phase == "cleanup-intent")
             && !exists(&root.join("one-off.json"))?)
     {
         return Ok(None);
@@ -255,7 +251,7 @@ fn archive_completed_prior(
         && current.relay_cleanup.as_ref().is_some_and(|marker| {
             marker.valid() && marker.phase == cleanup_enrollment::Phase::Pending
         });
-    if (current.phase != "ready-observed" && !interrupted_enrollment)
+    if (!live(&current.phase) && !interrupted_enrollment)
         || selected(current)? != expected
         || prior.one_off_sha256.is_some()
         || prior
@@ -295,20 +291,10 @@ fn archive_completed_prior(
         // truncated-history proof must still establish a superseded generation.
         require_historical_recovery(root, current)?;
     }
-    let mut archived = 0;
-    for entry in fs::read_dir(root).map_err(state::io)? {
-        let name = entry.map_err(state::io)?.file_name();
-        if name
-            .to_str()
-            .is_some_and(|name| name.starts_with("dead-owner-cleanup-retired-"))
-        {
-            archived += 1;
-            if archived >= 8 {
-                return Err(refused());
-            }
-        }
-    }
-    let target = root.join(format!("dead-owner-cleanup-retired-{complete}.json"));
+    // HACK-2576: the history keeps the newest finished records; the oldest proven
+    // finished make room instead of refusing this recovery for ever.
+    super::retired_history::make_room(root, RETIRED_PREFIX, RETIRED_LIMIT, finished_archive)?;
+    let target = root.join(format!("{RETIRED_PREFIX}{complete}.json"));
     if exists(&target)? {
         return Err(refused());
     }
@@ -316,6 +302,26 @@ fn archive_completed_prior(
     fs::File::open(root)
         .and_then(|file| file.sync_all())
         .map_err(state::io)
+}
+
+const RETIRED_PREFIX: &str = "dead-owner-cleanup-retired-";
+/// Archived completed recoveries kept per run (HACK-2576).
+const RETIRED_LIMIT: usize = 8;
+
+/// An archived recovery that is proven finished: it parses as an intent, it is
+/// completed (a digest and the boot it completed in), it carries no one-off, and
+/// its file is named for its own completion digest.
+fn finished_archive(name: &str, bytes: &[u8]) -> bool {
+    serde_json::from_slice::<Intent>(bytes).is_ok_and(|intent| {
+        intent.one_off_sha256.is_none()
+            && intent
+                .new_boot
+                .as_deref()
+                .is_some_and(|boot| !boot.is_empty())
+            && intent.complete_sha256.as_deref().is_some_and(|complete| {
+                hex(complete, 64) && name == format!("{RETIRED_PREFIX}{complete}.json")
+            })
+    })
 }
 
 /// A completed recovery from an older container generation is diagnostic history,
@@ -766,6 +772,13 @@ pub fn retire_recovered_publisher(
     dependencies::finish(candidate, &engine, &receipt, &intent, legacy.as_ref())?;
     Ok(json!({"run":run,"publisher_retired":true,"data_retained":true}))
 }
+/// The receipt phases a dead-owner `prepare` admits: a failed or interrupted fresh
+/// start (also once every service started: `started-observed` from `preparing`) or a
+/// cleanup in progress. A restore or restart in progress is refused, as before.
+fn prepare_admits(receipt: &Receipt) -> bool {
+    ["failed-retained", "preparing", "cleanup-intent"].contains(&start_phase(receipt))
+}
+
 fn prepare(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, CandidateError> {
     let _lease = state::Lock::acquire_existing(&candidate.state_root.join("run/smolvm"))?;
     let owner = Owner::load(candidate)?;
@@ -806,8 +819,7 @@ fn prepare(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     };
     if receipt.relay_startup.is_none()
         || receipt.relay_cleanup.is_some()
-        || (!["failed-retained", "preparing", "cleanup-intent"].contains(&receipt.phase.as_str())
-            && one_off_sha256.is_none())
+        || (!prepare_admits(&receipt) && one_off_sha256.is_none())
     {
         return Err(refused());
     }
@@ -976,8 +988,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         } else {
             None
         };
-        let interrupted_enrollment = ["ready-observed", "cleanup-intent"]
-            .contains(&receipt.phase.as_str())
+        let interrupted_enrollment = (live(&receipt.phase) || receipt.phase == "cleanup-intent")
             && receipt.relay_cleanup.as_ref().is_some_and(|marker| {
                 marker.valid()
                     && marker.phase == cleanup_enrollment::Phase::Pending
@@ -986,9 +997,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
                     })
             })
             && exists(&root.join("relay-cleanup-bridges.json"))?;
-        if (receipt.phase != "ready-observed"
-            && !interrupted_enrollment
-            && one_off_sha256.is_none())
+        if (!live(&receipt.phase) && !interrupted_enrollment && one_off_sha256.is_none())
             || receipt.relay_startup.is_none()
             || (receipt.relay_cleanup.is_some() && !interrupted_enrollment)
             || selected(&receipt)? != expected
@@ -996,7 +1005,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
             return Err(refused());
         }
         initializer_cache::require_resolved(&receipt)?;
-        let enrollment = if receipt.phase == "ready-observed" && receipt.relay_cleanup.is_some() {
+        let enrollment = if live(&receipt.phase) && receipt.relay_cleanup.is_some() {
             Some(
                 super::legacy_cleanup_enrollment::Selection::capture_previous(
                     &receipt,
@@ -1456,7 +1465,6 @@ pub(super) fn retained(root: &std::path::Path, receipt: &Receipt) -> Result<bool
     )?;
     if intent.complete_sha256.as_deref() != Some(selected(&original_receipt)?.as_str())
         || receipt.phase != "stopped-data-retained"
-        || immutable(&intent.original)? != immutable(&original_receipt)?
     {
         return Err(refused());
     }
@@ -1631,6 +1639,67 @@ mod tests {
             one_off_sha256: None,
             enrollment: None,
         }
+    }
+    #[test]
+    fn dead_owner_selection_accepts_observed_id_and_refuses_changed_known_id() {
+        let fixture = super::super::retained_startup::tests::Fixture::new();
+        let root = fixture.graph();
+        let mut owner = Owner::load(&fixture.candidate).unwrap();
+        let mut original = fixture.receipt();
+        original.set_phase("cleanup-intent");
+        let resource = original.resources.get_mut("container:web").unwrap();
+        resource.id = None;
+        resource.phase = "uncertain".into();
+        let mut selection = intent(&original);
+        let old_boot = owner
+            .guest_boot_id
+            .replace("22222222-2222-2222-2222-222222222222".into());
+        owner.previous_guest_boot_id = old_boot.clone();
+        owner.phase = "running".into();
+        selection.old_boot = old_boot.unwrap();
+        selection.new_boot = owner.guest_boot_id.clone();
+        state::write(&root.join(FILE), &selection).unwrap();
+
+        let mut current = original.clone();
+        let resource = current.resources.get_mut("container:web").unwrap();
+        resource.id = Some("a".repeat(64));
+        resource.cleanup_observed_create = true;
+        validate(
+            &selection,
+            &current,
+            &selection.original_sha256,
+            &selection.owner_sha256,
+        )
+        .unwrap();
+        let resume = |receipt: &Receipt| {
+            recovery_selection(&fixture.candidate, &root, receipt, &owner, true)
+        };
+        assert_eq!(
+            resume(&current).unwrap().as_deref(),
+            Some(selection.original_sha256.as_str())
+        );
+
+        let mut pinned = intent(&current);
+        pinned.old_boot = selection.old_boot;
+        pinned.new_boot = selection.new_boot;
+        state::write(&root.join(FILE), &pinned).unwrap();
+        assert_eq!(
+            resume(&current).unwrap().as_deref(),
+            Some(pinned.original_sha256.as_str())
+        );
+        current.resources.get_mut("container:web").unwrap().id = Some("b".repeat(64));
+        assert_eq!(
+            validate(
+                &pinned,
+                &current,
+                &pinned.original_sha256,
+                &pinned.owner_sha256
+            )
+            .unwrap_err()
+            .code,
+            refused().code
+        );
+        assert_eq!(resume(&current).unwrap_err().code, refused().code);
     }
     #[test]
     fn interrupted_bridge_selection_does_not_require_a_restored_generation() {
@@ -2195,6 +2264,80 @@ mod tests {
     }
 
     #[test]
+    fn a_started_run_is_recovered_across_boots_like_a_ready_one() {
+        assert!(live("ready-observed") && live("started-observed"));
+        assert!(!live("preparing") && !live("cleanup-intent"));
+        // `prepare` admits the same starts as before the phase existed.
+        let started_from = |start: &str| {
+            let mut receipt = partial();
+            receipt.phase = start.into();
+            mark_started(&mut receipt).unwrap();
+            receipt
+        };
+        assert!(prepare_admits(&started_from("preparing")));
+        assert!(!prepare_admits(&started_from("restoring")));
+        assert!(!prepare_admits(&started_from("restarting")));
+        // A new cross-boot selection accepts a started run like a ready one.
+        let fixture = super::super::retained_startup::tests::Fixture::new();
+        let mut owner = Owner::load(&fixture.candidate).unwrap();
+        let previous = owner.guest_boot_id.clone().unwrap();
+        owner.previous_guest_boot_id = Some(previous.clone());
+        owner.guest_boot_id = Some("22222222-2222-2222-2222-222222222222".into());
+        owner.phase = "running".into();
+        let mut receipt = fixture.receipt();
+        receipt.phase = "preparing".into();
+        mark_started(&mut receipt).unwrap();
+        receipt.relay_startup = Some(serde_json::from_value(json!({"control_only":true,"guest_root":null,"control_root":"/private/owned","artifact":"e".repeat(64),"services":{}})).unwrap());
+        let context = host_relay::context(&receipt.owner, &previous).unwrap();
+        receipt.relay_cleanup = Some(
+            serde_json::from_value(json!({
+                "version":1,"runtime":context.runtime,"boot":context.boot,"operation":([3;16]),
+                "effect":([4;32]),"control_root":"/private/owned","phase":"pending"
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            recovery_selection(&fixture.candidate, &fixture.graph(), &receipt, &owner, true)
+                .unwrap(),
+            Some(selected(&receipt).unwrap())
+        );
+        // And a completed prior recovery is archived when the current run is started.
+        let history = super::super::tests::Fixture::new();
+        let root = &history.0;
+        let original = partial();
+        let mut stopped = original.clone();
+        stopped.phase = "stopped-data-retained".into();
+        for resource in stopped.resources.values_mut() {
+            if resource.kind != Kind::Volume {
+                resource.phase = "absent".into();
+            }
+        }
+        restore_history::retain(root, &stopped).unwrap();
+        let mut proof = intent(&original);
+        proof.new_boot = Some("prior-boot".into());
+        let complete = selected(&stopped).unwrap();
+        proof.complete_sha256 = Some(complete.clone());
+        state::write(&root.join(FILE), &proof).unwrap();
+        let mut current = stopped.clone();
+        current.phase = "restoring".into();
+        mark_started(&mut current).unwrap();
+        current.resources.get_mut("container:init").unwrap().id = Some("9".repeat(64));
+        let selected_current = selected(&current).unwrap();
+        archive_completed_prior(
+            root,
+            &current,
+            &selected_current,
+            &"2".repeat(64),
+            "current-boot",
+        )
+        .unwrap();
+        assert!(!root.join(FILE).exists());
+        assert!(
+            root.join(format!("dead-owner-cleanup-retired-{complete}.json"))
+                .exists()
+        );
+    }
+    #[test]
     fn repeated_dead_owner_recovery_archives_only_exact_completed_generation() {
         let fixture = super::super::tests::Fixture::new();
         let root = &fixture.0;
@@ -2252,6 +2395,102 @@ mod tests {
             .is_err()
         );
         assert!(root.join(FILE).exists());
+    }
+
+    /// One completed recovery per generation, as each pool stop under a running
+    /// project leaves (HACK-2576): stopped generation `index`, then a ready one.
+    fn recover_generation(root: &std::path::Path, base: &Receipt, index: usize) -> String {
+        // Each generation is its own container generation of the same run.
+        let mut original = base.clone();
+        original.resources.get_mut("container:init").unwrap().id = Some(format!("{index:064x}"));
+        let original = &original;
+        let mut stopped = original.clone();
+        stopped.phase = "stopped-data-retained".into();
+        for resource in stopped.resources.values_mut() {
+            if resource.kind != Kind::Volume {
+                resource.phase = "absent".into();
+            }
+        }
+        restore_history::retain(root, &stopped).unwrap();
+        let mut proof = intent(original);
+        proof.new_boot = Some(format!("boot-{index}"));
+        let complete = selected(&stopped).unwrap();
+        proof.complete_sha256 = Some(complete.clone());
+        state::write(&root.join(FILE), &proof).unwrap();
+        let mut current = stopped.clone();
+        current.phase = "ready-observed".into();
+        current.resources.get_mut("container:init").unwrap().id =
+            Some(format!("{:064x}", index + 1000));
+        let selected_current = selected(&current).unwrap();
+        archive_completed_prior(
+            root,
+            &current,
+            &selected_current,
+            &"2".repeat(64),
+            &format!("boot-{}", index + 1),
+        )
+        .unwrap_or_else(|error| panic!("recovery {index} refused: {}", error.message));
+        assert!(!root.join(FILE).exists());
+        complete
+    }
+    fn archives(root: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<_> = fs::read_dir(root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(RETIRED_PREFIX))
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn twelve_recoveries_of_one_run_keep_the_newest_archives_and_never_refuse() {
+        let fixture = super::super::tests::Fixture::new();
+        let root = &fixture.0;
+        let original = partial();
+        // A foreign file and an unprovable record share the directory: never removed,
+        // never counted, never a reason to refuse.
+        fs::write(root.join(format!("{RETIRED_PREFIX}foreign.json")), b"{").unwrap();
+        fs::write(root.join(format!("{RETIRED_PREFIX}notes.txt")), b"notes").unwrap();
+        let mut newest = String::new();
+        for index in 0..12 {
+            newest = recover_generation(root, &original, index);
+            // Distinct modification times keep "oldest" well defined.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let left = archives(root);
+        let proven: Vec<_> = left
+            .iter()
+            .filter(|name| finished_archive(name, &fs::read(root.join(name)).unwrap()))
+            .collect();
+        assert_eq!(proven.len(), RETIRED_LIMIT, "{left:?}");
+        assert!(left.contains(&format!("{RETIRED_PREFIX}{newest}.json")));
+        assert!(left.contains(&format!("{RETIRED_PREFIX}foreign.json")));
+        assert!(left.contains(&format!("{RETIRED_PREFIX}notes.txt")));
+    }
+
+    #[test]
+    fn a_home_stuck_at_eight_archives_from_an_older_build_recovers() {
+        let fixture = super::super::tests::Fixture::new();
+        let root = &fixture.0;
+        let original = partial();
+        // Eight finished archives, as an older build left them before it refused.
+        let mut oldest = String::new();
+        for index in 0..8 {
+            let complete = recover_generation(root, &original, 100 + index);
+            if index == 0 {
+                oldest = complete;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(archives(root).len(), RETIRED_LIMIT);
+        // The ninth recovery, which the older build refused, now goes through.
+        let ninth = recover_generation(root, &original, 200);
+        let left = archives(root);
+        assert_eq!(left.len(), RETIRED_LIMIT);
+        assert!(left.contains(&format!("{RETIRED_PREFIX}{ninth}.json")));
+        assert!(!left.contains(&format!("{RETIRED_PREFIX}{oldest}.json")));
     }
 
     #[test]

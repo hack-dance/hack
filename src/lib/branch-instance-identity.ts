@@ -142,8 +142,8 @@ export function listRegistrationCheckouts(
   ];
 }
 
-function checkoutContext(opts: {
-  readonly registration: RegisteredProject;
+export function checkoutContext(opts: {
+  readonly registration: Pick<RegisteredProject, "projectDirName">;
   readonly checkout: BranchInstanceCheckout;
 }): ProjectContext {
   return {
@@ -343,6 +343,7 @@ export type NativeBranchRecord = {
   readonly store: "runtime" | "authored";
 };
 
+const AUTHORED_START_RECORD = /^[a-f0-9]{64}\.start\.json$/;
 const NATIVE_RUN_RECORD = /^[a-f0-9]{64}\.json$/;
 
 /**
@@ -358,26 +359,50 @@ export async function listNativeBranchRecords(opts: {
   readonly checkout: BranchInstanceCheckout;
   readonly store: NativeBranchRecord["store"];
 }): Promise<readonly NativeBranchRecord[]> {
-  const out: NativeBranchRecord[] = [];
+  const { checkout, store } = opts;
+  const instances = await listNativeCopyInstances(opts);
+  return instances.flatMap((slug) =>
+    slug === null ? [] : [{ slug, checkout, store }]
+  );
+}
+
+/** Discover base and branch scopes without opening a runtime. */
+export async function listNativeCopyInstances(opts: {
+  readonly checkout: BranchInstanceCheckout;
+  readonly store: NativeBranchRecord["store"];
+  readonly includePending?: boolean;
+}): Promise<readonly (string | null)[]> {
   const root = join(
     opts.checkout.projectDir,
     ".internal",
     opts.store === "runtime" ? "native-runs" : "native-authored-runs"
   );
-  for (const name of await listNativeRunRecordNames(root)) {
-    const slug = await readNativeRunRecordBranch(join(root, name));
-    if (slug !== null) {
-      out.push({ slug, checkout: opts.checkout, store: opts.store });
+  const instances: (string | null)[] = [];
+  for (const name of await listNativeRunRecordNames(
+    root,
+    opts.store === "authored" && opts.includePending === true
+  )) {
+    const instance = await readNativeRunRecordBranch(join(root, name));
+    if (instance !== undefined) {
+      instances.push(instance);
     }
   }
-  return out;
+  return instances;
 }
 
 /** `<digest>.json` mappings in a native run store; none when it is unlistable. */
-async function listNativeRunRecordNames(root: string): Promise<string[]> {
+async function listNativeRunRecordNames(
+  root: string,
+  includePending: boolean
+): Promise<string[]> {
   try {
     return (await readdir(root, { withFileTypes: true }))
-      .filter((entry) => entry.isFile() && NATIVE_RUN_RECORD.test(entry.name))
+      .filter(
+        (entry) =>
+          entry.isFile() &&
+          (NATIVE_RUN_RECORD.test(entry.name) ||
+            (includePending && AUTHORED_START_RECORD.test(entry.name)))
+      )
       .map((entry) => entry.name)
       .sort();
   } catch {
@@ -385,19 +410,23 @@ async function listNativeRunRecordNames(root: string): Promise<string[]> {
   }
 }
 
-/** The non-null `scope.branch` of one mapping; null for base or unreadable. */
-async function readNativeRunRecordBranch(path: string): Promise<string | null> {
+/** Null identifies the base scope; undefined means unreadable. */
+async function readNativeRunRecordBranch(
+  path: string
+): Promise<string | null | undefined> {
   const text = await readTextFile(path).catch(() => null);
   if (text === null) {
-    return null;
+    return undefined;
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return null;
+    return undefined;
   }
   const scope = isRecord(parsed) ? parsed.scope : null;
-  const branch = isRecord(scope) ? scope.branch : null;
-  return typeof branch === "string" && branch.length > 0 ? branch : null;
+  const branch = isRecord(scope) ? scope.branch : undefined;
+  return branch === null || (typeof branch === "string" && branch.length > 0)
+    ? branch
+    : undefined;
 }

@@ -1,15 +1,16 @@
-import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ProjectContext } from "../../src/lib/project.ts";
 import type { RegisteredProject } from "../../src/lib/projects-registry.ts";
+import { mkdirOwnedFixture, writeOwnedFixture } from "./owned-fixture.ts";
 import { privateCliEnv } from "./private-cli-env.ts";
 
 /** Synthetic checkout and registry; callers own cleanup of root. */
 export async function projectNameFixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), "hack-name-")));
   const state = join(root, "state");
-  await mkdir(state);
+  await mkdirOwnedFixture(state);
   const registryPath = join(state, "projects.json");
   // The source CLI runs with this env: no runner variable such as DOCKER_HOST,
   // XDG_* or HACK_* reaches it, and HOME is the fixture root.
@@ -25,7 +26,7 @@ export async function projectNameFixture() {
   async function createProject(directory: string, name: string) {
     const projectRoot = join(root, directory);
     const projectDir = join(projectRoot, ".hack");
-    await mkdir(projectDir, { recursive: true });
+    await mkdirOwnedFixture(projectDir, true);
     const project: ProjectContext = {
       projectRoot,
       projectDirName: ".hack",
@@ -34,15 +35,18 @@ export async function projectNameFixture() {
       configFile: join(projectDir, "hack.config.json"),
       envFile: join(projectDir, ".env"),
     };
-    await writeFile(
+    await writeOwnedFixture(
       project.composeFile,
       "name: original_runtime\nservices: {}\n"
     );
-    await writeFile(
+    await writeOwnedFixture(
       project.configFile,
       JSON.stringify({ name, dev_host: "name-fixture.hack.local" })
     );
-    await writeFile(project.envFile, "SYNTHETIC_NAME_VALUE=fixture-only\n");
+    await writeOwnedFixture(
+      project.envFile,
+      "SYNTHETIC_NAME_VALUE=fixture-only\n"
+    );
     const entry: RegisteredProject = {
       id: `${directory}-identity`,
       name,
@@ -55,7 +59,7 @@ export async function projectNameFixture() {
     return { project, entry };
   }
   async function writeRegistry(projects: readonly RegisteredProject[]) {
-    await writeFile(
+    await writeOwnedFixture(
       registryPath,
       `${JSON.stringify({ version: 1, projects }, null, 2)}\n`
     );

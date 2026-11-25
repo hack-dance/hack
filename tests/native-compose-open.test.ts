@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { chmod, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { openNativeComposeGenerationStore } from "../src/lib/native-compose-generation.ts";
@@ -10,6 +10,7 @@ import { openNativeComposeRouteClaims } from "../src/lib/native-compose-route-cl
 import { prepareNativeComposeRouteOwner } from "../src/lib/native-compose-route-owner.ts";
 import type { NativeRoutingResolution } from "../src/lib/native-routing-plan-protocol.ts";
 import { composeFixture } from "./helpers/native-compose.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const PRIVATE_CANARY = "native-open-private-value-must-not-leak";
@@ -58,8 +59,8 @@ async function fixture(): Promise<string> {
     await mkdtemp(join(tmpdir(), "native-compose-open-"))
   );
   roots.push(root);
-  await mkdir(join(root, ".hack"));
-  await mkdir(join(root, "home"));
+  await mkdirOwnedFixture(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, "home"));
   await Bun.write(
     join(root, ".hack", "hack.project.json"),
     "malformed authored input must never be parsed for saved open"

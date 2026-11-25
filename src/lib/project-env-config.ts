@@ -4809,7 +4809,7 @@ async function acquireProjectEnvHydrationLock(opts: {
 }): Promise<() => Promise<void>> {
   // A symlinked or non-directory `.internal` (including a dangling link) is
   // refused as E_PATH_CONFLICT; the lock is never created through it.
-  await ensureRealDirectoryForWrite(dirname(opts.lockPath));
+  await ensureRealDirectoryForWrite(dirname(opts.lockPath), 0o700);
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   try {
     await createPrivateFileExclusive({
@@ -5134,7 +5134,8 @@ export async function materializeProjectEnv(opts: {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await writeTextFile(
     resolveProjectEnvStatePath({ projectDir: opts.projectDir }),
-    stateText
+    stateText,
+    0o600
   );
   return {
     envPath,

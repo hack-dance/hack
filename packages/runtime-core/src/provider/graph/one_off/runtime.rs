@@ -62,6 +62,7 @@ pub fn begin(
         &mut configs,
         &private,
         &BTreeSet::new(),
+        None,
     )?;
     let mut environments = BTreeMap::new();
     if let Some(values) = values.filter(|v| !v.is_empty()) {
@@ -89,8 +90,9 @@ pub fn begin(
     receipt
         .readiness
         .insert(service.clone(), Condition::Started);
-    receipt.phase = "restoring".into();
+    receipt.set_phase("restoring");
     state::write(&root.join("state.json"), &receipt)?;
+    super::super::startup_failure::clear_after_started(&root)?;
     runtime.enroll_job(&engine, &mut receipt, &root, &selection.service, &service)?;
     let mut session = Session {
         startup: Some(runtime),
@@ -98,6 +100,7 @@ pub fn begin(
         root: root.clone(),
         receipt,
         configs,
+        default_health_cadence: BTreeMap::new(),
         expected_environment,
         restarting: false,
         fresh_cache_completion: false,
@@ -249,7 +252,7 @@ pub fn finish(
         startup.services.remove(&service);
     }
     receipt.environment_attached = intent.original_environment_attached;
-    receipt.phase = "ready-observed".into();
+    receipt.set_phase("ready-observed");
     state::write(&root.join("state.json"), &receipt)?;
     if intent.phase != JobPhase::Removed {
         intent.advance(&root, JobPhase::Removed, None)?;

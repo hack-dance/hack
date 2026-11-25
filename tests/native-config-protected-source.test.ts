@@ -123,9 +123,9 @@ afterEach(async () => {
 test("same legal0400 source reaches only the rejecting shim after the mismatched-mode refusal", async () => {
   const checkout = join(root, "checkout"),
     marker = join(root, "invoked");
-  await mkdir(join(checkout, ".hack"), { recursive: true });
-  await mkdir(join(checkout, ".git"));
-  await mkdir(join(checkout, "material"));
+  await mkdir(join(checkout, ".hack"), { recursive: true, mode: 0o755 });
+  await mkdir(join(checkout, ".git"), { mode: 0o755 });
+  await mkdir(join(checkout, "material"), { mode: 0o755 });
   const material = join(checkout, "material/private");
   await writeFile(material, "synthetic-owned-material", {
     flag: "wx",

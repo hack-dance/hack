@@ -69,7 +69,7 @@ export async function fileCommandFixture(source: unknown = FILE_SOURCE) {
   );
   roots.push(parent);
   const root = join(parent, "checkout");
-  await mkdir(join(root, ".hack"), { recursive: true });
+  await mkdir(join(root, ".hack"), { recursive: true, mode: 0o755 });
   await mkdir(join(parent, "home"), { mode: 0o700 });
   // Private HOME for child CLIs; the contributor's home is never selected.
   await mkdir(join(parent, "user-home"), { mode: 0o700 });
@@ -78,6 +78,7 @@ export async function fileCommandFixture(source: unknown = FILE_SOURCE) {
     JSON.stringify(source)
   );
   await Bun.write(join(root, "binary"), FILE_BYTES);
+  await chmod(join(root, "binary"), 0o644);
   await Bun.write(
     join(root, ".hack/hack.env.default.yaml"),
     JSON.stringify({

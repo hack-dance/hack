@@ -1,5 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { YAML } from "bun";
@@ -17,6 +24,7 @@ import {
 import { discoverRepo } from "../src/init/discovery.ts";
 import { findComposeBackendFeatures } from "../src/lib/native-compose-backend-features.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
+import { markRepoBoundary } from "./helpers/repo-boundary.ts";
 
 /**
  * HACK-1916: `hack init` with the native backend selected writes a project
@@ -216,9 +224,12 @@ async function runInitAuto(opts: {
   /** Let init discover services (default: --no-discovery). */
   readonly discovery?: boolean;
   readonly name?: string;
+  readonly sharedUmask?: boolean;
 }): Promise<{ exitCode: number; output: string }> {
+  await markRepoBoundary(opts.repo);
   const proc = Bun.spawn({
     cmd: [
+      ...(opts.sharedUmask ? ["sh", "-c", 'umask 002; exec "$@"', "init"] : []),
       process.execPath,
       join(REPO_ROOT, "index.ts"),
       "init",
@@ -256,11 +267,24 @@ test("hack init --auto on the native backend writes a native-startable scaffold 
   const repo = join(root, "repo");
   await mkdir(repo, { recursive: true });
 
-  const result = await runInitAuto({ root, repo, backend: "native" });
+  const result = await runInitAuto({
+    root,
+    repo,
+    backend: "native",
+    sharedUmask: true,
+  });
   expect(result.exitCode).toBe(0);
   expect(result.output).toContain("HACK_NATIVE_SHARED_SOURCE=1 hack up");
   expect(result.output).not.toContain("--detach");
   expect(result.output).not.toContain("global install");
+
+  for (const path of [
+    ".hack",
+    ".hack/hack.config.json",
+    ".hack/docker-compose.yml",
+  ]) {
+    expect((await stat(join(repo, path))).mode & 0o022).toBe(0);
+  }
 
   const parsed = parseCompose(
     await Bun.file(join(repo, ".hack", "docker-compose.yml")).text()
@@ -275,11 +299,16 @@ test("hack init --auto on the Compose backend keeps the Compose scaffold and nex
   const root = await createTempDir();
   const repo = join(root, "repo");
   await mkdir(repo, { recursive: true });
+  // A shared temp parent can have its own repo marker.
+  await writeFile(join(root, "package.json"), "{}\n");
 
   const result = await runInitAuto({ root, repo, backend: undefined });
   expect(result.exitCode).toBe(0);
   expect(result.output).toContain("Next: hack up --detach && hack open");
   expect(result.output).toContain("hack global install configures");
+  expect(
+    await Bun.file(join(root, ".hack", "docker-compose.yml")).exists()
+  ).toBe(false);
 
   const yaml = await Bun.file(join(repo, ".hack", "docker-compose.yml")).text();
   expect(yaml).not.toContain("x-hack");

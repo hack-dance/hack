@@ -356,14 +356,19 @@ hack up [services...] [options]
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
+| `--use <remote=target>` | Select a remote target for this Compose start |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--detach, -d` | Run in background (docker compose up -d) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
+| `--expect-compose-project <name>` | Require this exact local Compose project |
 | `--json` | Output JSON (machine-readable) |
 | `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
 | `--refresh-images` | Native backend: refresh the project's mutable image tags from the registry. |
 | `--offline` | Native backend: use recorded image resolutions and local archives without contacting a registry. |
+| `--wait` | Native: return once every service is ready and every route answers (default: once every container has started). Compose: passed to docker compose up --wait (needs -d) |
+| `--timings` | Native backend: print the startup timeline to stderr |
+| `--timings-file <file>` | Native backend: write startup timing records to a new JSONL file |
 | `--always` | Mark this project for machine-local autostart and start it |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -390,6 +395,8 @@ hack down [options]
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
+| `--expect-compose-project <name>` | Require this exact local Compose project |
+| `--service <name>` | Stop only this local Compose service, keeping its containers and project resources |
 | `--timeout <seconds>` | Compose backend: container stop timeout in seconds (0-600) passed to docker compose down --timeout |
 | `--prune-caches` | After down, remove confirmed Compose-owned disposable cache volumes |
 | `--remove-data` | Native backend: delete a stopped project's owned data volumes so the next up starts fresh (asks first) |
@@ -428,8 +435,10 @@ hack restart [services...] [options]
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
+| `--expect-compose-project <name>` | Require this exact local Compose project |
 | `--json` | Output JSON (machine-readable) |
 | `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
+| `--wait` | Native only: return once every service is ready and every route answers (default: once every container has started) |
 | `--recover-frontend` | Recover an interrupted native frontend after proving its owner and effects are gone |
 | `--expect-finalization-attempt <32-hex>` | Require this exact interrupted native frontend attempt |
 | `--expect-frontend-pid <pid>` | Previously observed frontend PID (required only for legacy v1 state) |
@@ -452,12 +461,40 @@ hack ps [options]
 
 | Option | Description |
 | --- | --- |
+| `--copies` | Show all checkouts and branch instances of the project |
 | `--wide` | Include container, exit code, port and native image pin details |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
+## `hack use [selection]`
+
+List remote selections or save a target for the next Compose start
+
+### Usage
+
+```bash
+hack use [selection] [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `selection` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -583,6 +620,148 @@ Everything from `<cmd>` on is passed to the command unchanged, including flags s
 | `--timeout-ms <ms>` | With --detach: stop the command after this long (default 1800000, maximum 21600000) |
 | `--stall-after-ms <ms>` | With --detach: report an advisory stall after this long without output (default 120000, 0 turns it off) |
 | `--capture <full|metadata>` | With --detach: store output (full, the default) or only events and the outcome (metadata) |
+| `--expect-compose-project <name>` | Require this exact local Compose project |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
+## `hack files`
+
+Browse files in a running Compose service
+
+### Usage
+
+```bash
+hack files <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack files ls <service> <container-path>` | List a running service's files and their mount sources |
+| `hack files cat <service> <container-path>` | Read a file from a running service |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack files ls <service> <container-path>`
+
+List a running service's files and their mount sources
+
+### Usage
+
+```bash
+hack files ls <service> <container-path> [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `service` |  |
+| `container-path` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--expect-compose-project <name>` | Require this exact local Compose project |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack files cat <service> <container-path>`
+
+Read a file from a running service
+
+### Usage
+
+```bash
+hack files cat <service> <container-path> [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `service` |  |
+| `container-path` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--expect-compose-project <name>` | Require this exact local Compose project |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
+## `hack service`
+
+Manage catalog services in a Compose project
+
+### Usage
+
+```bash
+hack service <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack service add <catalog-id>` | Add a catalog service to the project's Compose file |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack service add <catalog-id>`
+
+Add a catalog service to the project's Compose file
+
+### Usage
+
+```bash
+hack service add <catalog-id> [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `catalog-id` | redis, postgres, mysql, mongodb, minio, or mailpit |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--json` | Output JSON (machine-readable) |
+| `--name <service>` | Use a custom Compose service name |
+| `--dry-run` | Show the diff without saving |
+| `--expect-revision <revision>` | Save only if the dry-run revision still matches |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -727,6 +906,7 @@ hack logs [service] [options]
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--expect-compose-project <name>` | Require this exact local Compose project |
 | `--follow, -f` | Follow logs (default for `hack logs`) |
 | `--no-follow` | Print logs and exit (do not follow) |
 | `--tail <n>` | Tail last N log lines (default: 200) |
@@ -1444,6 +1624,7 @@ hack global install [options]
 | --- | --- |
 | `--json` | Output JSON (machine-readable) |
 | `--plan` | Print the steps (root and user) and exact root argv this command would run, without running anything (needs --json) |
+| `--install-brew-deps` | Allow installation of missing macOS Homebrew dependencies |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1775,6 +1956,78 @@ hack projects prune [options]
 | `--version, -v` | Show version |
 
 
+## `hack resources`
+
+Inspect and clean up Hack-managed resources
+
+### Usage
+
+```bash
+hack resources <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack resources list` | List observed Hack resources and disk use |
+| `hack resources remove <id>` | Preview or confirm removal of a verified unused resource |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack resources list`
+
+List observed Hack resources and disk use
+
+### Usage
+
+```bash
+hack resources list [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack resources remove <id>`
+
+Preview or confirm removal of a verified unused resource
+
+### Usage
+
+```bash
+hack resources remove <id> [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `id` | A container:<id> or volume:<name> from resources list |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--dry-run` | Show exactly what would be removed without changing anything |
+| `--confirm <token>` | Confirm the exact removal reviewed with --dry-run |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
 ## `hack native`
 
 Set up or recover the opt-in native runtime
@@ -1792,6 +2045,7 @@ hack native <subcommand> [options]
 | `hack native setup` | Download and prepare the pinned native runtime for this home |
 | `hack native recover` | Recover this home's native runtime after an interrupted or failed start |
 | `hack native temp-aliases` | List dangling native provider HOME aliases |
+| `hack native disk-usage` | Show host disk usage for the selected native home |
 
 ### Options
 
@@ -1871,6 +2125,27 @@ List old aliases whose native home is gone, or remove them with --fix.
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
 
+## `hack native disk-usage`
+
+Show host disk usage for the selected native home
+
+### Usage
+
+```bash
+hack native disk-usage [options]
+```
+
+Report allocated and logical file bytes without starting the pool. The scan can be incomplete. Guest usage and reclaimable bytes are unavailable in this view.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
 
 ## Diagnostics
 
@@ -1930,6 +2205,7 @@ hack doctor [options]
 
 | Option | Description |
 | --- | --- |
+| `--disk` | Audit host file usage for the selected native home without starting the pool |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--fix` | Attempt safe auto-remediations (network + CoreDNS + CA) |
 | `--include-unverified-volumes` | With --fix, include native aliases whose volume may be unmounted |

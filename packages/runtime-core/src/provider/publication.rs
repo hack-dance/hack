@@ -1,4 +1,6 @@
 //! Foreground host publications. Intent precedes staging/exec; cleanup never adopts unknown files.
+#[cfg(test)]
+mod lookup_tests;
 pub mod recovery;
 #[cfg(test)]
 mod retirement_tests;
@@ -65,6 +67,124 @@ fn publication_command(e: &Entry, upstream: &Path) -> Result<Command, CandidateE
         .arg(dir.join("control"))
         .args(["--control-fd", "0"]);
     Ok(command)
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ChildLaunch {
+    entry: Entry,
+    upstream: PathBuf,
+}
+
+/// Under the provider lease, stage the exact child before sending authorization.
+/// An empty or incomplete message never grants the child authority to exec.
+#[cfg(target_os = "macos")]
+#[allow(
+    dead_code,
+    reason = "The staged launcher is enabled by the per-service publisher."
+)]
+pub(super) fn launch_child(
+    candidate: &Candidate,
+    options: &Launch<'_>,
+    check: impl FnOnce() -> Result<(), CandidateError>,
+) -> Result<std::process::Child, CandidateError> {
+    let executable = std::env::current_exe().map_err(state::io)?;
+    let mut command = super::process::publisher_command(&executable);
+    command.arg("--internal-publication-child");
+    launch_child_with(candidate, options, check, command)
+}
+
+#[cfg(target_os = "macos")]
+fn launch_child_with(
+    candidate: &Candidate,
+    options: &Launch<'_>,
+    check: impl FnOnce() -> Result<(), CandidateError>,
+    mut command: Command,
+) -> Result<std::process::Child, CandidateError> {
+    command
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = super::process::spawn_child(&mut command).map_err(state::io)?;
+    let mut committed = false;
+    let result = (|| {
+        let mut gate = child.stdin.take().ok_or_else(error)?;
+        #[cfg(debug_assertions)]
+        super::graph::publisher_recovery_fault(candidate, options.run, "publisher-gated")?;
+        let process = identity::observe(child.id() as i32)?;
+        let entry = stage_launch(candidate, options, process)?;
+        committed = true;
+        #[cfg(debug_assertions)]
+        super::graph::publisher_recovery_fault(candidate, options.run, "publisher-committed")?;
+        let request = ChildLaunch {
+            entry,
+            upstream: options.upstream.into(),
+        };
+        let bytes = serde_json::to_vec(&request).map_err(|_| error())?;
+        if bytes.len() >= CHILD_LAUNCH_LIMIT {
+            return Err(error());
+        }
+        check()?;
+        // Encode authorization after the complete payload. EOF alone is a refusal.
+        gate.write_all(&bytes).map_err(state::io)?;
+        gate.write_all(b"\n").map_err(state::io)?;
+        #[cfg(debug_assertions)]
+        let _ =
+            super::graph::publisher_recovery_fault(candidate, options.run, "publisher-authorized");
+        Ok(())
+    })();
+    if let Err(error) = result {
+        child.wait().map_err(state::io)?;
+        // EOF has settled this incarnation. Retire only its exact committed
+        // entry while the caller still holds the publication lease.
+        if committed {
+            release(
+                candidate,
+                options.owner,
+                Some((options.run, options.reservation)),
+            )?;
+        }
+        return Err(error);
+    }
+    Ok(child)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+const CHILD_LAUNCH_LIMIT: usize = 16 * 1024;
+
+#[cfg(any(test, target_os = "macos"))]
+fn read_launch_gate(input: impl Read) -> Result<Vec<u8>, CandidateError> {
+    let mut bytes = Vec::new();
+    input
+        .take(CHILD_LAUNCH_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(state::io)?;
+    if bytes.len() > CHILD_LAUNCH_LIMIT || bytes.pop() != Some(b'\n') {
+        return Err(error());
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn run_publication_child() -> Result<(), CandidateError> {
+    let bytes = read_launch_gate(std::io::stdin().lock())?;
+    let ChildLaunch { entry, upstream } = serde_json::from_slice(&bytes).map_err(|_| error())?;
+    validate(
+        &BTreeMap::from([(entry.reservation.clone(), entry.clone())]),
+        &entry.owner,
+    )?;
+    let (start, uid) = identity::birth(std::process::id() as i32)?;
+    if entry.process.pid != std::process::id() as i32
+        || entry.process.start_micros != start
+        || entry.process.uid != uid
+    {
+        return Err(error());
+    }
+    verify_staged_binary(&entry)?;
+    Err(state::io(publication_command(&entry, &upstream)?.exec()))
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,20 +274,49 @@ fn directory(e: &Entry) -> PathBuf {
 fn root(c: &Candidate) -> PathBuf {
     c.state_root.join("run/publications")
 }
+
+enum RegistryRead {
+    Settled,
+    Committed,
+}
+
 fn load(c: &Candidate, owner: &str) -> Result<BTreeMap<String, Entry>, CandidateError> {
+    load_registry(c, owner, RegistryRead::Settled)
+}
+
+fn load_registry(
+    c: &Candidate,
+    owner: &str,
+    purpose: RegistryRead,
+) -> Result<BTreeMap<String, Entry>, CandidateError> {
     let root = root(c);
-    if !root.exists() && !root.is_symlink() {
-        return Ok(BTreeMap::new());
-    }
-    state::check_private_directory(&root)?;
-    if root.join("state.pending").exists() || root.join("state.pending").is_symlink() {
-        return Err(error());
+    match fs::symlink_metadata(&root) {
+        Ok(_) => state::check_private_directory(&root)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BTreeMap::new());
+        }
+        Err(error) => return Err(state::io(error)),
     }
     let path = root.join("state.json");
-    let entries: BTreeMap<String, Entry> = if path.exists() || path.is_symlink() {
-        state::read_bounded(&path, 65536)?
-    } else {
-        BTreeMap::new()
+    let entries = match purpose {
+        RegistryRead::Committed => {
+            // The pending journal changes one reservation and is invisible
+            // until rename. A sibling must be able to serve from state.json
+            // even if the writer stops with a pending journal left behind.
+            state::read_committed(&path, 65536)?.unwrap_or_default()
+        }
+        RegistryRead::Settled => {
+            match fs::symlink_metadata(root.join("state.pending")) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(_) => return Err(error()),
+                Err(error) => return Err(state::io(error)),
+            }
+            if path.exists() || path.is_symlink() {
+                state::read_bounded(&path, 65536)?
+            } else {
+                BTreeMap::new()
+            }
+        }
     };
     validate(&entries, owner)?;
     Ok(entries)
@@ -591,10 +740,13 @@ fn check_socket(
         .map_err(state::io)
 }
 fn cleanup(e: &Entry) -> Result<(), CandidateError> {
+    let control = directory(e).join("control");
+    #[cfg(target_os = "macos")]
+    wait_for_authorized_child(e, &control)?;
     let options = publisher::StopOptions {
         process: &e.process,
         binary: &e.process.executable,
-        control: &directory(e).join("control"),
+        control: &control,
         token: &e.token,
     };
     #[cfg(target_os = "macos")]
@@ -682,6 +834,28 @@ fn cleanup(e: &Entry) -> Result<(), CandidateError> {
         .map_err(state::io)?
         .sync_all()
         .map_err(state::io)
+}
+
+/// A committed child may still be between authorization and the control bind.
+/// Wait only for that exact incarnation to exit or reach the normal stop path.
+#[cfg(target_os = "macos")]
+fn wait_for_authorized_child(e: &Entry, control: &Path) -> Result<(), CandidateError> {
+    use std::time::{Duration, Instant};
+    if !e.binary.as_ref().is_some_and(|binary| binary.ready) {
+        return Ok(());
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match fs::symlink_metadata(control) {
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(state::io(error)),
+        }
+        if entry_gone(e)? || Instant::now() >= deadline {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// The caller holds the provider lease; require every selected recorded process to be absent before
@@ -883,11 +1057,7 @@ pub(crate) fn require_no_claims_locked(c: &Candidate, owner: &str) -> Result<(),
     Ok(())
 }
 
-fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
-    let observed = identity::observe(e.process.pid)?;
-    identity::verify(&e.process, &observed, &e.process.executable, unsafe {
-        libc::geteuid()
-    })?;
+fn verify_staged_binary(e: &Entry) -> Result<(), CandidateError> {
     if !verify_directory(e)? || !e.binary.as_ref().is_some_and(|b| b.ready) {
         return Err(error());
     }
@@ -915,6 +1085,12 @@ fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
     if format!("{:x}", crate::Hex(Sha256::digest(bytes))) != e.digest {
         return Err(error());
     }
+    Ok(())
+}
+
+fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
+    verify_publication_process(e)?;
+    verify_staged_binary(e)?;
     // A TCP frontend has no filesystem identity. The publisher binds its
     // control socket only after the frontend listener is bound and listening,
     // so an owned control socket also proves the TCP listener exists.
@@ -923,8 +1099,12 @@ fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
     }
     check_socket(e, "control", "HKPC1", &e.token, false)?;
     // A second observation refuses death or identity change during filesystem checks.
-    let after = identity::observe(e.process.pid)?;
-    identity::verify(&e.process, &after, &e.process.executable, unsafe {
+    verify_publication_process(e)
+}
+
+fn verify_publication_process(e: &Entry) -> Result<(), CandidateError> {
+    let observed = identity::observe(e.process.pid)?;
+    identity::verify(&e.process, &observed, &e.process.executable, unsafe {
         libc::geteuid()
     })
 }
@@ -941,33 +1121,66 @@ fn verify_claim_snapshot(
     }
     Ok(())
 }
+
+/// Lease-free presentation of the verified TCP listeners of one receipt.
+#[cfg(target_os = "macos")]
+pub(super) fn observed_run_ports(
+    candidate: &Candidate,
+    owner: &str,
+    run: &str,
+) -> Result<Vec<u16>, CandidateError> {
+    let entries = load(candidate, owner)?;
+    let observed = entries
+        .values()
+        .filter(|entry| entry.run == run && !entry.unix)
+        .filter(|entry| observe_publication(entry).is_ok())
+        .collect::<Vec<_>>();
+    let after_owner = state::Owner::load(candidate)?;
+    let after = load(candidate, &after_owner.token)?;
+    observed
+        .into_iter()
+        .map(|entry| {
+            verify_claim_snapshot(entry, &after, &after_owner.token)?;
+            Ok(entry.port)
+        })
+        .collect()
+}
 /// A point-in-time observation, not a persistent capability or guest health claim.
 pub fn lookup_hostname(c: &Candidate, value: &str) -> Result<serde_json::Value, CandidateError> {
     let name = normalize_hostname(value)?;
-    let owner = state::Owner::load(c)?;
-    let entries = load(c, &owner.token)?;
-    let entry = entries
-        .values()
-        .find(|e| e.hostnames.contains(&name))
-        .ok_or_else(error)?;
-    observe_publication(entry)?;
-    // Writers retain the provider lock. Readers validate the selected immutable
-    // ownership record twice instead of blocking unrelated running applications.
-    let after_owner = state::Owner::load(c)?;
-    let after = load(c, &after_owner.token)?;
-    verify_claim_snapshot(entry, &after, &after_owner.token)?;
-    let process = identity::observe(entry.process.pid)?;
-    identity::verify(
-        &entry.process,
-        &process,
-        &entry.process.executable,
-        unsafe { libc::geteuid() },
+    let entry = observe_hostname_claim(
+        c,
+        &name,
+        || Ok(state::Owner::load_for_hostname_lookup(c)?.token),
+        observe_publication,
     )?;
+    verify_publication_process(&entry)?;
     Ok(
         serde_json::json!({"hostname":name,"run":entry.run,"reservation":entry.reservation,
-        "endpoint":directory(entry).join("frontend"),"state":"publication-observed",
+        "endpoint":directory(&entry).join("frontend"),"state":"publication-observed",
         "scope":"point-in-time-host-publication"}),
     )
+}
+
+fn observe_hostname_claim(
+    c: &Candidate,
+    name: &str,
+    load_owner: impl Fn() -> Result<String, CandidateError>,
+    observe: impl FnOnce(&Entry) -> Result<(), CandidateError>,
+) -> Result<Entry, CandidateError> {
+    let owner = load_owner()?;
+    let entries = load_registry(c, &owner, RegistryRead::Committed)?;
+    let entry = entries
+        .into_values()
+        .find(|e| e.hostnames.iter().any(|hostname| hostname == name))
+        .ok_or_else(error)?;
+    observe(&entry)?;
+    // Compare the selected claim across snapshots. A change to another run
+    // must not invalidate this one, even if it committed during observation.
+    let after_owner = load_owner()?;
+    let after = load_registry(c, &after_owner, RegistryRead::Committed)?;
+    verify_claim_snapshot(&entry, &after, &after_owner)?;
+    Ok(entry)
 }
 
 /// Point-in-time observation of one owned loopback TCP publication, selected by
@@ -1051,6 +1264,25 @@ fn payload() -> Result<&'static [u8], CandidateError> {
 }
 /// The caller must retain its operation lock until exec closes inherited descriptors.
 pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), CandidateError> {
+    let process = identity::observe(std::process::id() as i32)?;
+    let entry = stage_launch(c, &options, process)?;
+    if entry.unix {
+        eprintln!(
+            "Unix publication endpoint (await ready): {}",
+            directory(&entry).join("frontend").display()
+        );
+    }
+    let failure = publication_command(&entry, options.upstream)?.exec();
+    Err(state::io(failure))
+}
+
+/// Record the process birth and stage the relay under the caller's provider lease.
+/// Completing staging does not grant the process permission to bind a listener.
+fn stage_launch(
+    c: &Candidate,
+    options: &Launch<'_>,
+    process: identity::ProcessIdentity,
+) -> Result<Entry, CandidateError> {
     if let Some(port) = options.port {
         require_loopback_port_free(port)?;
     }
@@ -1081,7 +1313,6 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
         .read_exact(&mut random)
         .map_err(state::io)?;
     let token = random.iter().map(|b| format!("{b:02x}")).collect();
-    let process = identity::observe(std::process::id() as i32)?;
     let mut e = Entry {
         owner: options.owner.into(),
         run: options.run.into(),
@@ -1146,20 +1377,21 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
     e.binary.as_mut().expect("recorded staged file").ready = true;
     entries.insert(e.reservation.clone(), e.clone());
     save(c, &entries)?;
-    if e.unix {
-        eprintln!(
-            "Unix publication endpoint (await ready): {}",
-            dir.join("frontend").display()
-        );
-    }
-    let failure = publication_command(&e, options.upstream)?.exec();
-    Err(state::io(failure))
+    Ok(e)
 }
 
 #[cfg(test)]
 mod port_probe_tests {
     use super::*;
     use std::net::{Ipv4Addr, TcpListener};
+
+    #[test]
+    fn launch_gate_refuses_eof_without_authorization() {
+        assert!(read_launch_gate(b"".as_slice()).is_err());
+        assert!(read_launch_gate(b"{}".as_slice()).is_err());
+        assert_eq!(read_launch_gate(b"{}\n".as_slice()).unwrap(), b"{}");
+        assert!(read_launch_gate(vec![b'\n'; CHILD_LAUNCH_LIMIT + 1].as_slice()).is_err());
+    }
 
     #[test]
     fn loopback_probe_refuses_exact_and_wildcard_listeners_and_accepts_a_free_port() {
@@ -1683,6 +1915,37 @@ mod tests {
         fs::write(&path, serde_json::to_vec(entries).unwrap()).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
     }
+    #[cfg(feature = "native-stream-relay")]
+    #[test]
+    fn launch_refused_after_commit_reaps_and_retires_the_exact_entry() {
+        let (candidate, entry) = fixture();
+        let lease = state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap();
+        let options = Launch {
+            owner: &entry.owner,
+            run: &entry.run,
+            reservation: &entry.reservation,
+            slot: entry.slot,
+            port: None,
+            hostnames: &[],
+            upstream: Path::new("/unused"),
+        };
+        let refused = launch_child_with(
+            &candidate,
+            &options,
+            || {
+                let current = load(&candidate, options.owner).unwrap();
+                assert!(current[options.reservation].binary.as_ref().unwrap().ready);
+                Err(CandidateError::new("cancelled", "fixture"))
+            },
+            Command::new("/bin/cat"),
+        );
+        assert!(matches!(refused, Err(error) if error.code == "cancelled"));
+        assert!(load(&candidate, options.owner).unwrap().is_empty());
+        assert!(!directory(&entry).exists());
+        drop(lease);
+        fs::remove_dir_all(candidate.checkout).unwrap();
+    }
+
     #[test]
     fn cleanup_recovers_complete_single_step_journals_without_launching() {
         for phase in [

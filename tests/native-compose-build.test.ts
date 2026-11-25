@@ -1,5 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -18,6 +18,7 @@ import {
 import { openNativeComposeGenerationStore } from "../src/lib/native-compose-generation.ts";
 import { renderNativeCompose } from "../src/lib/native-compose-renderer.ts";
 import { composeFixture } from "./helpers/native-compose.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 
 const ID = `sha256:${"d".repeat(64)}`;
 const roots: string[] = [];
@@ -876,7 +877,7 @@ test("failed direct build remains in the existing generation mutation journal", 
     await mkdtemp(join(tmpdir(), "native-build-pending-"))
   );
   roots.push(root);
-  await mkdir(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".hack"));
   await Bun.write(
     join(root, ".hack/hack.project.json"),
     JSON.stringify({ schema_version: 1, name: "fixture" })
@@ -955,7 +956,7 @@ test("one-off delivery tampered during an awaited builder prevents Compose run a
     await mkdtemp(join(tmpdir(), "native-build-projection-"))
   );
   roots.push(root);
-  await mkdir(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".hack"));
   await Bun.write(
     join(root, ".hack/hack.project.json"),
     JSON.stringify({ schema_version: 1, name: "fixture" })

@@ -14,22 +14,29 @@ import { join } from "node:path";
 import { acquireLegacyComposeAdoptionCheckout } from "../src/lib/native-compose-adoption-checkout.ts";
 import { acquireNativeConfigImportInputs } from "../src/lib/native-config-import-inputs.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import {
+  mkdirOwnedFixture,
+  ownedFixtureCommand,
+} from "./helpers/owned-fixture.ts";
 
 let root: string;
 let primary: string;
 let linked: string;
 let priorPath: string | undefined;
 async function git(cwd: string, args: readonly string[]) {
-  const child = Bun.spawn(["/usr/bin/git", "-C", cwd, ...args], {
-    env: {
-      PATH: priorPath ?? "/usr/bin:/bin",
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_CONFIG_GLOBAL: "/dev/null",
-    },
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "ignore",
-  });
+  const child = Bun.spawn(
+    ownedFixtureCommand(["/usr/bin/git", "-C", cwd, ...args]),
+    {
+      env: {
+        PATH: priorPath ?? "/usr/bin:/bin",
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+      },
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    }
+  );
   if ((await child.exited) !== 0) {
     throw new Error("Git fixture failed; values omitted.");
   }
@@ -39,7 +46,7 @@ beforeEach(async () => {
   root = await realpath(await mkdtemp(join(tmpdir(), "adoption-checkout-")));
   primary = join(root, "primary");
   linked = join(root, "linked");
-  await mkdir(join(primary, ".hack"), { recursive: true });
+  await mkdirOwnedFixture(join(primary, ".hack"), true);
   await writeFile(
     join(primary, ".hack/hack.config.json"),
     '{"name":"fixture"}'

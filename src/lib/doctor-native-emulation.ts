@@ -25,7 +25,7 @@ export function amd64EmulationCheckResult(opts: {
   readonly modes: ReadonlyMap<string, NativePlatformMode>;
   readonly hostRosetta: boolean;
 }): {
-  readonly name: string;
+  readonly name: typeof AMD64_EMULATION_CHECK;
   readonly status: "ok" | "warn";
   readonly message: string;
   readonly amd64Emulation: Amd64EmulationReport;

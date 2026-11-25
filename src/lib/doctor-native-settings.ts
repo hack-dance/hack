@@ -321,7 +321,7 @@ export async function checkNativeSettings(opts: {
   readonly env: Environment;
   readonly uid?: number;
 }): Promise<{
-  readonly name: string;
+  readonly name: typeof NATIVE_SETTINGS_CHECK;
   readonly status: "ok" | "warn" | "error";
   readonly message: string;
   readonly nativeSettings?: NativeSettingsReport;

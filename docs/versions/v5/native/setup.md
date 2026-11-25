@@ -30,6 +30,10 @@ A complete matching installation is verified and reused without prompting or
 downloading. An incomplete, changed or differently pinned provider directory is
 preserved and refused; do not delete its state to force setup to proceed.
 
+After verified provider setup, Hack removes its two recorded provider downloads.
+It keeps the archives needed for repair, caller-supplied offline inputs, and
+older downloads whose ownership it cannot prove.
+
 Interrupted downloads can be resumed or restarted by rerunning setup. A
 `setup_pin_unavailable` refusal means a pinned URL returned 404 or 410; use the
 exact offline inputs or a reviewed newer release. Setup does not upgrade a

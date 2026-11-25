@@ -9,9 +9,11 @@ fn machine(ids: &[(&str, &str)]) -> DoctorRun {
         checks: ids
             .iter()
             .map(|(id, status)| DoctorCheck {
+                native_pool: None,
                 id: (*id).into(),
                 status: (*status).into(),
                 detail: String::new(),
+                fix: None,
             })
             .collect(),
         ..Default::default()
@@ -295,9 +297,11 @@ fn native_project_evidence_never_leaks_between_projects() {
         "/work/alpha",
         Ok(DoctorReport {
             checks: vec![DoctorCheck {
+                native_pool: None,
                 id: "native root trust".into(),
                 status: "ok".into(),
                 detail: String::new(),
+                fix: None,
             }],
             ..Default::default()
         }),

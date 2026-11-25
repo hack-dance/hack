@@ -36,6 +36,8 @@ export type RuntimeContainer = {
   readonly ports: string;
   readonly workingDir: string | null;
   readonly image: string | null;
+  /** Applied Docker hard limit. Zero is unlimited, null is unknown. */
+  readonly configuredMemoryLimitBytes?: number | null;
   readonly labels: Readonly<Record<string, string>> | null;
   readonly mounts: readonly RuntimeContainerMount[];
   readonly networks: readonly RuntimeContainerNetwork[];
@@ -78,6 +80,7 @@ export type RuntimeProjectsResult =
     }
   | {
       readonly ok: false;
+      readonly code?: "E_TIMEOUT" | "E_DOCKER_UNAVAILABLE";
       readonly runtime: readonly RuntimeProject[];
       readonly error: string;
       readonly checkedAtMs: number;
@@ -87,6 +90,7 @@ export type ContainerInspectData = {
   readonly observation?: ServiceMemberEvidence | null;
   readonly labels: Record<string, string>;
   readonly image: string | null;
+  readonly configuredMemoryLimitBytes?: number | null;
   readonly mounts: readonly RuntimeContainerMount[];
   readonly networks: readonly RuntimeContainerNetwork[];
 };
@@ -158,6 +162,8 @@ export async function readRuntimeProjects(opts: {
   readonly includeGlobal: boolean;
   readonly inspectCache?: RuntimeInspectCache;
   readonly forceInspect?: boolean;
+  readonly inventoryOnly?: boolean;
+  readonly readOnlyLifecycle?: boolean;
   readonly profiler?: OperationTimings;
 }): Promise<RuntimeProjectsResult> {
   const profiler = opts.profiler ?? createOperationTimings();
@@ -179,12 +185,16 @@ export async function readRuntimeProjects(opts: {
           "docker",
           "ps",
           "-a",
+          "--no-trunc",
           "--filter",
           "label=com.docker.compose.project",
           "--format",
           "json",
         ],
-        { stdin: "ignore" }
+        {
+          stdin: "ignore",
+          ...(opts.inventoryOnly ? { timeoutMs: 15_000 } : {}),
+        }
       )
     );
   } catch (error: unknown) {
@@ -199,6 +209,14 @@ export async function readRuntimeProjects(opts: {
     return {
       ok: false,
       runtime: [],
+      ...(opts.inventoryOnly
+        ? {
+            code:
+              res.exitCode === 124
+                ? ("E_TIMEOUT" as const)
+                : ("E_DOCKER_UNAVAILABLE" as const),
+          }
+        : {}),
       error: formatDockerError({
         exitCode: res.exitCode,
         stdout: res.stdout,
@@ -212,21 +230,23 @@ export async function readRuntimeProjects(opts: {
   const ids = baseRows
     .map((row) => getString(row, "ID") ?? getString(row, "Id") ?? "")
     .filter((id) => id.length > 0);
-  const inspectById = await profiler.measure("docker_inspect_ms", async () =>
-    opts.inspectCache
-      ? await readCachedContainerInspectData({
-          cache: opts.inspectCache,
-          forceInspect: opts.forceInspect ?? true,
-          states: new Map(
-            baseRows.map((row) => [
-              getString(row, "ID") ?? getString(row, "Id") ?? "",
-              getString(row, "State") ?? "",
-            ])
-          ),
-          ids,
-        })
-      : await readContainerInspectData({ ids })
-  );
+  const inspectById = opts.inventoryOnly
+    ? new Map<string, ContainerInspectData>()
+    : await profiler.measure("docker_inspect_ms", async () =>
+        opts.inspectCache
+          ? await readCachedContainerInspectData({
+              cache: opts.inspectCache,
+              forceInspect: opts.forceInspect ?? true,
+              states: new Map(
+                baseRows.map((row) => [
+                  getString(row, "ID") ?? getString(row, "Id") ?? "",
+                  getString(row, "State") ?? "",
+                ])
+              ),
+              ids,
+            })
+          : await readContainerInspectData({ ids })
+      );
 
   const globalRoot = resolveGlobalHackDir();
 
@@ -271,6 +291,7 @@ export async function readRuntimeProjects(opts: {
       ports,
       workingDir,
       image: inspect?.image ?? null,
+      configuredMemoryLimitBytes: inspect?.configuredMemoryLimitBytes ?? null,
       labels: Object.keys(labels).length > 0 ? labels : null,
       mounts: inspect?.mounts ?? [],
       networks: inspect?.networks ?? [],
@@ -280,6 +301,7 @@ export async function readRuntimeProjects(opts: {
   const byProject = new Map<
     string,
     {
+      project: string;
       workingDir: string | null;
       byService: Map<string, RuntimeContainer[]>;
       isGlobal: boolean;
@@ -291,35 +313,42 @@ export async function readRuntimeProjects(opts: {
       globalRoot.length > 0 && workingDir
         ? workingDir.startsWith(globalRoot)
         : false;
-    const p = byProject.get(c.project) ?? {
+    const key = opts.inventoryOnly
+      ? JSON.stringify([c.project, workingDir])
+      : c.project;
+    const p = byProject.get(key) ?? {
+      project: c.project,
       workingDir,
       byService: new Map(),
       isGlobal,
     };
     const arr = p.byService.get(c.service) ?? [];
     p.byService.set(c.service, [...arr, c]);
-    byProject.set(c.project, p);
+    byProject.set(key, p);
   }
 
   const out: RuntimeProject[] = [];
-  for (const [project, value] of byProject.entries()) {
+  for (const value of byProject.values()) {
     const services = new Map<string, RuntimeService>();
     for (const [service, containersByService] of value.byService.entries()) {
       services.set(service, { service, containers: containersByService });
     }
     out.push({
-      project,
+      project: value.project,
       workingDir: value.workingDir,
       services,
       isGlobal: value.isGlobal,
     });
   }
 
-  const runtimeWithLifecycle = await profiler.measure("lifecycle_ms", () =>
-    addLifecycleProcessServices({
-      runtime: out,
-    })
-  );
+  const runtimeWithLifecycle = opts.inventoryOnly
+    ? out
+    : await profiler.measure("lifecycle_ms", () =>
+        addLifecycleProcessServices({
+          runtime: out,
+          readOnly: opts.readOnlyLifecycle,
+        })
+      );
 
   return {
     ok: true,
@@ -383,6 +412,7 @@ type LifecycleActivity = {
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Lifecycle pseudo-services are derived from several runtime sources in one normalization step.
 export async function addLifecycleProcessServices(opts: {
   readonly runtime: readonly RuntimeProject[];
+  readonly readOnly?: boolean;
 }): Promise<RuntimeProject[]> {
   if (opts.runtime.length === 0) {
     return [];
@@ -399,7 +429,10 @@ export async function addLifecycleProcessServices(opts: {
       continue;
     }
     try {
-      const state = await readLifecycleState({ projectDir: workingDir });
+      const state = await readLifecycleState({
+        projectDir: workingDir,
+        readOnly: opts.readOnly,
+      });
       stateByWorkingDir.set(workingDir, state);
     } catch {
       unreadable.add(workingDir);
@@ -690,6 +723,7 @@ export function serializeRuntimeProject(
         name: container.name,
         ports: container.ports,
         working_dir: container.workingDir ?? null,
+        started_at: container.observation?.startedAt ?? null,
         image: container.image,
         labels: container.labels,
         mounts: container.mounts.map((mount) => ({
@@ -724,7 +758,7 @@ export async function readContainerLabels(opts: {
 
 // Request only fields used by the runtime model; Docker must not return env values or command arguments.
 const RUNTIME_INSPECT_FORMAT =
-  '{"Id":{{json .Id}},"Config":{"Labels":{{json .Config.Labels}},"Image":{{json .Config.Image}}},"State":{"Status":{{json .State.Status}},"ExitCode":{{json .State.ExitCode}},"StartedAt":{{json .State.StartedAt}},"Health":{{with index .State "Health"}}{"Status":{{json .Status}}}{{else}}null{{end}}},"Mounts":{{json .Mounts}},"NetworkSettings":{"Networks":{{json .NetworkSettings.Networks}}}}';
+  '{"Id":{{json .Id}},"Config":{"Labels":{{json .Config.Labels}},"Image":{{json .Config.Image}}},"State":{"Status":{{json .State.Status}},"ExitCode":{{json .State.ExitCode}},"StartedAt":{{json .State.StartedAt}},"Health":{{with index .State "Health"}}{"Status":{{json .Status}}}{{else}}null{{end}}},"Memory":{{json .HostConfig.Memory}},"Mounts":{{json .Mounts}},"Tmpfs":{{json (index .HostConfig "Tmpfs")}},"NetworkSettings":{"Networks":{{json .NetworkSettings.Networks}}}}';
 
 async function readContainerInspectData(opts: {
   readonly ids: readonly string[];
@@ -767,13 +801,14 @@ async function readContainerInspectData(opts: {
     const config = item.Config;
     const labels = parseInspectLabels(config);
     const image = parseInspectImage(config);
-    const mounts = parseInspectMounts(item.Mounts);
+    const mounts = parseInspectMounts(item.Mounts, item.Tmpfs);
     const networks = parseInspectNetworks(item.NetworkSettings);
 
     const detail: ContainerInspectData = {
       observation: readContainerState(item.State),
       labels,
       image,
+      configuredMemoryLimitBytes: parseInspectMemoryLimit(item.Memory),
       mounts,
       networks,
     };
@@ -874,24 +909,30 @@ function parseInspectImage(config: unknown): string | null {
   return getString(config, "Image") ?? null;
 }
 
-function parseInspectMounts(raw: unknown): RuntimeContainerMount[] {
-  if (!Array.isArray(raw)) {
-    return [];
-  }
+function parseInspectMemoryLimit(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
 
+function parseInspectMounts(
+  raw: unknown,
+  tmpfs: unknown
+): RuntimeContainerMount[] {
   const mounts: RuntimeContainerMount[] = [];
-  for (const value of raw) {
+  for (const value of Array.isArray(raw) ? raw : []) {
     if (!isRecord(value)) {
       continue;
     }
     const source = getString(value, "Source") ?? "";
     const destination = getString(value, "Destination") ?? "";
-    if (!(source && destination)) {
+    const type = getString(value, "Type") ?? "";
+    if (!destination || (!source && type !== "tmpfs")) {
       continue;
     }
     const rwValue = value.RW;
     mounts.push({
-      type: getString(value, "Type") ?? "",
+      type,
       name: getString(value, "Name") ?? null,
       source,
       destination,
@@ -899,7 +940,23 @@ function parseInspectMounts(raw: unknown): RuntimeContainerMount[] {
       rw: typeof rwValue === "boolean" ? rwValue : null,
     });
   }
-  return mounts;
+  return [...mounts, ...inspectTmpfsOnlyMounts(tmpfs, mounts)];
+}
+
+// Compose's tmpfs shorthand can appear only in HostConfig.Tmpfs.
+function inspectTmpfsOnlyMounts(
+  tmpfs: unknown,
+  mounts: readonly RuntimeContainerMount[]
+): RuntimeContainerMount[] {
+  if (!isRecord(tmpfs)) {
+    return [];
+  }
+  const destinations = new Set(mounts.map((mount) => mount.destination));
+  return Object.entries(tmpfs).flatMap(([destination, mode]) =>
+    destination && typeof mode === "string" && !destinations.has(destination)
+      ? [{ type: "tmpfs", source: "", destination, mode, rw: null }]
+      : []
+  );
 }
 
 function parseInspectNetworks(raw: unknown): RuntimeContainerNetwork[] {

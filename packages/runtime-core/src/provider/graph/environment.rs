@@ -21,7 +21,8 @@ pub fn stage_environment(
         ));
     }
     let (mut receipt, root) = load(candidate, &engine, run)?;
-    if root.join("state.pending").symlink_metadata().is_ok() || receipt.phase != "preparing" {
+    if root.join("state.pending").symlink_metadata().is_ok() || start_phase(&receipt) != "preparing"
+    {
         return Err(error(
             "graph_environment_phase",
             "Environment attachment requires a committed preparing graph.",

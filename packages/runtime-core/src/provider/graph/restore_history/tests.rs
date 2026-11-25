@@ -2,6 +2,7 @@ use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
 fn receipt(index: usize) -> Receipt {
     Receipt {
+        started_from: None,
         normalized_input: None,
         relay_startup: None,
         relay_cleanup: None,
@@ -32,6 +33,7 @@ fn receipt(index: usize) -> Receipt {
                 key: "web".into(),
                 name: "owned-web".into(),
                 id: Some(format!("{index:064x}")),
+                cleanup_observed_create: false,
                 image: None,
                 phase: "absent".into(),
                 amd64_emulation: None,

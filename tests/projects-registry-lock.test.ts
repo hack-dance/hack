@@ -16,6 +16,10 @@ import {
   withProjectsRegistryLock,
   writeProjectsRegistryAtomic,
 } from "../src/lib/projects-registry-lock.ts";
+import {
+  mkdirOwnedFixture,
+  writeOwnedFixture,
+} from "./helpers/owned-fixture.ts";
 
 let root = "";
 let lockPath = "";
@@ -216,8 +220,8 @@ test("unreadable ownership and symlinks are never recovered by age", async () =>
 });
 
 test("interrupted recovery guard is preserved and produces bounded actionable failure", async () => {
-  await writeFile(lockPath, `${await deadPid()}\n`);
-  await mkdir(`${lockPath}.recovery`);
+  await writeOwnedFixture(lockPath, `${await deadPid()}\n`);
+  await mkdirOwnedFixture(`${lockPath}.recovery`);
   await expect(
     withProjectsRegistryLock({
       lockPath,
@@ -253,7 +257,7 @@ test("killed writer is recovered, while its live aged lock blocks competitors", 
 });
 
 test("a paused stale reclaimer rechecks under the guard and preserves a live successor", async () => {
-  await writeFile(lockPath, `${await deadPid()}\n`);
+  await writeOwnedFixture(lockPath, `${await deadPid()}\n`);
   const stale = worker("delayed-reaper");
   await waitForBoundary(stale, "observed");
   const successor = worker("hold");
@@ -316,7 +320,7 @@ test("cancelled atomic write and failed commit preserve original content", async
 test("32 real writers preserve every upsert, then concurrent rename and removal", async () => {
   // Release 32 live clients together against an initially dead owner. The
   // separate paused-reclaimer test forces the exact stale-observation race.
-  await writeFile(lockPath, `${await deadPid()}\n`);
+  await writeOwnedFixture(lockPath, `${await deadPid()}\n`);
   const created = await burst(
     Array.from({ length: 32 }, (_, index) => ({
       operation: "create",

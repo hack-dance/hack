@@ -19,7 +19,7 @@ import {
 
 /** One check's outcome, in `hack doctor`'s shape. */
 export type CheckResult = {
-  readonly name: string;
+  readonly name: `resolver:${string}` | `dnsmasq.conf:${string}` | "dnsmasq:53";
   readonly status: "ok" | "warn" | "error";
   readonly message: string;
 };

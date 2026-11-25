@@ -4,7 +4,6 @@ import {
   chmod,
   link,
   lstat,
-  mkdir,
   mkdtemp,
   readFile,
   realpath,
@@ -30,6 +29,7 @@ import {
   projectNativeComposeOneOff,
 } from "../src/lib/native-compose-run-projection.ts";
 import { composeFixture } from "./helpers/native-compose.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 
 const roots: string[] = [];
 const stores: NativeComposeGenerationStore[] = [];
@@ -242,7 +242,7 @@ async function generationFixture() {
     await mkdtemp(join(tmpdir(), "native-run-projection-"))
   );
   roots.push(root);
-  await mkdir(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".hack"));
   await writeFile(
     join(root, ".hack/hack.project.json"),
     JSON.stringify({ schema_version: 1, name: "fixture" })

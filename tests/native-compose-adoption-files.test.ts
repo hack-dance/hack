@@ -37,7 +37,7 @@ const CANARY = "synthetic-private-file-value";
 let root: string;
 beforeEach(async () => {
   root = await realpath(await mkdtemp(join(tmpdir(), "retained-file-proof-")));
-  await mkdir(join(root, "material"));
+  await mkdir(join(root, "material"), { mode: 0o755 });
   await writeFile(
     join(root, "material/config"),
     Buffer.from(`${CANARY}\0binary`),

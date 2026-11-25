@@ -96,9 +96,9 @@ impl WindowData {
 
 /// Machine-scope Doctor checks in the `routing_dns` and `certificates` areas
 /// of Doctor's canonical classification (`MACHINE_AREAS` in
-/// `src/lib/doctor-metadata.ts`), without optional tool probes. A test keeps
-/// this list equal to that table.
-const ROUTING_CHECKS: [&str; 14] = [
+/// `src/lib/doctor-metadata.ts`), without optional tool probes. The CLI
+/// Doctor contract test checks this list and the prefixes below.
+const ROUTING_CHECKS: [&str; 13] = [
     "caddy local ca",
     "coredns forwarding",
     "global files",
@@ -112,7 +112,6 @@ const ROUTING_CHECKS: [&str; 14] = [
     "proxy network",
     "proxy ports",
     "superseded caddy roots",
-    "dnsmasq:53",
 ];
 /// Prefixes Doctor classifies as `routing_dns`.
 const ROUTING_PREFIXES: [&str; 5] = ["network:", "resolver:", "dnsmasq.conf:", "dnsmasq:", "dns:"];
@@ -529,6 +528,7 @@ impl MainWindow {
     fn panel_lines(&self) -> Vec<Vec<Span>> {
         match self.panel_tabs.get(self.panel_selected) {
             Some(TabKind::Logs) | None => log_lines(&self.data.tail),
+            Some(TabKind::Command { label }) => vec![vec![span(label.clone(), Ansi::Fg)]],
             Some(TabKind::ContainerShell { service, .. }) => vec![
                 vec![span("/app # ", Ansi::Fg), span("ls", Ansi::Fg)],
                 vec![
@@ -805,6 +805,7 @@ mod tests {
             "proxy network",
             "host tls trust",
             "network:hack subnet",
+            "dnsmasq:53",
         ] {
             assert_eq!(
                 routing_status([("dns:hack", "ok"), (id, "error")].into_iter()),
@@ -812,35 +813,6 @@ mod tests {
                 "{id}"
             );
         }
-    }
-
-    /// The list must match Doctor's canonical machine classification.
-    #[test]
-    fn routing_list_matches_doctor_metadata() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../src/lib/doctor-metadata.ts"
-        );
-        let src = std::fs::read_to_string(path).expect("read doctor-metadata.ts");
-        let start = src.find("const MACHINE_AREAS").expect("MACHINE_AREAS");
-        let block = &src[start..start + src[start..].find("};").expect("end of table")];
-        let mut doctor: Vec<String> = block
-            .lines()
-            .filter(|l| l.contains("\"routing_dns\"") || l.contains("\"certificates\""))
-            .filter_map(|l| l.trim().split('"').nth(1).map(str::to_owned))
-            .filter(|id| !id.contains("(optional)"))
-            .collect();
-        doctor.sort();
-        let mut ours: Vec<String> = ROUTING_CHECKS
-            .iter()
-            .filter(|id| !id.contains(':'))
-            .map(|s| (*s).to_owned())
-            .collect();
-        ours.sort();
-        assert_eq!(
-            ours, doctor,
-            "update ROUTING_CHECKS from doctor-metadata.ts"
-        );
     }
 
     #[test]

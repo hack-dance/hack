@@ -7,6 +7,7 @@ import {
   planPullRequest,
   touchesCandidate,
   touchesCompilerHost,
+  touchesRustInput,
 } from "../scripts/ci-pr-plan.ts";
 import {
   buildSelectionGraph,
@@ -705,6 +706,10 @@ describe("PR matrix policy", () => {
     expect(plan.docker_suite).toBe(true);
   });
   test("candidate inputs include the compiler consumer dependency", () => {
+    expect(touchesRustInput("packages/hack-vm-protocol/src/client.rs")).toBe(
+      true
+    );
+    expect(touchesRustInput("packages/hack-vm-agent/src/jobs.rs")).toBe(true);
     expect(touchesCandidate("packages/config-compiler/src/lib.rs")).toBe(true);
     expect(touchesCandidate("packages/runtime-core/src/main.rs")).toBe(true);
     expect(touchesCompilerHost("packages/config-compiler/src/lib.rs")).toBe(

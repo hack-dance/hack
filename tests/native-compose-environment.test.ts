@@ -34,6 +34,7 @@ import {
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
+import { writeOwnedFixture } from "./helpers/owned-fixture.ts";
 
 const FILE = "synthetic-file-value-canary";
 const DOTENV = "synthetic-dotenv-value-canary";
@@ -56,7 +57,7 @@ async function fixture(
   const projectDir = join(projectRoot, ".hack");
   await mkdir(projectDir, { mode: 0o700 });
   const composeFile = join(projectDir, "docker-compose.yml");
-  await writeFile(
+  await writeOwnedFixture(
     composeFile,
     JSON.stringify({
       services: { app: { image: "alpine:3.21", ...service } },
@@ -68,7 +69,7 @@ async function fixture(
   return { projectRoot, projectDir, composeFile, source };
 }
 async function managed(projectDir: string, values: unknown) {
-  await writeFile(
+  await writeOwnedFixture(
     join(projectDir, "hack.env.default.yaml"),
     JSON.stringify({
       version: 1,

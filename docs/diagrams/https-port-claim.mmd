@@ -1,0 +1,41 @@
+---
+title: HTTPS archive · port claim
+---
+stateDiagram-v2
+    direction TB
+    classDef ok stroke-width:1.6px
+    classDef wait stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> reuse : macOS
+    [*] --> strict : other hosts
+    reuse --> relist : every address bound
+    reuse --> strict : a bind failed
+    state relist <<choice>>
+    relist --> claimed : [addresses unchanged]
+    relist --> strict : [addresses changed]
+    strict --> claimed : [port free]
+    strict --> retry : [bind refused]
+    retry --> strict : every 500 ms, 35 s
+    retry --> refused : [35 s passed]
+    claimed --> [*]
+
+    note right of reuse
+        SO_REUSEADDR, no SO_REUSEPORT:
+        wildcard, loopback and each
+        interface address, exactly.
+        TIME_WAIT does not block it;
+        another listener does.
+    end note
+    note right of relist
+        getifaddrs again after
+        binding; it must match.
+    end note
+    note left of retry
+        Old path: waits out the
+        retired Caddy's TIME_WAIT.
+    end note
+
+    class claimed ok
+    class retry wait
+    class refused fail

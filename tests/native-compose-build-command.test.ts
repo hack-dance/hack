@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { chmod, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
@@ -27,7 +28,7 @@ async function fixture(build = true) {
     await mkdtemp(join(tmpdir(), "native-build-command-"))
   );
   roots.push(root);
-  await mkdir(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".hack"));
   await Bun.write(
     join(root, ".hack/hack.project.json"),
     JSON.stringify({

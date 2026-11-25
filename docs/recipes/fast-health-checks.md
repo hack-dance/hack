@@ -15,6 +15,9 @@ engine will check at `interval` from the start.
 The native backend's engine is pinned to a newer version and passes these
 settings through for services without a route. When a health check sets no
 `start_interval`, native uses 250 ms, and when it sets no `start_period`, 60 s.
+If this start creates a data volume the service mounts, native uses the authored
+timings for that service. A service that explicitly sets `start_interval` keeps
+its existing startup settings.
 The Compose backend adds no defaults: your engine runs the file as written. So
 the examples write both keys, and they start quickly on either backend. A routed
 service's command health check is replaced by a route probe on native, which
@@ -56,7 +59,9 @@ needed to leave `starting` or `healthy` for `unhealthy`; one passing check retur
 
 Probe the same interface your clients use. Inside a Postgres container,
 `pg_isready -h 127.0.0.1` checks TCP and waits past the temporary socket-only
-server that the image starts to initialize a fresh data directory.
+server that the image starts to initialize a fresh data directory. A Unix-socket
+check can pass during initialization and release dependents before that server
+shuts down and the final server starts.
 
 Set both. Compose refuses `start_interval` without `start_period`. Make
 `start_period` longer than the slowest start you expect; a check that still

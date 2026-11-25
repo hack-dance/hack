@@ -451,7 +451,7 @@ export async function resolveDependencyCacheOverride(opts: {
     services: [...services].sort((left, right) => left.localeCompare(right)),
   }));
   const internalDir = resolve(opts.projectDir, ".internal");
-  await ensureDir(internalDir);
+  await ensureDir(internalDir, 0o700);
   const services: Record<string, unknown> = {};
   for (const declaration of protocolDeclarations) {
     const containerScript = "/hack-dependency-cache-install.sh";
@@ -468,7 +468,7 @@ export async function resolveDependencyCacheOverride(opts: {
       internalDir,
       `dependency-cache-${fingerprint}-${createHash("sha256").update(declaration.service).digest("hex").slice(0, 12)}.sh`
     );
-    await writeTextFileIfChanged(scriptPath, protocol.script);
+    await writeTextFileIfChanged(scriptPath, protocol.script, 0o644);
     services[declaration.service] = {
       entrypoint: protocol.entrypoint,
       volumes: [
@@ -494,7 +494,7 @@ export async function resolveDependencyCacheOverride(opts: {
     internalDir,
     "compose.dependencies.override.yml"
   );
-  await writeTextFileIfChanged(overridePath, YAML.stringify(override));
+  await writeTextFileIfChanged(overridePath, YAML.stringify(override), 0o600);
   return {
     overridePath,
     fingerprint,

@@ -151,11 +151,13 @@ fn container_attachment_records_ownership_before_create_and_omits_values_from_me
             key: "job".into(),
             name: format!("hkg-{run}-container-0"),
             id: None,
+            cleanup_observed_create: false,
             image: Some(image.clone()),
             phase: "reserved".into(),
             amd64_emulation: None,
         };
         let mut receipt = Receipt {
+            started_from: None,
             normalized_input: None,
             relay_startup: None,
             relay_cleanup: None,

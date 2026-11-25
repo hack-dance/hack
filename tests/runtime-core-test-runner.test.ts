@@ -28,6 +28,7 @@ async function fixture(
     repeats?: string;
     required?: boolean;
     report?: boolean;
+    keepGoing?: boolean;
   } = {}
 ) {
   const root = await mkdtemp(join(tmpdir(), "hack-rust-runner-"));
@@ -92,6 +93,7 @@ async function fixture(
         : undefined,
       FIXTURE_FAIL: opts.fail,
       HACK_RUST_TEST_RUNNER: opts.required ? "nextest" : "auto",
+      HACK_RUST_TEST_KEEP_GOING: opts.keepGoing ? "1" : undefined,
       HACK_RUST_TEST_REPETITIONS: opts.repeats ?? "1",
       HACK_RUST_TEST_TARGET_DIR: join(root, "target"),
       HACK_RUST_TEST_REPORT_DIR: opts.report
@@ -201,6 +203,23 @@ for (const fail of ["nextest", "doc"]) {
     expect(r.commands).toHaveLength(fail === "nextest" ? 1 : 2);
   });
 }
+test("Candidate core finishes a red pass through doctests and preserves the first failure", async () => {
+  for (const [fail, status] of [
+    ["nextest", 77],
+    ["doc", 78],
+  ] as const) {
+    const f = await fixture({ fail, repeats: "20", keepGoing: true });
+    const result = await f.run();
+    expect(result.code, result.stderr).toBe(status);
+    expect(result.commands).toHaveLength(2);
+    expect(result.commands[0]).toStartWith("nextest run");
+    expect(result.commands[1]).toStartWith("test --doc");
+    for (const command of result.commands) {
+      expect(command).toContain("--no-fail-fast");
+    }
+  }
+});
+
 test("20-pass qualification performs exactly 20 suites and 20 separate doctest steps", async () => {
   const r = await (await fixture({ repeats: "20" })).run();
   expect(r.code).toBe(0);

@@ -11,7 +11,8 @@ For a read-only inventory, use `hack projects --json --observe`. It lists
 registered projects even when hackd is off, preserves the registry, and starts
 no services or engine connection. Add `--runtime` only to opt in to Docker
 queries: contacting an on-demand engine can start it. Unknown runtime state stays unknown; native projects use their
-native `ps` observer. See the [listing contract](../cli.md).
+native `ps` observer. Full listings include routes for registered worktrees
+and Hack branches before the copy starts. See the [listing contract](../cli.md).
 
 ```mermaid
 ---
@@ -48,6 +49,8 @@ in `.hack/docker-compose.yml`. Adjust relative build and mount paths for that
 file's location; keep the original Compose file until the app checks pass.
 This is the Compose setup path; `hack config adopt` is a separate native configuration path.
 If `.hack/` already exists, review that setup instead of replacing it.
+New scaffold files and directories created by Hack exclude group and other write
+permissions, even with a shell umask of `002`.
 
 Check `.hack/docker-compose.yml`: its images, commands, ports and mounts should
 match your app. Check the local URL in the service's routing labels. Commit shared
@@ -81,9 +84,21 @@ and the elapsed time. Native stops report when they retain data.
 If `hack up` stops before the project is ready, look for the `!` line. It
 names the blocker and shows the command to run next.
 
+When checking for leftover Compose networks, Hack passes Docker connection
+settings and keeps application values out of the network probe's environment.
+
 `hack ps` lists services with their primary address and current state. An
 address followed by `+1` has one more configured address. Use `hack ps --wide`
 for all addresses, container names, exit codes and port details.
+Use `hack ps --copies` to list the project's checkouts and branch instances
+together. The count names the backend that was observed. A copy whose runtime
+state cannot be confirmed on that backend shows `unknown`. Saved native
+instances stay listed when Compose is selected. Native mode lists only native
+records and does not query Docker. Authored projects leave the
+address cell empty because the copies view cannot resolve their saved routes.
+Use `hack ps --copies --json` for the same inventory in structured form.
+The result includes `observation: {ok, code}` for inventory, setup, or
+deadline failures. The command still returns the known copies in those cases.
 
 To start this project at future logins, use `hack up -d --always` and install
 the per-user daemon with `hack daemon install`. `hack down` pauses its marker;
@@ -108,9 +123,29 @@ Hack checks it before startup hooks. If the check fails, follow the displayed
 login command and try again. Use `hack config validate` to verify declarations
 without running the checks.
 
-When the project declares remotes, `hack ps` shows each default target with
-its configured address. An environment-backed hostname displays the variable
-name. This view reports declarations and whether their connection was checked.
+When the project declares remotes, `hack ps` shows the observed target or
+`unknown` if it cannot identify one. An environment-backed hostname displays
+the variable name. Start the whole project with `hack up`. Use `hack down`
+followed by `hack up` to restart it.
+
+To add Redis to a Compose project, run `hack service add redis --dry-run` to
+review the diff, then `hack service add redis` to save it and `hack up redis`
+to start the service. In the desktop preview, open **Add service**, search for
+Redis, choose **Add to project** to preview the diff, then **Save to project**
+and **Start redis** on the Compose backend. Native also supports editing
+Compose files. It starts the whole project, so use `hack up` without a service
+name. If the native project is already running, stop it first to load the
+change. For projects authored in `.hack/hack.project.json`, add a workload in
+that file and run `hack config validate`.
+
+Review the saved file in **Changes** and commit it when
+you're ready. For PostgreSQL, MySQL, and MinIO, set the listed variables in the
+Env tab under the matching service scope before starting. Catalog services
+with image-declared storage use named Compose volumes.
+
+The desktop preview shows those descriptors on the registered project's
+**Services** tab. It shows the environment variable name for an
+environment-backed address and marks each target as unchecked.
 
 Expect the declared services in `ps` and the app's local URL from `open`.
 If a project has several URLs, choose the app's route. A worker-only project may
@@ -273,7 +308,9 @@ Machine-wide autostart progress is exposed locally, not through the unsupported 
 Lifecycle host processes can opt into `lifecycle.runner: "supervisor"` when the
 Rust supervisor executable is installed alongside the CLI. The default stays
 `"mux"`. This mode has no terminal: use noninteractive commands and
-`hack logs -f <name>` to watch output. See the
+`hack logs -f <name>` to watch output. On stop, commands get five seconds to
+respond to TERM. Hack gives the supervisor extra time to confirm they exited on
+a busy host. See the
 [lifecycle runner implementation contract](https://github.com/hack-dance/hack/blob/next/docs/lifecycle-supervisor.md) for prerequisites and
 recovery behavior.
 

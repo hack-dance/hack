@@ -1,8 +1,12 @@
 import { CliUsageError } from "../cli/command.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import {
+  type CacheVolumeKept,
   type DisposableCacheVolumeCandidate,
   findMountedNamedVolumeCandidates,
+  foreignCacheMounts,
+  listComposeVolumeNames,
+  type MountedNamedVolumeCandidate,
   verifyDisposableCacheVolumes,
 } from "../lib/disposable-cache-volumes.ts";
 import { confirmSafe } from "../lib/interactivity.ts";
@@ -15,13 +19,13 @@ export type DownSafetyNotice = {
   readonly message: string;
 };
 
-export function reconcileImplicitDownBranch(opts: {
+export function reconcileImplicitDownTarget(opts: {
   readonly baseProjectName: string;
   readonly branch: string;
   readonly projectDir: string;
   readonly runtime: readonly RuntimeProject[];
   readonly writeNotice: (notice: DownSafetyNotice) => void;
-}): string | null {
+}) {
   const resolution = resolveImplicitDownTarget({
     baseComposeProject: opts.baseProjectName,
     currentProjectDir: opts.projectDir,
@@ -29,14 +33,14 @@ export function reconcileImplicitDownBranch(opts: {
     runtime: opts.runtime,
   });
   if (resolution.kind === "inferred") {
-    return resolution.branch;
+    return resolution;
   }
   if (resolution.kind === "retargeted") {
     opts.writeNotice({
       level: "warn",
       message: `The current Git branch resolves to "${opts.baseProjectName}--${opts.branch}", but this worktree owns existing runtime "${resolution.composeProject}" (${resolution.states.join(", ") || "state unknown"}). Targeting the owned runtime; pass --branch <name> to override.`,
     });
-    return resolution.branch;
+    return resolution;
   }
 
   const choices = resolution.targets
@@ -57,16 +61,43 @@ export async function prepareDisposableCachePrune(opts: {
   readonly runtime: readonly RuntimeProject[];
   readonly writeNotice: (notice: DownSafetyNotice) => void;
   readonly yes: boolean;
+  readonly kept: CacheVolumeKept[];
 }): Promise<readonly DisposableCacheVolumeCandidate[]> {
-  const observed = findMountedNamedVolumeCandidates({
-    composeProject: opts.composeProject,
-    currentProjectDir: opts.projectDir,
-    runtime: opts.runtime,
+  const selection = { ...opts, currentProjectDir: opts.projectDir };
+  const names = await listComposeVolumeNames(opts.composeProject);
+  if (names === null) {
+    opts.writeNotice({
+      level: "warn",
+      message:
+        "Could not list Compose volumes. Only current mounts can be checked.",
+    });
+  }
+  const mountedElsewhere = foreignCacheMounts(selection);
+  const selected = new Map<string, MountedNamedVolumeCandidate>(
+    names?.map((name) => [name, { name, destinations: [], services: [] }])
+  );
+  for (const mount of findMountedNamedVolumeCandidates(selection)) {
+    selected.set(mount.name, mount);
+  }
+  const candidates = [...selected.values()].filter((candidate) => {
+    if (!mountedElsewhere.has(candidate.name)) {
+      return true;
+    }
+    opts.kept.push({ name: candidate.name, reason: "mounted-elsewhere" });
+    return false;
   });
   const verified = await verifyDisposableCacheVolumes({
     composeProject: opts.composeProject,
-    candidates: observed,
+    candidates,
+    kept: opts.kept,
   });
+  const detached = opts.kept.filter(({ reason }) => reason === "no-live-mount");
+  if (detached.length > 0) {
+    opts.writeNotice({
+      level: "info",
+      message: `Kept volumes without current mounts: ${detached.map(({ name }) => name).join(", ")}. For disposable caches, run down --prune-caches before stopping, or add hack.cache.disposable=true to the volume.`,
+    });
+  }
   if (verified.length === 0) {
     opts.writeNotice({
       level: "info",
@@ -106,5 +137,13 @@ export async function prepareDisposableCachePrune(opts: {
     nonInteractive: "fail",
     hint: "Re-run with --prune-caches --yes to confirm non-interactively.",
   });
+  if (!confirmed) {
+    opts.kept.push(
+      ...verified.map(({ name }) => ({
+        name,
+        reason: "not-confirmed" as const,
+      }))
+    );
+  }
   return confirmed ? verified : [];
 }

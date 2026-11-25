@@ -258,6 +258,13 @@ Manual full runs have a
 separate concurrency group, so a new `next` push cannot cancel one; moving the
 head still invalidates its release eligibility.
 
+Review the **Linux first-run advisory** at the release SHA. It runs on `next`
+pushes and changes to the covered PR paths. Once the workflow is on the default
+branch, GitHub also starts it after a successful full `CI` dispatch on `next`,
+using that dispatch's SHA. Its report is separate from required CI and
+prerelease verification. Use `bun scripts/list-release-only-scripts.ts` to
+list literal release script entry points that no other workflow invokes.
+
 After full CI succeeds, dispatch the existing `Release`
 workflow on that branch with an explicit version and its full commit SHA:
 

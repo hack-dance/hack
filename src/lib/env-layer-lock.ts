@@ -193,7 +193,7 @@ async function ensureEnvLayerLockDirectory(opts: {
   if (!(await lockDirectoryState(opts)).absent) {
     return;
   }
-  await ensureDirForWrite(opts.lockDir);
+  await ensureDirForWrite(opts.lockDir, 0o700);
   // Re-check: something other than a directory may have raced the mkdir.
   await lockDirectoryState(opts);
 }

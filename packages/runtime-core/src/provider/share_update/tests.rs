@@ -485,3 +485,33 @@ fn replaced_project_selected_before_acquisition_is_refused() {
     assert!(matches!(outcome, Err(error) if error.code == "project_share_update"));
     assert!(!root(&candidate).join(JOURNAL).exists());
 }
+
+#[test]
+fn only_a_new_share_on_a_running_pool_with_room_stops_it_first() {
+    let f = fixture();
+    let mut running = f.owner.clone();
+    running.phase = "running".into();
+    let primary = f.owner.project_share.clone().unwrap();
+    assert!(stop_before_add(&running, &f.second, true).unwrap());
+    // A stopped pool, a root already shared, or an unfinished update: no stop.
+    assert!(!stop_before_add(&f.owner, &f.second, true).unwrap());
+    assert!(!stop_before_add(&running, &primary, true).unwrap());
+    assert!(!stop_before_add(&running, &f.second, false).unwrap());
+    // A full set refuses before anything stops.
+    let mut full = running.clone();
+    for index in 1..MAX_PROJECT_SHARES {
+        full.additional_project_shares
+            .push(project(&f.directory, &format!("filler-{index}")));
+    }
+    assert_eq!(
+        stop_before_add(&full, &f.third, true).unwrap_err().code,
+        "project_share_limit"
+    );
+    // So does a share whose guest path another share already uses.
+    let mut clash = f.third.clone();
+    clash.guest_path = primary.guest_path.clone();
+    assert_eq!(
+        stop_before_add(&running, &clash, true).unwrap_err().code,
+        "project_share_limit"
+    );
+}

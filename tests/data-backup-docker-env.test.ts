@@ -89,7 +89,7 @@ if (args[0] === "info") {
   out("c".repeat(64));
 } else if (args[0] === "container" && args.some((arg) => arg.includes("index .Config.Labels")) && !args.some((arg) => arg.includes("{{.Id}}"))) {
   if (process.env.DATA_STUB_INSPECT_FAIL) { process.stderr.write("error during connect\\n"); process.exit(1); }
-  out((process.env.DATA_STUB_NONCE || "") + "\\n");
+  out((process.env.DATA_STUB_NONCE || "") + " /" + (process.env.DATA_STUB_LABELED_NAME || "hack-data-stub") + "\\n");
 } else if (args[0] === "container" && args.includes("{{.Id}} {{json .Mounts}}")) {
   // Batched: every container binds the owned Mountpoint.
   const ids = args.slice(args.indexOf("--format") + 2);
@@ -441,6 +441,8 @@ async function recordRun(opts: {
   readonly endpointSha256?: string;
   /** The daemon ID the run read (the stub answers DATA_STUB_DAEMON_ID). */
   readonly daemonId?: string;
+  /** Timed-out creates the run never found, by container name. */
+  readonly unresolvedCreates?: readonly string[];
 }): Promise<string> {
   const docker = createHostDataBackupDocker({
     env: {
@@ -465,6 +467,9 @@ async function recordRun(opts: {
       endpointSha256: opts.endpointSha256 ?? (await endpointDigest(docker)),
       daemonId: opts.daemonId ?? STUB_DAEMON_ID,
       createdAt: "2026-11-24T00:00:00.000Z",
+      ...(opts.unresolvedCreates === undefined
+        ? {}
+        : { unresolvedCreates: opts.unresolvedCreates }),
     },
   });
   await writeFile(opts.log, "");
@@ -715,6 +720,79 @@ test("hack data cleanup: a listed container it cannot verify exits nonzero; an e
   expect(empty.output).toContain(
     `No container is labeled io.hack.data-backup.nonce=${nonce}; nothing to remove.`
   );
+  expect(await readFile(record, "utf8").catch(() => null)).toBeNull();
+});
+
+test("hack data cleanup keeps a record whose timed-out create never appeared, and deletes it once that container is found and removed", async () => {
+  const { bin, log } = await stubBin();
+  const managedHost = `unix://${root}/managed-engine.sock`;
+  const projectRoot = await shopProject({
+    envFiles: { default: [`DOCKER_HOST: "${managedHost}"`] },
+  });
+  const nonce = "6123456789abcdef0123456789abcdef";
+  const hold = "hack-data-export-0123456789abcdef01234567";
+  const label = `io.hack.data-backup.nonce=${nonce}`;
+  const record = await recordRun({
+    nonce,
+    managed: { DOCKER_HOST: managedHost },
+    bin,
+    log,
+    unresolvedCreates: [hold],
+  });
+  // An empty listing, in text and JSON: nonzero, the create named by
+  // container name and label only, and the record kept.
+  for (const json of [false, true]) {
+    const early = await runDataCli({
+      cwd: projectRoot,
+      args: ["data", "cleanup", "--nonce", nonce, ...(json ? ["--json"] : [])],
+      bin,
+      env: { DATA_STUB_LOG: log, DATA_STUB_NONCE: nonce },
+    });
+    expect({ json, ok: early.exitCode === 0 }).toEqual({ json, ok: false });
+    expect(early.output).toContain(hold);
+    expect(early.output).toContain(label);
+    expect(early.output).toContain("E_UNEXPECTED");
+    expect(early.output).toContain("The cleanup record stays until a later");
+    expect(early.output).not.toContain(managedHost);
+    expect(early.output).not.toContain("No container is labeled");
+    if (json) {
+      expect(early.output).toContain('"outcome": "unknown"');
+      expect(early.output).toContain('"unresolvedCreates"');
+    }
+  }
+  expect(JSON.parse(await readFile(record, "utf8")).unresolvedCreates).toEqual([
+    hold,
+  ]);
+  // A container of another name under the nonce is removed, but does not
+  // resolve the create: the record stays.
+  const other = await runDataCli({
+    cwd: projectRoot,
+    args: ["data", "cleanup", "--nonce", nonce],
+    bin,
+    env: {
+      DATA_STUB_LOG: log,
+      DATA_STUB_NONCE: nonce,
+      DATA_STUB_LABELED: "e".repeat(64),
+      DATA_STUB_LABELED_NAME: "hack-data-export-someotherhold00000000000",
+    },
+  });
+  expect(other.exitCode).not.toBe(0);
+  expect(other.output).toContain(hold);
+  expect(await readFile(record, "utf8")).toContain(hold);
+  // The container appears: found by name and nonce, removed, record gone.
+  const late = await runDataCli({
+    cwd: projectRoot,
+    args: ["data", "cleanup", "--nonce", nonce],
+    bin,
+    env: {
+      DATA_STUB_LOG: log,
+      DATA_STUB_NONCE: nonce,
+      DATA_STUB_LABELED: "f".repeat(64),
+      DATA_STUB_LABELED_NAME: hold,
+    },
+  });
+  expect(late.exitCode).toBe(0);
+  expect(late.output).toContain("Removed 1 container");
   expect(await readFile(record, "utf8").catch(() => null)).toBeNull();
 });
 

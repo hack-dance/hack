@@ -48,8 +48,10 @@ export const TIMED_OUT_CREATE_LOOKUPS = 5;
 export const TIMED_OUT_CREATE_LOOKUP_GAP_MS = 400;
 /**
  * After a timed-out create's lookups, how long the run's live event
- * subscription is watched for that create to land before a final listing
- * may settle it as absent.
+ * subscription is watched for that create to land before a final listing.
+ * The window is only a further chance to find (and remove) the container:
+ * nothing seen in it proves the create will not land later, so it never
+ * settles a create as absent.
  */
 export const TIMED_OUT_CREATE_SETTLE_MS = 2000;
 /**
@@ -122,12 +124,6 @@ export class DataHelperContainers {
   readonly unresolved = new Set<string>();
   /** Containers with this run's nonce whose create event arrived, by name. */
   private readonly landed = new Map<string, string>();
-  /**
-   * True while a live event subscription reports this run's container
-   * creates (the mount monitor sets it); only then can a settle window
-   * prove that a timed-out create did not land.
-   */
-  watching = false;
 
   constructor(nonce: string = randomBytes(16).toString("hex")) {
     this.nonce = nonce;
@@ -683,7 +679,8 @@ async function createTracked(opts: {
   const refused = created.exitCode !== 0 && DAEMON_REFUSAL.test(created.stderr);
   // A timed-out create the lookups did not find may still land: watch the
   // run's live subscription for its create through a bounded window, then
-  // list once more (see settleTimedOutCreate).
+  // list once more (see settleTimedOutCreate). Not finding it leaves the
+  // create unknown.
   const settle =
     printed === null &&
     timedOut &&
@@ -703,28 +700,26 @@ async function createTracked(opts: {
     opts.helpers.add(container);
   }
   // Settled without a container: the name is someone else's (our create
-  // cannot have succeeded), Docker answered "no such container" for a
-  // create that returned without a timeout, or a timed-out create's settle
-  // window proved it did not land.
+  // cannot have succeeded), or Docker answered "no such container" for a
+  // create that returned without a timeout. A timed-out or interrupted
+  // create is never settled as absent: the daemon may still create it.
   const settledAbsent =
-    lookup?.kind === "taken" ||
-    (lookup?.kind === "absent" && !timedOut) ||
-    settle?.kind === "absent";
+    lookup?.kind === "taken" || (lookup?.kind === "absent" && !timedOut);
   const unknownNonce =
     container === null && !refused && !settledAbsent ? nonce : null;
   return { created, printed, container, unknownNonce };
 }
 
 /**
- * Settle a create that timed out and that the lookups did not find. The
- * daemon may still be processing it, so a "no such container" proves
- * nothing on its own. Wait {@link TIMED_OUT_CREATE_SETTLE_MS} while the
- * run's live event subscription watches for a container `create` with the
+ * A last chance to find a create that timed out and that the lookups did
+ * not find. The daemon may still be processing it, so a "no such
+ * container" proves nothing. Wait {@link TIMED_OUT_CREATE_SETTLE_MS} while
+ * the run's event subscription watches for a container `create` with the
  * run's nonce and this name; then list containers by that label and name
  * (`docker ps -a`). A create event, or a listed container, is found (and
- * then removed by ID like any other). Absent only when the subscription
- * stayed live through the whole window, no such create arrived and the
- * final listing is empty; anything else stays unknown.
+ * then removed by ID like any other). Anything else stays unknown: Docker
+ * emits no event for a create that fails or is abandoned, so no window,
+ * however quiet, proves the container will not appear later.
  */
 async function settleTimedOutCreate(opts: {
   readonly docker: DataBackupDocker;
@@ -732,10 +727,8 @@ async function settleTimedOutCreate(opts: {
   readonly helpers: DataHelperContainers;
   readonly deadlines: DataBackupDeadlines;
 }): Promise<
-  | { readonly kind: "found"; readonly id: string }
-  | { readonly kind: "absent" | "unknown" }
+  { readonly kind: "found"; readonly id: string } | { readonly kind: "unknown" }
 > {
-  const watchedThroughout = opts.helpers.watching;
   await Bun.sleep(TIMED_OUT_CREATE_SETTLE_MS);
   const landed = opts.helpers.landedId(opts.name);
   if (landed !== undefined) {
@@ -764,12 +757,7 @@ async function settleTimedOutCreate(opts: {
     .split("\n")
     .map((line) => line.trim())
     .find((line) => CONTAINER_ID.test(line));
-  if (id !== undefined) {
-    return { kind: "found", id };
-  }
-  return watchedThroughout && opts.helpers.watching
-    ? { kind: "absent" }
-    : { kind: "unknown" };
+  return id === undefined ? { kind: "unknown" } : { kind: "found", id };
 }
 
 /** The container ID a lookup or settle check found, or null. */

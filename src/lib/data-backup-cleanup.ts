@@ -1,8 +1,14 @@
+import { HackCliError } from "./cli-result.ts";
 import { HELPER_NONCE_LABEL } from "./data-backup-cleanup-instruction.ts";
 import type { DataBackupDeadlines } from "./data-backup-deadlines.ts";
 import type { DataBackupDocker } from "./data-backup-docker.ts";
 import { removeContainerConfirmed } from "./data-backup-held-volume.ts";
 import { dockerReadError } from "./data-backup-volumes.ts";
+import {
+  type DataCleanupRecord,
+  removeDataCleanupRecord,
+  writeDataCleanupRecord,
+} from "./data-cleanup-record.ts";
 
 /** What `hack data cleanup` found and removed, by full container ID. */
 export type DataCleanupResult = {
@@ -19,6 +25,8 @@ export type DataCleanupResult = {
 };
 
 const CONTAINER_ID = /^[0-9a-f]{64}$/;
+/** Docker prints a container's `.Name` with a leading slash. */
+const LEADING_SLASH = /^\//;
 
 /**
  * Remove the containers a data command created under `nonce` (and could
@@ -33,6 +41,21 @@ export async function cleanupDataHelpers(opts: {
   readonly nonce: string;
   readonly deadlines: DataBackupDeadlines;
 }): Promise<DataCleanupResult> {
+  return (await removeLabeled(opts)).result;
+}
+
+/**
+ * {@link cleanupDataHelpers}, also naming the containers whose removal it
+ * confirmed (by the name Docker read back with the label).
+ */
+async function removeLabeled(opts: {
+  readonly docker: DataBackupDocker;
+  readonly nonce: string;
+  readonly deadlines: DataBackupDeadlines;
+}): Promise<{
+  readonly result: DataCleanupResult;
+  readonly removedNames: ReadonlySet<string>;
+}> {
   const label = `${HELPER_NONCE_LABEL}=${opts.nonce}`;
   const listed = await opts.docker.capture(
     [
@@ -61,9 +84,10 @@ export async function cleanupDataHelpers(opts: {
         .filter((line) => CONTAINER_ID.test(line))
     ),
   ];
-  // Only a container whose label holds exactly this nonce, read back by ID.
-  // One Docker listed but Hack cannot read back is not settled: unconfirmed.
-  const matching: string[] = [];
+  // Only a container whose label holds exactly this nonce, read back by ID
+  // with its name. One Docker listed but Hack cannot read back is not
+  // settled: unconfirmed.
+  const matching: { readonly id: string; readonly name: string }[] = [];
   const unconfirmed: string[] = [];
   for (const id of ids) {
     const read = await opts.docker.capture(
@@ -72,19 +96,21 @@ export async function cleanupDataHelpers(opts: {
         "container",
         "inspect",
         "--format",
-        `{{index .Config.Labels "${HELPER_NONCE_LABEL}"}}`,
+        `{{index .Config.Labels "${HELPER_NONCE_LABEL}"}} {{.Name}}`,
         id,
       ],
       { timeoutMs: opts.deadlines.commandMs }
     );
+    const [value = "", name = ""] = read.stdout.trim().split(" ");
     if (read.exitCode !== 0) {
       unconfirmed.push(id);
-    } else if (read.stdout.trim() === opts.nonce) {
-      matching.push(id);
+    } else if (value === opts.nonce) {
+      matching.push({ id, name: name.replace(LEADING_SLASH, "") });
     }
   }
   const removed: string[] = [];
-  for (const id of matching) {
+  const removedNames = new Set<string>();
+  for (const { id, name } of matching) {
     if (
       await removeContainerConfirmed({
         docker: opts.docker,
@@ -93,87 +119,106 @@ export async function cleanupDataHelpers(opts: {
       })
     ) {
       removed.push(id);
+      removedNames.add(name);
     } else {
       unconfirmed.push(id);
     }
   }
-  return { nonce: opts.nonce, label, listed: ids, removed, unconfirmed };
+  return {
+    result: { nonce: opts.nonce, label, listed: ids, removed, unconfirmed },
+    removedNames,
+  };
 }
 
 /**
- * `hack data cleanup`'s removal under the record's settle rule. When the
- * listing is empty and the record names creates whose outcome stayed
- * unknown (a timed-out create), the empty listing proves nothing on its
- * own: watch a label-filtered `docker events` subscription for a container
- * `create` with the nonce for `settleMs`, then list once more. A container
- * that shows up is removed as usual. `settled` is true only when the list
- * is empty and, if the record had unresolved creates, the watch stayed live
- * through the window, saw no create, and the final listing was empty; only
- * then may the record be removed.
+ * `hack data cleanup`'s removal under the record's rule. Every container
+ * labeled with the nonce is removed (see {@link cleanupDataHelpers}). A
+ * create the run recorded as unresolved (it timed out or was interrupted
+ * and was never found) is resolved only when this cleanup found and removed
+ * a container of that exact name with the nonce: Docker emits no event for
+ * a create that fails or is abandoned, so an empty listing, or any quiet
+ * time, never proves the container will not appear later. `settled` is
+ * true only when every listed container's removal is confirmed and no
+ * recorded create is left unresolved; only then may the record be removed.
  */
-export async function cleanupWithSettle(opts: {
+export async function resolveDataCleanup(opts: {
   readonly docker: DataBackupDocker;
   readonly nonce: string;
   readonly deadlines: DataBackupDeadlines;
   readonly unresolvedCreates: readonly string[];
-  readonly settleMs: number;
-}): Promise<{ readonly result: DataCleanupResult; readonly settled: boolean }> {
-  const first = await cleanupDataHelpers(opts);
-  if (first.listed.length > 0 || opts.unresolvedCreates.length === 0) {
-    return { result: first, settled: first.unconfirmed.length === 0 };
-  }
-  const quiet = await watchForNonceCreates({
-    docker: opts.docker,
-    nonce: opts.nonce,
-    settleMs: opts.settleMs,
-  });
-  const again = await cleanupDataHelpers(opts);
-  if (again.listed.length > 0) {
-    return { result: again, settled: again.unconfirmed.length === 0 };
-  }
-  return { result: again, settled: quiet };
+}): Promise<{
+  readonly result: DataCleanupResult;
+  /** The recorded creates still unresolved after this cleanup, by name. */
+  readonly unresolved: readonly string[];
+  readonly settled: boolean;
+}> {
+  const { result, removedNames } = await removeLabeled(opts);
+  const unresolved = opts.unresolvedCreates.filter(
+    (name) => !removedNames.has(name)
+  );
+  return {
+    result,
+    unresolved,
+    settled: result.unconfirmed.length === 0 && unresolved.length === 0,
+  };
 }
 
 /**
- * Watch `docker events` for a container `create` labeled with `nonce` for
- * `settleMs`; true when the subscription stayed live and saw none.
+ * `hack data cleanup` once the record's engine is proven: remove the
+ * nonce's containers, then delete the record only if
+ * {@link resolveDataCleanup} settled. Otherwise the record stays, narrowed
+ * to the creates still unresolved (rewritten atomically), and a create left
+ * unresolved throws the unknown outcome naming it. Returns the result for
+ * the caller to report (including any unconfirmed removal).
  */
-async function watchForNonceCreates(opts: {
+export async function cleanupRecordedRun(opts: {
+  readonly hackHome: string;
+  readonly record: DataCleanupRecord;
   readonly docker: DataBackupDocker;
-  readonly nonce: string;
-  readonly settleMs: number;
-}): Promise<boolean> {
-  let seen = false;
-  let ended = false;
-  const watch = opts.docker.watch(
-    [
-      "docker",
-      "events",
-      "--filter",
-      "type=container",
-      "--filter",
-      "event=create",
-      "--filter",
-      `label=${HELPER_NONCE_LABEL}=${opts.nonce}`,
-      "--format",
-      "{{json .}}",
-    ],
-    (line) => {
-      if (line.trim() !== "") {
-        seen = true;
-      }
-    }
-  );
-  void watch.done.then(
-    () => {
-      ended = true;
-    },
-    () => {
-      ended = true;
-    }
-  );
-  await Bun.sleep(opts.settleMs);
-  const live = !ended;
-  await watch.stop();
-  return live && !seen;
+  readonly deadlines: DataBackupDeadlines;
+}): Promise<DataCleanupResult> {
+  const { hackHome, record } = opts;
+  const recorded = record.unresolvedCreates ?? [];
+  const { result, unresolved, settled } = await resolveDataCleanup({
+    docker: opts.docker,
+    nonce: record.nonce,
+    deadlines: opts.deadlines,
+    unresolvedCreates: recorded,
+  });
+  if (settled) {
+    await removeDataCleanupRecord({ hackHome, nonce: record.nonce });
+  } else if (unresolved.length < recorded.length) {
+    await writeDataCleanupRecord({
+      hackHome,
+      record: { ...record, unresolvedCreates: unresolved },
+    });
+  }
+  if (unresolved.length > 0) {
+    throw unresolvedCreatesError({ result, unresolved });
+  }
+  return result;
+}
+
+/**
+ * A recorded create that timed out and that no cleanup has found yet: the
+ * record stays, by container name and nonce label only.
+ */
+function unresolvedCreatesError(opts: {
+  readonly result: DataCleanupResult;
+  readonly unresolved: readonly string[];
+}): HackCliError {
+  const { result, unresolved } = opts;
+  const removed =
+    result.removed.length === 0
+      ? ""
+      : `Removed ${result.removed.length} container${result.removed.length === 1 ? "" : "s"} labeled ${result.label}. `;
+  const unconfirmed =
+    result.unconfirmed.length === 0
+      ? ""
+      : ` Hack also could not verify or confirm the removal of ${result.unconfirmed.length} labeled container${result.unconfirmed.length === 1 ? "" : "s"} (${result.unconfirmed.map((id) => id.slice(0, 12)).join(", ")}).`;
+  return new HackCliError({
+    code: "E_UNEXPECTED",
+    message: `${removed}The ${unresolved.length === 1 ? "create" : "creates"} of ${unresolved.join(", ")} (label ${result.label}) timed out or was interrupted, and no container of ${unresolved.length === 1 ? "that name" : "those names"} with the label has been found. Docker reports no event for a create that fails, so Hack cannot prove the container will not appear later.${unconfirmed} The cleanup record stays until a later \`hack data cleanup --nonce ${result.nonce}\` finds and removes the container.`,
+    detail: { ...result, outcome: "unknown", unresolvedCreates: unresolved },
+  });
 }

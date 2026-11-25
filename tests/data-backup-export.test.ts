@@ -8,6 +8,7 @@ import {
   requireComposeBackendForDataExport,
 } from "../src/commands/data.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
+import { cleanupRecordedRun } from "../src/lib/data-backup-cleanup.ts";
 import type { DataBackupDocker } from "../src/lib/data-backup-docker.ts";
 import {
   type DataExportInput,
@@ -22,6 +23,7 @@ import {
 import { TIMED_OUT_CREATE_LOOKUPS } from "../src/lib/data-backup-held-volume.ts";
 import { refuseRunning } from "../src/lib/data-backup-helper.ts";
 import { planDeclaredVolumes } from "../src/lib/data-backup-volumes.ts";
+import { readDataCleanupRecord } from "../src/lib/data-cleanup-record.ts";
 import {
   COMPOSE,
   FAKE_TIMEOUT_EXIT,
@@ -1881,7 +1883,7 @@ describe("a create whose outcome cannot be reconciled is reported, not hidden", 
   });
 });
 
-describe("a create that timed out is settled only by finding the container", () => {
+describe("a create that timed out is settled only by finding and removing the container", () => {
   /**
    * The bind-hold create times out on the client. `land` says when the
    * daemon registers it: never, or during the Nth lookup by name and nonce
@@ -1897,12 +1899,22 @@ describe("a create that timed out is settled only by finding the container", () 
       /** Which create times out: a bind hold (default) or the start marker. */
       readonly which?: "hold" | "marker";
     }
-  ): { docker: DataBackupDocker; lookups: () => number } {
+  ): {
+    docker: DataBackupDocker;
+    lookups: () => number;
+    /** The daemon registers the timed-out create now (after the run). */
+    land: () => Promise<void>;
+  } {
     const real = fake.docker();
     let pending: readonly string[] | null = null;
     let lookups = 0;
     return {
       lookups: () => lookups,
+      land: async () => {
+        if (pending !== null) {
+          await real.capture(pending);
+        }
+      },
       docker: {
         ...real,
         capture: async (argv, captureOpts) => {
@@ -1944,9 +1956,7 @@ describe("a create that timed out is settled only by finding the container", () 
   const records = (): Promise<string[]> =>
     readdir(join(root, "home", "data-cleanup")).catch(() => []);
 
-  test('a timeout plus "No such container" before the event watch is proven stays unknown; the record stays', async () => {
-    // The start marker's create: the subscription is not proven live yet,
-    // so no settle window can prove the create will not land.
+  test('a start marker\'s timeout plus "No such container" stays unknown; the record stays', async () => {
     const fake = engine({ only: "db" });
     const { docker, lookups } = timedOutCreate(fake, {
       landAtLookup: null,
@@ -1989,14 +1999,15 @@ describe("a create that timed out is settled only by finding the container", () 
     expect(await records()).toEqual([]);
   });
 
-  test("no create event within the window and an empty final listing settle it: the record is deleted", async () => {
+  test("a holder that appears after the window: the run keeps the record as unknown, and a later cleanup removes it", async () => {
+    // "No such container" through every lookup, the whole window and the
+    // final listing; the daemon registers the hold only after the run.
     const fake = engine({ only: "db" });
-    const { docker, lookups } = timedOutCreate(fake, { landAtLookup: null });
+    const { docker, lookups, land } = timedOutCreate(fake, {
+      landAtLookup: null,
+    });
     const error = await caught(exportProjectData({ ...input(fake), docker }));
     expect(lookups()).toBe(TIMED_OUT_CREATE_LOOKUPS);
-    // The step's own refusal, not an unknown outcome.
-    expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
-    expect(JSON.stringify(error.detail ?? {})).not.toContain("unknown");
     // The final listing by label and name ran after the window.
     expect(
       fake.calls.some(
@@ -2006,6 +2017,48 @@ describe("a create that timed out is settled only by finding the container", () 
           argv.some((arg) => arg.startsWith("name=^"))
       )
     ).toBeTrue();
+    const cleanup = (error.detail as { cleanup: Record<string, unknown> })
+      .cleanup;
+    const nonce = String(cleanup.label).split("=")[1] ?? "";
+    expect(cleanup).toEqual({
+      container: null,
+      removed: false,
+      outcome: "unknown",
+      label: `io.hack.data-backup.nonce=${nonce}`,
+      hackCommand: `hack data cleanup --nonce=${nonce}`,
+    });
+    const hackHome = join(root, "home");
+    const before = await readDataCleanupRecord({ hackHome, nonce });
+    expect(before.unresolvedCreates).toHaveLength(1);
+    const [hold] = before.unresolvedCreates ?? [];
+    expect(hold).toMatch(/^hack-data-export-[a-f0-9]{24}$/);
+
+    // A cleanup before it appears keeps the record and names the create.
+    const early = await caught(
+      cleanupRecordedRun({
+        hackHome,
+        record: before,
+        docker: fake.docker(),
+        deadlines: DEADLINES,
+      })
+    );
+    expect(early.code).toBe("E_UNEXPECTED");
+    expect(early.detail).toMatchObject({
+      outcome: "unknown",
+      unresolvedCreates: [hold],
+    });
+    expect(await records()).toEqual([`${nonce}.json`]);
+
+    await land();
+    expect(fake.leftovers()).toHaveLength(1);
+    const result = await cleanupRecordedRun({
+      hackHome,
+      record: await readDataCleanupRecord({ hackHome, nonce }),
+      docker: fake.docker(),
+      deadlines: DEADLINES,
+    });
+    expect(result.removed).toHaveLength(1);
+    expect(fake.leftovers()).toEqual([]);
     expect(await records()).toEqual([]);
   });
 

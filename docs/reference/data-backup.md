@@ -305,15 +305,21 @@ is not settled by one "No such container": the daemon may still register
 it after the client gave up, so Hack looks it up again, five times 400 ms
 apart, each bounded by `HACK_DATA_COMMAND_TIMEOUT_MS`. Only finding it
 (it is then removed by ID with removal confirmed) or finding its name held
-by someone else's container settles it, or a settle window: for 2 seconds
-the run's event subscription (only once its start marker proved it live)
-watches for a container `create` with the run's nonce and that name, and
-then `docker ps -a` lists containers by that label and name. A create event
-or a listed container is found and removed by ID; only a subscription that
-stayed live through the window, no such create and an empty final listing
-settle it as absent. Otherwise the outcome stays unknown and the run's
-cleanup record keeps that create's name. A create that returned without a
-timeout and is absent is settled as absent. Ctrl-C or SIGTERM
+by someone else's container settles it. After the lookups the run waits a
+2-second window in which its event subscription watches for a container
+`create` with the run's nonce and that name, then `docker ps -a` lists
+containers by that label and name; a create event or a listed container is
+found and removed by ID. The window is only a last chance to find the
+container: Docker emits no event for a create that fails or is abandoned
+(checked on Docker 29.9.2: a refused create, such as a missing bind source,
+a missing image or a taken name, emits no event of any type; only a
+successful create emits `create`), so no quiet window or empty listing
+proves the create will not land later. A timed-out or interrupted create
+that was not found therefore stays unknown: the run reports
+`cleanup.outcome: "unknown"` with the label and `hack data cleanup`
+command, and its cleanup record keeps that create's name until a cleanup
+finds and removes it. A create that returned without a timeout and is
+absent is settled as absent. Ctrl-C or SIGTERM
 stops the event subscription, force-removes the run's live helper containers
 by ID and reports
 `E_CANCELLED`; removal is confirmed with a few short retries, since Docker
@@ -422,15 +428,20 @@ removal confirmed; it never removes a volume. A listed container whose
 read-back fails or times out, or whose removal Docker cannot confirm, is
 `unconfirmed`: the command exits 1 with `E_UNEXPECTED`, naming the label,
 and keeps the record for a retry. Only an empty listing is a no-op ("No
-container is labeled …"), which exits 0. Once nothing is unconfirmed the
-record is removed, with one exception: when the record names a create whose
-outcome stayed unknown, an empty listing proves nothing on its own, so
-cleanup watches a label-filtered `docker events` subscription for a
-container `create` with the nonce for 2 seconds and lists once more; a
-container that shows up is removed as usual, and the record is removed only
-when the watch stayed live, saw no create and the final listing is empty.
-Otherwise the record stays and the command exits 1 with `E_UNEXPECTED`
-(`detail.outcome: "unknown"`).
+container is labeled …"), which exits 0. The record is removed only once
+every labeled container's removal is confirmed and no create it names is
+still unresolved. A create the record names (one that timed out or was
+interrupted and was never found) is resolved only when this or an earlier
+cleanup found and removed a container of that exact name with the nonce
+label; Docker reports no event for a create that ended with no container,
+so there is no other way to resolve it, and cleanup does not wait or watch
+for one. While one is unresolved the command removes whatever it found,
+narrows the record to the creates still unresolved, keeps it, and exits 1
+with `E_UNEXPECTED` (`detail.outcome: "unknown"`,
+`detail.unresolvedCreates`), naming each create by container name and the
+nonce label only, and saying the record stays until a later `hack data
+cleanup` finds and removes the container. A record that is never resolved
+stays; a container is never left without one.
 
 A data command never quotes the Docker client's own error line: it names
 the endpoint (a private socket path, a host with userinfo). An engine Hack

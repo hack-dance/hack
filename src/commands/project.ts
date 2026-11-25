@@ -470,6 +470,7 @@ import {
 } from "../lib/logs.ts";
 import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import { nativeAppendRollbackMessage } from "../lib/native-append-cancellation.ts";
+import { withNativeCommandTimings } from "../lib/native-command-timings.ts";
 import {
   readNativeComposeDocument,
   refuseNativeComposeBackendFeatures,
@@ -881,6 +882,20 @@ const upOptions = [
     description: "Mark this project for machine-local autostart and start it",
   } as const),
 ] as const;
+const optCommandTimings = defineOption({
+  name: "timings",
+  type: "boolean",
+  long: "--timings",
+  description: "Native backend: print the command timeline to stderr",
+} as const);
+const optCommandTimingsFile = defineOption({
+  name: "timingsFile",
+  type: "string",
+  long: "--timings-file",
+  valueHint: "<file>",
+  description:
+    "Native backend: write command timing records to a new JSONL file",
+} as const);
 const downOptions = [
   optPath,
   optProject,
@@ -923,6 +938,8 @@ const downOptions = [
     description:
       "Explicitly reconcile an interrupted native stop, or stop the services of a native run whose foreground owner exited, while retaining data",
   } as const),
+  optCommandTimings,
+  optCommandTimingsFile,
 ] as const;
 const restartOptions = [
   optPath,
@@ -958,6 +975,8 @@ const psOptions = [
   optBranch,
   optProfile,
   optJson,
+  optCommandTimings,
+  optCommandTimingsFile,
 ] as const;
 const optWorkdir = defineOption({
   name: "workdir",
@@ -7602,6 +7621,8 @@ async function restartNativeImageProject({
             yes: false,
             recoverNativeCompose: false,
             progress: false,
+            timings: false,
+            timingsFile: undefined,
           },
           positionals: {},
           raw: args.raw,
@@ -9922,6 +9943,17 @@ async function nativeDownRequest(opts: {
 }
 
 async function handleDown(
+  input: Parameters<typeof handleDownUnlocked>[0]
+): Promise<number> {
+  return await withNativeCommandTimings({
+    command: "down",
+    timings: input.args.options.timings,
+    timingsFile: input.args.options.timingsFile,
+    run: () => handleDownSelected(input),
+  });
+}
+
+async function handleDownSelected(
   input: Parameters<typeof handleDownUnlocked>[0]
 ): Promise<number> {
   validateComposeExpectation(input.args.options);
@@ -14206,7 +14238,19 @@ async function maybeManageProjectLogsAfterDown(opts: {
   });
 }
 
-async function handlePs({
+async function handlePs(input: {
+  readonly ctx: CliContext;
+  readonly args: PsArgs;
+}): Promise<number> {
+  return await withNativeCommandTimings({
+    command: "ps",
+    timings: input.args.options.timings,
+    timingsFile: input.args.options.timingsFile,
+    run: () => handlePsSelected(input),
+  });
+}
+
+async function handlePsSelected({
   ctx,
   args,
 }: {

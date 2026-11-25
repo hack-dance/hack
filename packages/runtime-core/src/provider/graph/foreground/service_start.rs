@@ -1,5 +1,19 @@
 //! Requests to the live Compose-file graph owner. Never launch another owner.
 use super::*;
+
+/// The frontend's review of the complete Compose file, before service selection.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CombinedInput {
+    pub plan_id: String,
+    pub normalized_sha256: String,
+}
+
+impl CombinedInput {
+    pub(in crate::provider::graph) fn valid(&self) -> bool {
+        super::super::hex(&self.plan_id, 64) && super::super::hex(&self.normalized_sha256, 64)
+    }
+}
 use crate::project::{NormalizedComposeOptions, PlanOptions, execution::Condition};
 use crate::provider::managed_environment::{self, Managed};
 use serde::{Deserialize, Serialize};
@@ -16,6 +30,7 @@ pub(super) struct ExtendRequest {
     namespace: String,
     original_hash: String,
     plan: String,
+    combined: Option<CombinedInput>,
     compose: transport::PrivateText,
     environment: Option<transport::PrivateText>,
     source_revision: Option<String>,
@@ -37,10 +52,12 @@ pub fn request(
     candidate: &Candidate,
     options: super::super::NormalizedRunOptions<'_>,
     generation: &str,
+    combined: Option<CombinedInput>,
     slots: &BTreeMap<String, super::super::RouteSlot>,
     managed: Option<&Managed>,
 ) -> Result<Value, CandidateError> {
     if !super::super::hex(generation, 64)
+        || combined.as_ref().is_some_and(|input| !input.valid())
         || options.run.timeout.is_zero()
         || options.run.timeout > Duration::from_secs(600)
         || slots
@@ -61,6 +78,7 @@ pub fn request(
         namespace: selection.expected_namespace.into(),
         original_hash: selection.expected_compose_sha256.into(),
         plan: plan.into(),
+        combined,
         compose: transport::PrivateText::from_bytes(selection.compose_bytes)?,
         environment: managed
             .map(|input| transport::PrivateText::from_bytes(&input.forward(plan, run)?))
@@ -134,6 +152,13 @@ pub(super) fn handle(
     if timeout.is_zero() || timeout > Duration::from_secs(600) {
         return Err(refused());
     }
+    if request
+        .combined
+        .as_ref()
+        .is_some_and(|input| !input.valid())
+    {
+        return Err(refused());
+    }
     let managed = request
         .environment
         .as_ref()
@@ -189,6 +214,7 @@ pub(super) fn handle(
         super::super::extend::Selection {
             options,
             generation: &request.generation,
+            combined: request.combined,
             managed: super::super::ManagedInput {
                 values: managed.as_ref().map_or(&values, Managed::values),
                 files: managed.as_ref().map_or(&files, Managed::files),

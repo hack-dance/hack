@@ -81,6 +81,17 @@ impl Fixture {
         for goal in goals {
             args.extend(["--ready", goal]);
         }
+        let routes: Vec<_> = review
+            .plan
+            .plan
+            .services
+            .iter()
+            .filter(|(_, service)| service.active && service.routing.is_some())
+            .map(|(name, _)| format!("{name}=auto"))
+            .collect();
+        for route in &routes {
+            args.extend(["--route-slot", route]);
+        }
         if let Some(generation) = generation {
             args.extend(["--expect-generation", generation]);
         }
@@ -347,6 +358,99 @@ fn normalized_owner_appends_rolls_back_serializes_and_restores() {
         ],
     );
     assert!(reverted.wait(fixture.deadline).success());
+    cleanup.done = true;
+}
+
+#[test]
+#[ignore = "Caller-owned macOS development VM, three free bridge slots, BusyBox HTTP image and external watchdog"]
+fn routed_append_rolls_back_route_and_port_and_releases_hostname_for_retry() {
+    let fixture = Fixture {
+        candidate: Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap()))
+            .unwrap(),
+        binary: PathBuf::from(std::env::var("HACK_LOCAL_TEST_BINARY").unwrap()),
+        project: graph::tests::Fixture::new(),
+        inputs: graph::tests::Fixture::new(),
+        run: graph::probes::token().unwrap(),
+        deadline: Instant::now() + Duration::from_secs(150),
+    };
+    let image = std::env::var("HACK_LOCAL_TEST_IMAGE").unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let web_host = format!("web-{}.hack", &fixture.run[..12]);
+    let appended_host = format!("added-{}.hack", &fixture.run[..12]);
+    let route = |hostname: &str| {
+        json!({"image":image,"user":"0:0","init":true,
+            "entrypoint":["/bin/sh","-ec","printf ok >/tmp/index.html; exec httpd -f -p 3000 -h /tmp"],"command":[],
+            "stop_grace_period":"1s",
+            "labels":{"caddy":hostname,"caddy.reverse_proxy":"{{upstreams 3000}}","caddy.tls":"internal"}})
+    };
+    let web = route(&web_host);
+    let mut added = route(&appended_host);
+    added["ports"] = json!([format!("127.0.0.1:{}:3000", address.port())]);
+    let slow = json!({"image":image,"user":"0:0","entrypoint":["/bin/sleep","120"],
+        "command":[],"stop_grace_period":"1s",
+        "depends_on":{"added":{"condition":"service_healthy"}}});
+    let networks = json!({"default":{"internal":true}});
+    let original = json!({"services":{"web":web},"networks":networks});
+    let attempt = json!({"services":{"added":added,"slow":slow},"networks":networks});
+    fs::write(
+        fixture.project.0.join("compose.yaml"),
+        json!({"services":{"web":web,"added":added,"slow":slow},"networks":networks}).to_string(),
+    )
+    .unwrap();
+    let mut owner = fixture.start("serve", &fixture.review(&original), &["web=healthy"], None);
+    let mut cleanup = Cleanup {
+        binary: &fixture.binary,
+        candidate: &fixture.candidate,
+        run: &fixture.run,
+        done: false,
+    };
+    let before = fixture.receipt();
+    let generation = graph::service_exec_generation(&before).unwrap();
+    let lookup =
+        |hostname| crate::provider::publication::lookup_hostname(&fixture.candidate, hostname);
+    let web_claim = lookup(&web_host).unwrap();
+    let mut client = fixture.start(
+        "extend",
+        &fixture.review(&attempt),
+        &["added=healthy", "slow=completed"],
+        Some(&generation),
+    );
+    fixture.wait_started_append("slow");
+    assert_eq!(lookup(&appended_host).unwrap()["run"], fixture.run);
+    assert!(std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2)).is_ok());
+    client.child.kill().unwrap();
+    client.wait(fixture.deadline);
+    let restored = loop {
+        let current = fixture.receipt();
+        if current.extending.is_empty() {
+            break current;
+        }
+        assert!(Instant::now() < fixture.deadline, "route rollback deadline");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(!restored.resources.contains_key("container:added"));
+    assert_eq!(
+        restored.resources["container:web"].id,
+        before.resources["container:web"].id
+    );
+    assert_eq!(lookup(&web_host).unwrap(), web_claim);
+    assert!(lookup(&appended_host).is_err());
+    assert!(std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2)).is_err());
+
+    let retry = fixture.review(&json!({"services":{"added":added},"networks":networks}));
+    let generation = graph::service_exec_generation(&restored).unwrap();
+    let mut client = fixture.start("extend", &retry, &["added=healthy"], Some(&generation));
+    assert_eq!(
+        result(&mut client, fixture.deadline, true)["started"],
+        json!(["added"])
+    );
+    assert_eq!(lookup(&appended_host).unwrap()["run"], fixture.run);
+    assert!(std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2)).is_ok());
+    assert_eq!(lookup(&web_host).unwrap(), web_claim);
+    fixture.graph("cleanup");
+    assert!(owner.wait(fixture.deadline).success());
     cleanup.done = true;
 }
 

@@ -113,6 +113,7 @@ import {
   discoverNativeHostDependency,
   discoverNativeOwnedHostDependency,
   type NativeDependencyWaitProgress,
+  type NativeHostDependency,
   nativeDependencyStartupWait,
   prepareNativeDependencyServices,
   readNativeHostDependencies,
@@ -3005,6 +3006,144 @@ function nativeExtensionServiceSet(
   return value;
 }
 
+/** Review the same full normalized model a later plain up will review.
+ * Only pin images already owned or resolved by this attempt. An unrelated,
+ * unsupported or absent service cannot block the requested start.
+ */
+async function nativeCombinedExtensionInput(opts: {
+  readonly start: NativeProjectStartOptions;
+  readonly deps: Pick<
+    Dependencies,
+    "prepare" | "review" | "adaptAws" | "adaptGcloud" | "warn" | "invoke"
+  >;
+  readonly pinned: NativeProjectInput;
+  readonly selection: Awaited<
+    ReturnType<typeof selectNativeStartup>
+  >["selection"];
+  readonly metadata?: NativeRuntimeMetadataSelection;
+  readonly adaptationFile?: string;
+  readonly dependencyFile?: string;
+  readonly profiles: readonly string[];
+  readonly hostDependencies: readonly NativeHostDependency[];
+  readonly currentImages: ReadonlyMap<string, string>;
+  readonly specs: Readonly<Record<string, Record<string, unknown>>>;
+}): Promise<readonly string[]> {
+  const { start, deps, selection, profiles } = opts;
+  try {
+    let full = await deps.prepare({
+      ...start.scope,
+      composeFile: start.composeFile,
+      envName: selection.envName,
+      profiles,
+      env: process.env,
+    });
+    if (full.originalSha256 !== opts.pinned.originalSha256) {
+      return [];
+    }
+    full = await prepareNativeProjectAdaptation({
+      input: full,
+      path: opts.adaptationFile,
+    });
+    full = applyNativeInternalHostAliases({
+      input: full,
+      hosts: start.internalExtraHosts,
+      sources: start.internalExtraHostSources,
+      hasDependencySelection: start.dependencyFile !== undefined,
+    });
+    full = (
+      await prepareNativeReviewBranch({
+        runtime: start.runtime,
+        scope: start.scope,
+        composeFile: start.composeFile,
+        input: full,
+      })
+    ).input;
+    const credentials = await adaptNativeCredentials({
+      input: full,
+      selection,
+      deps,
+    });
+    credentials.cancelExpiry?.();
+    full = credentials.input;
+    if (opts.metadata) {
+      full = applyNativeRuntimeMetadata({
+        input: full,
+        selection: opts.metadata,
+        branch: start.scope.branch,
+        httpsPort: start.https?.httpsPort ?? null,
+      }).input;
+    }
+    const compose: unknown = JSON.parse(full.normalizedComposeJson);
+    if (!(isRecord(compose) && isRecord(compose.services))) {
+      return [];
+    }
+    const current = new Set(opts.currentImages.keys());
+    const active = new Set<string>();
+    for (const [name, spec] of Object.entries(compose.services)) {
+      if (!isRecord(spec)) {
+        return [];
+      }
+      if (!nativeServiceActive(spec, profiles)) {
+        continue;
+      }
+      const image = opts.currentImages.get(name) ?? opts.specs[name]?.image;
+      if (typeof image !== "string" || !IMAGE.test(image)) {
+        return [];
+      }
+      current.delete(name);
+      active.add(name);
+      spec.image = image;
+    }
+    // A targeted profile outside plain up, or a service removed from the file,
+    // needs a later reconciliation rather than exact restore.
+    if (
+      current.size > 0 ||
+      Object.keys(opts.specs).some((name) => !active.has(name))
+    ) {
+      return [];
+    }
+    full = { ...full, normalizedComposeJson: JSON.stringify(compose) };
+    const services = prepareNativeProjectServices(
+      full,
+      opts.dependencyFile !== undefined,
+      new Set(
+        Object.entries(compose.services)
+          .filter(([, spec]) => isRecord(spec) && spec.build !== undefined)
+          .map(([name]) => name)
+      )
+    );
+    prepareNativeDependencyServices({
+      dependencies: opts.hostDependencies,
+      services,
+    });
+    const normalizedComposeJson = JSON.stringify({ ...compose, services });
+    const normalized = createHash("sha256")
+      .update(normalizedComposeJson)
+      .digest("hex");
+    return await deps.review({
+      runtime: start.runtime,
+      projectRoot: start.scope.projectRoot,
+      composeFile: start.composeFile,
+      profiles,
+      branch: start.scope.branch,
+      input: { ...full, normalizedComposeJson },
+      invoke: deps.invoke,
+      run: async (review) =>
+        isRecord(review.report.plan) &&
+        review.report.plan.compose_sha256 === normalized
+          ? [
+              "--combined-plan",
+              review.planId,
+              "--combined-normalized-sha256",
+              normalized,
+            ]
+          : [],
+    });
+  } catch {
+    return [];
+  }
+}
+
 async function extendNativeProjectGraph({
   opts,
   deps,
@@ -3014,6 +3153,7 @@ async function extendNativeProjectGraph({
   cacheFlags,
   routeFlags,
   readinessArgs,
+  combined,
   budgetSeconds,
   progress,
   signal,
@@ -3029,6 +3169,7 @@ async function extendNativeProjectGraph({
   readonly cacheFlags: readonly string[];
   readonly routeFlags: readonly string[];
   readonly readinessArgs: readonly string[];
+  readonly combined: readonly string[];
   readonly budgetSeconds: number;
   readonly progress: ReturnType<typeof progressReporter>;
   readonly signal: AbortSignal;
@@ -3061,6 +3202,7 @@ async function extendNativeProjectGraph({
         review.planId,
         "--expect-generation",
         extension.generation,
+        ...combined,
         ...nativeSharedSourceFlags(review.report.plan),
         ...cacheFlags,
         ...readinessArgs,
@@ -3725,6 +3867,20 @@ async function startNativeProjectAttempt(
           opts.startTimeoutSeconds
         );
         if (extension) {
+          const combined = await nativeCombinedExtensionInput({
+            start: opts,
+            deps,
+            pinned,
+            selection,
+            metadata: runtimeMetadata,
+            adaptationFile: selectedAdaptationFile,
+            dependencyFile: selectedDependencyFile,
+            profiles,
+            hostDependencies,
+            currentImages: extension.images,
+            specs,
+          });
+          requireActiveStartup(controller.signal);
           return await extendNativeProjectGraph({
             opts,
             deps,
@@ -3734,6 +3890,7 @@ async function startNativeProjectAttempt(
             cacheFlags: cache.flags,
             routeFlags: routes.flags,
             readinessArgs,
+            combined,
             budgetSeconds,
             progress,
             signal: controller.signal,

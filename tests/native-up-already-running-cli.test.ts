@@ -307,30 +307,6 @@ test(
 );
 
 test(
-  "plain up attempts to start an active service absent from a partial ready run",
-  async () => {
-    const f = await fixture({
-      phase: "ready-observed",
-      services: { web: { state: "running" } },
-      owner: LIVE_OWNER,
-    });
-    await writeFile(
-      join(f.projectDir, "docker-compose.yml"),
-      JSON.stringify({
-        services: { web: { image: IMAGE }, db: { image: IMAGE } },
-      })
-    );
-    // This fixture stops at retained preflight. Reaching it shows the
-    // launcher handed the missing service to startup instead of returning.
-    const result = await up(f, ["-d", "--json"]);
-    expect(result.code).toBe(1);
-    expect(await f.calls()).toContain("graph retained-preflight");
-    expect(JSON.parse(result.stdout).ok).toBe(false);
-  },
-  SPAWN_TIMEOUT_MS
-);
-
-test(
   "a running project with a service that is down says which, and what to run, instead of 'not confirmed'",
   async () => {
     const f = await fixture({
@@ -455,7 +431,7 @@ test("only a live, ready graph whose owner answers counts as already running", (
       ...started,
       items: [item("web", { state: "exited", code: 1, readiness: "healthy" })],
     })
-  ).toEqual({ kind: "partial", down: ["web"] });
+  ).toEqual({ kind: "partial", down: ["web"], resumable: false });
   // A completion job still running in a warming run is warming, not down.
   expect(
     classifyNativeAlreadyRunning({
@@ -486,7 +462,7 @@ test("only a live, ready graph whose owner answers counts as already running", (
         }),
       ],
     })
-  ).toEqual({ kind: "partial", down: ["web"] });
+  ).toEqual({ kind: "partial", down: ["web"], resumable: false });
   // Anything short of a confirmed ready graph launches as before, so a start
   // that is genuinely unconfirmed still reports its own reason.
   for (const other of [
@@ -523,6 +499,7 @@ test("only a live, ready graph whose owner answers counts as already running", (
     })
   ).toEqual({
     kind: "partial",
+    resumable: false,
     down: [
       "clean-exit",
       "gone",
@@ -621,7 +598,10 @@ test(
 test("project and branch selection are preserved in the one working recovery command", async () => {
   const f = await fixture({
     phase: "ready-observed",
-    services: { web: { state: "running" }, db: { state: "exited", code: 0 } },
+    services: {
+      web: { state: "running" },
+      db: { state: "running", health: "unhealthy" },
+    },
     owner: LIVE_OWNER,
     branch: "preview",
   });

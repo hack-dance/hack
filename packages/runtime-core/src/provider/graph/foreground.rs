@@ -22,6 +22,8 @@ mod lifetime_tests;
 mod retained_data;
 mod service_start;
 pub(in crate::provider::graph) mod signals;
+#[cfg(target_os = "macos")]
+pub use service_start::CombinedInput as CombinedExtensionInput;
 pub use service_start::request as extend_request;
 #[cfg(test)]
 mod tests;
@@ -311,10 +313,10 @@ fn serve_input<'a>(
         if !files.is_empty() {
             super::pending_environments(&compiled, files, deadline)?;
         }
-        runtime.extension_input = Some(super::extend::Input::read(
-            compose,
-            &compiled.executable.review.plan,
-        )?);
+        // Authored spec comparison is advisory. Normalized admission already
+        // verified the actual input and its binding to the source file.
+        runtime.extension_input =
+            super::extend::Input::read(compose, &compiled.executable.review.plan).ok();
     } else if !managed.is_empty() || !files.is_empty() {
         // Refuse invalid scoped ownership or payload before publishing an owner.
         // Runtime admission compiles again to detect intervening project changes.
@@ -534,16 +536,7 @@ fn serve_input<'a>(
             }
             if queued.is_none() && supervise_restarts && Instant::now() >= restart_tick {
                 publication.verify()?;
-                let (current, _) = super::load_at(
-                    super::directory(candidate, &receipt.run)?,
-                    &receipt.run,
-                    &receipt.owner,
-                )?;
-                // An unconfirmed append may own a partially retired bridge.
-                // Keep the owner serving status and down until that set is cleaned.
-                if current.extending.is_empty() {
-                    publishers.supervise_restarts(candidate, &receipt.run, &signals)?;
-                }
+                publishers.supervise_restarts(candidate, &receipt.run, &signals)?;
                 restart_tick = Instant::now() + Duration::from_secs(1);
             }
             if queued.is_none() && runtime.drain_dependency_notifications()? {

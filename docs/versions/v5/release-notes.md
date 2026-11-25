@@ -64,6 +64,11 @@ a downgrade to a runtime that rejects the new receipt field, build-image
 reclamation skips cleanup when it encounters those receipts. Upgrade to the
 newer runtime to reclaim the images.
 
+### Native run receipts and downgrades
+
+After this version, older prereleases cannot read run receipts. Run `hack down`
+before downgrading.
+
 ### Native build contexts
 
 Native builds exclude machine-local `.hack/` state, including generated Compose

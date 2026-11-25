@@ -98,7 +98,8 @@ fn ordinary_layout(receipt: &Receipt, plan: &project::PlanData) -> bool {
     recorded.len() == declared.len()
         && declared.iter().enumerate().all(|(index, key)| {
             recorded.get(key).is_some_and(|resource| {
-                resource.cache.is_some()
+                receipt.input_plan_id.is_some()
+                    || resource.cache.is_some()
                     || resource.name == format!("{}{index}", volume_prefix(&receipt.run))
             })
         })

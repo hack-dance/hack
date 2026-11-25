@@ -110,6 +110,15 @@ if [ -f '${stub}/'"$3-$4"'.hold' ]; then
   exec sleep 20
 fi
 printf '%s\\n' "$*" >> '${stub}/calls'
+if [ "$3-$4" = project-plan ] && [ -f '${stub}/normalized-plan.ts' ]; then
+  previous=
+  for flag in "$@"; do
+    if [ "$previous" = --normalized-file ]; then
+      exec '${process.execPath}' '${stub}/normalized-plan.ts' "$flag"
+    fi
+    previous="$flag"
+  done
+fi
 if [ -f '${stub}/'"$3-$4"'.out' ]; then
   if [ -f '${stub}/'"$3-$4"'.after-inspect' ]; then cp '${stub}/'"$3-$4"'.after-inspect' '${stub}/graph-inspect.out'; fi
   cat '${stub}/'"$3-$4"'.out'; exit 0
@@ -132,11 +141,12 @@ exit 1
       join(stub, `${request.replace(" ", "-")}.err`),
       JSON.stringify(failure)
     );
-  const calls = async () =>
+  const argv = async () =>
     (await readFile(join(stub, "calls"), "utf8").catch(() => ""))
       .split("\n")
-      .filter(Boolean)
-      .map((line) => line.split(" ").slice(2, 4).join(" "));
+      .filter(Boolean);
+  const calls = async () =>
+    (await argv()).map((line) => line.split(" ").slice(2, 4).join(" "));
   const env = (extra: Record<string, string> = {}) =>
     privateCliEnv({
       root,
@@ -164,6 +174,7 @@ exit 1
     scope,
     binary,
     compose,
+    argv,
     reply,
     fail,
     finishOn,
@@ -244,6 +255,134 @@ async function scriptUpThroughReview(
 }
 
 const SHARED = { HACK_NATIVE_SHARED_SOURCE: "1" };
+
+test.each(["missing", "exited"] as const)(
+  "plain native up reaches the owner extension for %s services",
+  async (state) => {
+    const image = `sha256:${"e".repeat(64)}`;
+    // Bun accepts the authored tag and delivers tag-free normalized JSON.
+    const f = await fixture(
+      `x-example: !override fixture\nservices:\n  web: {init: true, image: ${image}}\n  redis: {init: true, image: ${image}}\n`
+    );
+    const services = state === "missing" ? ["web"] : ["web", "redis"];
+    const receipt = {
+      run: run.run,
+      owner: run.owner,
+      namespace: run.namespace,
+      plan_id: run.planId,
+      phase: "ready-observed",
+      relay_startup: {},
+      readiness: Object.fromEntries(services.map((name) => [name, "started"])),
+      resources: Object.fromEntries(
+        services.map((name) => [
+          `container:${name}`,
+          {
+            kind: "container",
+            key: name,
+            phase: "started",
+            id: "9".repeat(64),
+          },
+        ])
+      ),
+    };
+    await saveNativeProjectRun({ ...f.scope, run });
+    const snapshot = {
+      journal_incomplete: false,
+      receipt,
+      observations: Object.fromEntries(
+        services.map((name) => [
+          `container:${name}`,
+          state === "exited"
+            ? { state: "exited", code: 0 }
+            : { state: "running", health: "none" },
+        ])
+      ),
+    };
+    await f.reply("graph inspect", snapshot);
+    await f.reply("graph status", snapshot);
+    await f.fail("graph retained-preflight", {
+      code: "graph_foreground_owner_running",
+    });
+    await f.reply("graph owner-status", {
+      ok: true,
+      run: run.run,
+      plan: run.planId,
+      phase: receipt.phase,
+      foreground_alive: true,
+      runtime_verified: true,
+      generation: "1".repeat(64),
+      service_images: Object.fromEntries(services.map((name) => [name, image])),
+    });
+    await f.reply("runtime status", { phase: "running", process_alive: true });
+    await scriptUpThroughReview(f, {
+      services: { web: { active: true }, redis: { active: true } },
+    });
+    await writeFile(
+      join(f.root, "stub", "normalized-plan.ts"),
+      `const content = await Bun.file(Bun.argv[2]).text();
+const hash = new Bun.CryptoHasher("sha256").update(content).digest("hex");
+const { services } = JSON.parse(content);
+await Bun.write(new URL("./normalized-" + hash + ".json", import.meta.url), content);
+console.log(JSON.stringify({
+  plan_id: hash,
+  start_refusals: [],
+  plan: {
+    namespace: "${run.namespace}",
+    compose_sha256: hash,
+    enrollment_compatible: true,
+    services: Object.fromEntries(Object.keys(services).map(name => [name, {active: true}]))
+  }
+}));`
+    );
+    const started = state === "exited" ? ["redis", "web"] : ["redis"];
+    await f.reply("graph extend", {
+      ok: true,
+      phase: receipt.phase,
+      started,
+      changed: [],
+      receipt,
+    });
+    const result = await cli({
+      fixture: f,
+      args: ["up", "-d", "--json"],
+      env: SHARED,
+    });
+    expect(result.code, result.output).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: true,
+      data: { services: { started } },
+    });
+    const calls = await f.calls();
+    expect(calls.filter((call) => call === "graph extend")).toHaveLength(1);
+    const append = (await f.argv()).find((line) =>
+      line.includes(" graph extend ")
+    );
+    const fullHash = append?.match(
+      /--combined-plan ([a-f0-9]{64}) --combined-normalized-sha256 \1/
+    )?.[1];
+    if (!fullHash) {
+      throw new Error(
+        "Expected the full normalized review in the append request"
+      );
+    }
+    const normalized = await readFile(
+      join(f.root, "stub", `normalized-${fullHash}.json`),
+      "utf8"
+    );
+    const full = JSON.parse(normalized);
+    expect(full).toMatchObject({
+      "x-example": "fixture",
+      services: { web: { init: true, image }, redis: { init: true, image } },
+    });
+    expect(Object.keys(full.services)).toEqual(["web", "redis"]);
+    expect(createHash("sha256").update(normalized).digest("hex")).toBe(
+      fullHash
+    );
+    expect(calls).not.toContain("graph serve");
+    expect(calls).not.toContain("runtime up");
+  },
+  SPAWN_TIMEOUT_MS
+);
 
 test(
   "targeted native up refuses an unknown service before any graph request",

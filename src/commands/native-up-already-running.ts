@@ -59,7 +59,11 @@ export type NativeAlreadyRunning =
       readonly readiness: "warming" | "ready";
     }
   /** The graph is live and ready, but these services are not up. */
-  | { readonly kind: "partial"; readonly down: string[] };
+  | {
+      readonly kind: "partial";
+      readonly down: string[];
+      readonly resumable: boolean;
+    };
 
 /** Byte-wise order, so output does not depend on the caller's locale. */
 function byCodePoint(a: string, b: string): number {
@@ -118,14 +122,19 @@ export function classifyNativeAlreadyRunning(
     "started" | "completed" | "warming" | "down",
     string[]
   >;
+  let resumable = !startedRun;
   for (const item of result.items) {
-    by[classifyItem(item, startedRun)].push(item.service);
+    const status = classifyItem(item, startedRun);
+    by[status].push(item.service);
+    if (status === "down" && item.state !== "exited") {
+      resumable = false;
+    }
   }
   if (result.items.length === 0) {
     return { kind: "launch" };
   }
   return by.down.length > 0
-    ? { kind: "partial", down: by.down.sort(byCodePoint) }
+    ? { kind: "partial", down: by.down.sort(byCodePoint), resumable }
     : {
         kind: "running",
         started: by.started.sort(byCodePoint),
@@ -136,9 +145,7 @@ export function classifyNativeAlreadyRunning(
 }
 
 /**
- * Native `up` starts a whole project and cannot start part of a running one.
- * Naming the services and the commands that do work replaces the launcher's
- * generic refusal; nothing was started or stopped.
+ * A running service with an unmet goal cannot be resumed in place.
  */
 export function nativePartiallyRunningRefusal(
   down: readonly string[],
@@ -146,7 +153,7 @@ export function nativePartiallyRunningRefusal(
 ): HackCliError {
   return new HackCliError({
     code: "E_STARTUP_INCOMPLETE",
-    message: `Native project is already running, but these services have not reached their required state: ${down.join(", ")}. Native up cannot start part of a running project: run ${restartCommand}. Nothing was started or stopped.`,
+    message: `Native project is already running, but these services have not reached their required state: ${down.join(", ")}. To start them again, run ${restartCommand}. Nothing was started or stopped.`,
   });
 }
 
@@ -407,6 +414,9 @@ export async function answerNativeAlreadyRunning(opts: {
     });
   }
   if (observed.state.kind === "partial") {
+    if (observed.state.resumable) {
+      return null;
+    }
     throw nativePartiallyRunningRefusal(observed.state.down, restartCommand);
   }
   if (observed.state.kind === "running") {

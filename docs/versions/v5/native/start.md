@@ -131,14 +131,19 @@ running pool. Hack checks capacity before recording or creating the selected
 services. Adding host relay bindings still requires a fresh graph start.
 
 On failure, the owner tries to remove the new resources and returns previously
-stopped services to their prior state. If it cannot confirm rollback, `hack ps`
-reports a degraded run and shows the service states it can verify. Ctrl-C
+stopped services to a stopped state with their routes and loopback ports closed.
+A retry can start and publish those services again. If the owner cannot confirm
+rollback, `hack ps` reports a degraded run and shows the service states it can
+verify. Restart supervision continues for services outside the failed start. Ctrl-C
 cancels the targeted start. `hack down` cancels the start and stops the whole
 run, including any service created midway. If the owner exited, use
 `hack down --recover`. The committed receipt records the resource names
 needed for cleanup, including when a create reply was lost. After ordinary
 `down`, `ps` shows `stopped-data-retained`. A later `up` reattaches the named
 data that the reviewed configuration still uses.
+
+After this version, older prereleases cannot read run receipts. Run `hack down`
+before downgrading.
 
 **Build base registry refusal (`registry_image`).** Foreground and detached
 starts can report `Image unavailable: could not resolve build base` when the

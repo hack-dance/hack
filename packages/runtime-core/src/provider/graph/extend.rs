@@ -10,7 +10,7 @@ use std::{path::Path, time::Instant};
 #[cfg(target_os = "macos")]
 pub(super) struct Input {
     document: Value,
-    authored: BTreeMap<String, String>,
+    authored: Option<BTreeMap<String, String>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -25,28 +25,26 @@ impl Input {
                 "Compose input changed before the owner could record it.",
             ));
         }
-        let original = project::yaml::parse(&bytes)?;
-        let authored = original["services"]
-            .as_object()
-            .ok_or_else(|| refused("The authored Compose services are missing."))?
-            .iter()
-            .map(|(service, spec)| (service.clone(), digest(spec.to_string().as_bytes())))
-            .collect();
         Ok(Self {
             document: project::yaml::parse(compose.compose_bytes)?,
-            authored,
+            authored: authored_digests(&bytes),
         })
     }
 
     fn combine(&self, next: Self, added: &BTreeMap<String, Value>) -> Result<Self, CandidateError> {
         let mut document = self.document.clone();
-        let mut authored = self.authored.clone();
+        let mut authored = self.authored.clone().filter(|_| next.authored.is_some());
         let services = document["services"]
             .as_object_mut()
             .ok_or_else(|| refused("The owner's normalized services are missing."))?;
         for name in added.keys() {
             services.insert(name.clone(), next.document["services"][name].clone());
-            if let Some(spec) = next.authored.get(name) {
+            if let Some(authored) = &mut authored
+                && let Some(spec) = next
+                    .authored
+                    .as_ref()
+                    .and_then(|services| services.get(name))
+            {
                 authored.insert(name.clone(), spec.clone());
             }
         }
@@ -69,7 +67,19 @@ impl Input {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
+fn authored_digests(bytes: &[u8]) -> Option<BTreeMap<String, String>> {
+    let original = project::yaml::parse(bytes).ok()?;
+    Some(
+        original["services"]
+            .as_object()?
+            .iter()
+            .map(|(service, spec)| (service.clone(), digest(spec.to_string().as_bytes())))
+            .collect(),
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn digest(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", crate::Hex(Sha256::digest(bytes)))
@@ -113,6 +123,7 @@ fn select_resources(prepared: &mut config::Prepared, existing: &BTreeSet<String>
 pub(super) struct Selection<'a> {
     pub options: NormalizedRunOptions<'a>,
     pub generation: &'a str,
+    pub combined: Option<super::foreground::CombinedExtensionInput>,
     pub managed: ManagedInput<'a>,
     pub deadline: Instant,
 }
@@ -136,6 +147,7 @@ pub(super) fn run(
     let Selection {
         options,
         generation,
+        combined: full_identity,
         managed,
         deadline,
     } = selected;
@@ -242,13 +254,15 @@ pub(super) fn run(
             ));
         }
     }
-    let previous_input = startup
-        .extension_input
-        .as_ref()
-        .ok_or_else(|| refused("The live owner has no normalized Compose input to extend."))?;
+    let previous_input = startup.extension_input.as_ref();
+    let authored = previous_input
+        .and_then(|previous| previous.authored.as_ref())
+        .zip(next_input.authored.as_ref());
     let changed = existing
         .iter()
-        .filter(|name| previous_input.authored.get(*name) != next_input.authored.get(*name))
+        .filter(|name| {
+            authored.is_some_and(|(before, after)| before.get(*name) != after.get(*name))
+        })
         .cloned()
         .collect();
     select_resources(&mut prepared, &owned);
@@ -259,19 +273,41 @@ pub(super) fn run(
             changed,
         });
     }
-    let combined = previous_input.combine(next_input, &prepared.configs)?;
-    let bytes = combined.document.to_string();
-    let combined_plan = project::plan_normalized(
-        candidate,
-        project::NormalizedComposeOptions {
-            compose_bytes: bytes.as_bytes(),
-            ..options.compose
-        },
-    )?;
+    // The whole-file review can describe the live run only if the definitions
+    // of its already-owned containers still match the admitted declarations.
+    let full_identity = full_identity.filter(|_| {
+        authored.is_some_and(|(previous, next)| {
+            receipt.readiness.keys().all(|name| {
+                previous
+                    .get(name)
+                    .is_some_and(|digest| next.get(name) == Some(digest))
+            })
+        })
+    });
+    let combined = if let Some(previous) = previous_input {
+        previous.combine(next_input, &prepared.configs)?
+    } else {
+        next_input
+    };
+    let (input_plan_id, normalized_sha256) = if let Some(full) = full_identity {
+        (full.plan_id, full.normalized_sha256)
+    } else {
+        // A partial or changed graph is intentionally distinct from the whole
+        // file. The later restore must reconcile its resources to that review.
+        let bytes = combined.document.to_string();
+        let plan = project::plan_normalized(
+            candidate,
+            project::NormalizedComposeOptions {
+                compose_bytes: bytes.as_bytes(),
+                ..options.compose
+            },
+        )?;
+        (plan.plan_id, plan.plan.compose_sha256)
+    };
     let combined_identity = NormalizedInputIdentity {
         namespace: receipt.namespace.clone(),
         original_compose_sha256: options.compose.expected_compose_sha256.to_owned(),
-        normalized_compose_sha256: combined_plan.plan.compose_sha256,
+        normalized_compose_sha256: normalized_sha256,
     };
     let bridge_count = prepared
         .resources
@@ -281,6 +317,7 @@ pub(super) fn run(
     bridges::check_extension_capacity(candidate, &engine, &receipt, &resuming, bridge_count)?;
     environments.retain(|service, _| !owned.contains(service));
     let mut new_storage = Vec::new();
+    let mut existing_volumes = Vec::new();
     for (key, resource) in prepared.resources {
         if let Some(owned) = receipt.resources.get(&key) {
             if owned.name != resource.name
@@ -293,7 +330,7 @@ pub(super) fn run(
                 ));
             }
             if owned.kind == Kind::Volume {
-                volume_subpaths::prepare(&engine, &receipt, owned, &prepared.configs, false)?;
+                existing_volumes.push(key);
             }
         } else {
             if resource.kind != Kind::Container {
@@ -356,9 +393,6 @@ pub(super) fn run(
     } else {
         Some(launcher::publish(&engine)?)
     };
-    receipt
-        .probes
-        .extend(probes::fresh(&engine, &prepared.configs, prepared.probes)?);
     if receipt.source.is_none() {
         receipt.source = source.map(|source| source.binding);
     }
@@ -389,6 +423,23 @@ pub(super) fn run(
     // Keep the active phase and all old entries until the extension commits.
     session.save()?;
     let result = (|| {
+        for key in existing_volumes {
+            session.check_cancelled()?;
+            volume_subpaths::prepare(
+                &session.engine,
+                &session.receipt,
+                &session.receipt.resources[&key],
+                &session.configs,
+                false,
+            )?;
+        }
+        session.check_cancelled()?;
+        session.receipt.probes.extend(probes::fresh(
+            &session.engine,
+            &session.configs,
+            prepared.probes,
+        )?);
+        session.save()?;
         if !resuming.is_empty() {
             session.check_cancelled()?;
             bridges::release_extension(candidate, &session.engine, &session.receipt, &resuming)?;
@@ -428,7 +479,7 @@ pub(super) fn run(
             .ok_or_else(|| refused("Targeted start requires the owner's publication set."))?;
         publications.verify_extension(candidate, &receipt)?;
         receipt.normalized_input = Some(combined_identity);
-        receipt.input_plan_id = Some(combined_plan.plan_id);
+        receipt.input_plan_id = Some(input_plan_id);
         receipt.extending.clear();
         state::write(&root.join("state.json"), &receipt)?;
         Ok(templates)
@@ -447,6 +498,10 @@ pub(super) fn run(
             // On uncertain rollback leave the full journal and all authority
             // with the owner. A later down can clean both resource sets.
             if rollback(candidate, &engine, &root, &before).is_ok() {
+                // Successful rollback leaves resumed services stopped and
+                // removes their old publications as well as any replacements.
+                // Reap old handles even if the first retirement attempt failed.
+                startup.resume_publications(&before, &resuming);
                 if let Some(publications) = &mut startup.early_publications {
                     publications.mark_rolled_back();
                 }
@@ -546,6 +601,14 @@ fn rollback(
 mod tests {
     use super::*;
     use std::{os::unix::fs::PermissionsExt, path::Path};
+
+    #[test]
+    fn tags_in_authored_input_skip_optional_change_digests() {
+        let authored = b"x-example: !override fixture\nservices: {web: {image: alpine}}";
+        assert!(authored_digests(authored).is_none());
+        let normalized = br#"{"x-example":"fixture","services":{"web":{"image":"alpine"}}}"#;
+        assert_eq!(authored_digests(normalized).unwrap().len(), 1);
+    }
 
     #[test]
     fn targeted_ownership_preserves_running_ids_and_recovers_lost_create_reply() {

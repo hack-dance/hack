@@ -278,14 +278,7 @@ fn inspect_targets_scoped(
     {
         return Ok(targets);
     }
-    let mut networks = BTreeMap::new();
-    for (key, resource) in receipt
-        .resources
-        .iter()
-        .filter(|(_, r)| r.kind == Kind::Network)
-    {
-        networks.insert(key.clone(), inspect_resource(engine, receipt, resource)?);
-    }
+    let networks = inspect_selected_networks(engine, receipt, services)?;
     let boot = engine.boot_id()?;
     let mut endpoints = BTreeMap::new();
     let mut port_endpoints = BTreeMap::new();
@@ -361,6 +354,32 @@ fn inspect_targets_scoped(
     targets.port_endpoints = port_endpoints;
     targets.pids = pids;
     Ok(targets)
+}
+
+/// Do not make an established publisher depend on the identity of a network
+/// that only belongs to an incomplete extension.
+fn inspect_selected_networks(
+    engine: &impl Inspection,
+    receipt: &Receipt,
+    services: &BTreeSet<&str>,
+) -> Result<BTreeMap<String, Option<Value>>, CandidateError> {
+    let selected = services
+        .iter()
+        .filter_map(|name| receipt.resources.get(&format!("container:{name}")))
+        .map(|resource| resource.networks.as_deref())
+        .collect::<Option<Vec<_>>>()
+        .map(|networks| networks.into_iter().flatten().collect::<BTreeSet<_>>());
+    receipt
+        .resources
+        .iter()
+        .filter(|(_, resource)| {
+            resource.kind == Kind::Network
+                && selected
+                    .as_ref()
+                    .is_none_or(|keys| keys.contains(&resource.key))
+        })
+        .map(|(key, resource)| Ok((key.clone(), inspect_resource(engine, receipt, resource)?)))
+        .collect()
 }
 
 fn matches_endpoint(a: &Assignment, e: &GuestEndpoint, boot: &str) -> bool {

@@ -147,10 +147,22 @@ pub(super) fn command(
                 .get("--expect-generation")
                 .copied()
                 .ok_or_else(invalid)?;
+            let combined = match (
+                singles.get("--combined-plan"),
+                singles.get("--combined-normalized-sha256"),
+            ) {
+                (None, None) => None,
+                (Some(plan), Some(normalized)) => Some(graph::foreground::CombinedExtensionInput {
+                    plan_id: (*plan).to_owned(),
+                    normalized_sha256: (*normalized).to_owned(),
+                }),
+                _ => return Err(invalid()),
+            };
             return graph::foreground::extend_request(
                 candidate,
                 options,
                 generation,
+                combined,
                 route_slots,
                 managed.as_ref(),
             );

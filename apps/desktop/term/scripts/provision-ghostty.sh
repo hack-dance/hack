@@ -20,7 +20,8 @@
 # https://release.files.ghostty.org/libghostty-vt/1.0.1/SHA256SUMS (they match
 # ghostty-vt-sys 0.9.0's GHOSTTY.lock); Zig from
 # https://ziglang.org/download/index.json; the font archive from the Nerd
-# Fonts release's SHA-256.txt, and the font file from that archive. To
+# Fonts release's SHA-256.txt, and the font file from that archive. Zig falls
+# back to community mirrors (see zig_urls); the sha256 gates every source. To
 # change a version, change the URL and the checksum together (the font
 # file's checksum is also pinned in term/build.rs).
 set -euo pipefail
@@ -68,9 +69,24 @@ sha256_of() {
   else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
 
-# fetch NAME URL SHA256: leave a verified DIR/NAME, downloading if needed.
+# One download attempt per source. A stalled transfer (under 50 KB/s for
+# 30 s) or a slow one (over 300 s) fails fast, and every error, including a
+# connection closed mid-transfer (curl 18), is retried twice before the next
+# source is tried. --retry-all-errors needs curl 7.71 or newer; the ubuntu
+# and macOS runners have it.
+curl_get() {
+  curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' \
+    --connect-timeout 15 --speed-limit 51200 --speed-time 30 --max-time 300 \
+    --retry 2 --retry-delay 5 --retry-all-errors -o "$1" "$2"
+}
+
+# fetch NAME SHA256 URL...: leave a verified DIR/NAME, downloading if needed.
+# The URLs are tried in order. Each download must match SHA256; a failed or
+# mismatched download moves on to the next URL, and when none is left the
+# script fails. Nothing unverified is ever kept.
 fetch() {
-  local name=$1 url=$2 want=$3 got
+  local name=$1 want=$2 got url
+  shift 2
   if [[ -f "$dir/$name" ]]; then
     got=$(sha256_of "$dir/$name")
     if [[ "$got" == "$want" ]]; then return 0; fi
@@ -81,16 +97,55 @@ fetch() {
     echo "provision-ghostty: $dir/$name is missing and --offline was given" >&2
     exit 1
   fi
-  echo "provision-ghostty: fetching $name" >&2
-  curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' \
-    --connect-timeout 20 --max-time 600 --retry 3 -o "$dir/$name.partial" "$url"
-  got=$(sha256_of "$dir/$name.partial")
-  if [[ "$got" != "$want" ]]; then
+  for url in "$@"; do
+    echo "provision-ghostty: fetching $name from ${url%%\?*}" >&2
     rm -f -- "$dir/$name.partial"
-    echo "provision-ghostty: sha256 mismatch for $name: got $got, expected $want" >&2
-    exit 1
-  fi
-  mv -f -- "$dir/$name.partial" "$dir/$name"
+    if ! curl_get "$dir/$name.partial" "$url"; then
+      echo "provision-ghostty: download of $name from ${url%%\?*} failed" >&2
+      continue
+    fi
+    got=$(sha256_of "$dir/$name.partial")
+    if [[ "$got" != "$want" ]]; then
+      echo "provision-ghostty: sha256 mismatch for $name from ${url%%\?*}: got $got, expected $want" >&2
+      continue
+    fi
+    mv -f -- "$dir/$name.partial" "$dir/$name"
+    return 0
+  done
+  rm -f -- "$dir/$name.partial"
+  echo "provision-ghostty: could not fetch a verified $name from any source" >&2
+  exit 1
+}
+
+# The Zig sources: ziglang.org, then the community mirrors from
+# https://ziglang.org/download/community-mirrors.txt (pinned here on
+# 2026-11-25 so CI does not depend on ziglang.org to find a mirror). The
+# mirrors start at a random offset so no one mirror takes every fallback.
+# Mirrors are untrusted; the pinned sha256 is what makes their bytes
+# acceptable. HACK_DESKTOP_ZIG_BASE and HACK_DESKTOP_ZIG_MIRRORS (space
+# separated) replace the defaults; they exist to test the fallback.
+zig_mirrors_default="https://pkg.hexops.org/zig https://zigmirror.hryx.net/zig
+https://zig.linus.dev/zig https://zig.squirl.dev https://zig.mirror.mschae23.de/zig
+https://ziglang.freetls.fastly.net https://zig.tilok.dev https://zig-mirror.tsimnet.eu/zig
+https://zig.karearl.com/zig https://pkg.earth/zig https://fs.liujiacai.net/zigbuilds
+https://zigmirror.com https://zig.chainsafe.dev https://zig.savalione.com https://zig.bcr.ist
+https://zig.vortan.dev/zig https://pkg.alexrp.com/zig"
+zig_source_tag=hack-desktop-provision-ghostty
+
+# zig_urls FILE: print ziglang.org's URL for FILE, then each mirror's.
+zig_urls() {
+  local file=$1 m i n start
+  local -a mirrors
+  # shellcheck disable=SC2206 # word splitting on whitespace is intended
+  mirrors=(${HACK_DESKTOP_ZIG_MIRRORS-$zig_mirrors_default})
+  printf '%s\n' "${HACK_DESKTOP_ZIG_BASE:-$zig_base}/$file"
+  n=${#mirrors[@]}
+  [[ $n -gt 0 ]] || return 0
+  start=$((RANDOM % n))
+  for ((i = 0; i < n; i++)); do
+    m=${mirrors[$(((start + i) % n))]}
+    printf '%s\n' "${m%/}/$file?source=$zig_source_tag"
+  done
 }
 
 mkdir -p "$dir"
@@ -98,18 +153,20 @@ dir=$(CDPATH= cd -- "$dir" && pwd -P)
 zig=""
 case "$(uname -s)" in
   Darwin)
-    fetch "$ghostty_xcframework" "$ghostty_base/$ghostty_xcframework" "$ghostty_xcframework_sha"
+    fetch "$ghostty_xcframework" "$ghostty_xcframework_sha" "$ghostty_base/$ghostty_xcframework"
     ;;
   Linux)
-    fetch "$ghostty_source" "$ghostty_base/$ghostty_source" "$ghostty_source_sha"
-    fetch "$ghostty_deps" "$ghostty_base/$ghostty_deps" "$ghostty_deps_sha"
+    fetch "$ghostty_source" "$ghostty_source_sha" "$ghostty_base/$ghostty_source"
+    fetch "$ghostty_deps" "$ghostty_deps_sha" "$ghostty_base/$ghostty_deps"
     case "$(uname -m)" in
       x86_64) zig_arch=x86_64; zig_sha=$zig_sha_x86_64_linux ;;
       aarch64|arm64) zig_arch=aarch64; zig_sha=$zig_sha_aarch64_linux ;;
       *) echo "provision-ghostty: no pinned Zig for $(uname -m)" >&2; exit 2 ;;
     esac
     zig_name="zig-${zig_arch}-linux-${zig_version}"
-    fetch "$zig_name.tar.xz" "$zig_base/$zig_name.tar.xz" "$zig_sha"
+    zig_sources=()
+    while IFS= read -r url; do zig_sources+=("$url"); done < <(zig_urls "$zig_name.tar.xz")
+    fetch "$zig_name.tar.xz" "$zig_sha" "${zig_sources[@]}"
     # Extract once per verified tarball; the stamp records which one.
     if [[ "$(cat "$dir/$zig_name/.provision-sha256" 2>/dev/null || true)" != "$zig_sha" || ! -x "$dir/$zig_name/zig" ]]; then
       rm -rf -- "${dir:?}/$zig_name" "${dir:?}/$zig_name.extract"
@@ -130,7 +187,7 @@ esac
 
 # The symbols font, on every platform: the font file plus the archive's
 # licence and its list of icon-set licences, kept beside it.
-fetch "$nerd_archive" "$nerd_url" "$nerd_archive_sha"
+fetch "$nerd_archive" "$nerd_archive_sha" "$nerd_url"
 nerd_dir="$dir/nerd-fonts-symbols-${nerd_version}"
 if [[ ! -f "$nerd_dir/$nerd_font" || "$(sha256_of "$nerd_dir/$nerd_font")" != "$nerd_font_sha" ]]; then
   rm -rf -- "${nerd_dir:?}" "${nerd_dir:?}.extract"

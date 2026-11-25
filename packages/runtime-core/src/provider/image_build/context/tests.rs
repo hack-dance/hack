@@ -875,17 +875,26 @@ fn synthetic(index: usize) -> String {
 }
 
 #[test]
-fn an_adversarial_ignore_file_refuses_at_parse_quickly() {
-    let started = std::time::Instant::now();
+fn an_adversarial_ignore_file_refuses_at_parse_with_bounded_work() {
     // About 1 MB of `??` rules (the ignore reader's limit), each a valid pattern.
-    let adversarial = "??\n".repeat(349_000);
+    let rule = "??\n";
+    let adversarial = rule.repeat(349_000);
     assert!(adversarial.len() as u64 <= 1024 * 1024);
     let error = ignore::Rules::parse(adversarial.as_bytes()).unwrap_err();
     assert_eq!(error.code, "native_build_ignore_bounds");
-    // The walk refuses it the same way, before examining any entry.
+    // Allow a full line-length scan (including the trailing empty line), then
+    // only enough normalization and compilation to reach the first excess rule.
+    let max_work = adversarial.len() + 1 + (ignore::MAX_RULES + 1) * rule.len();
+    let work = ignore::PARSE_LINE_WORK.get();
+    assert!(
+        (1..=max_work).contains(&work),
+        "line work {work} outside 1..={max_work}"
+    );
+
+    // A missing context would fail to open if the walk touched it before refusing.
     let tree = Tree::new();
     let error = digest(
-        &tree.context(),
+        &tree.context().join("missing"),
         adversarial.as_bytes(),
         None,
         SystemTime::now(),
@@ -894,11 +903,6 @@ fn an_adversarial_ignore_file_refuses_at_parse_quickly() {
     .unwrap_err();
     assert_eq!(error.code, "native_build_ignore_bounds");
     assert!(!error.message.contains("??"));
-    assert!(
-        started.elapsed() < Duration::from_millis(500),
-        "{:?}",
-        started.elapsed()
-    );
 }
 
 #[test]

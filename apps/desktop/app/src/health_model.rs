@@ -495,6 +495,7 @@ mod tests {
             native: false,
         };
         let scoped = DoctorCheck {
+            native_pool: None,
             id: "hack gitignore".into(),
             status: "warn".into(),
             detail: ".hack/.gitignore is missing. Run 'hack doctor --fix' to create it.".into(),
@@ -504,10 +505,11 @@ mod tests {
             }),
         };
         let project_check = DoctorCheck {
+            native_pool: None,
+            fix: None,
             id: "project".into(),
             status: "ok".into(),
             detail: format!("Found .hack/ (or legacy .dev/) at {root}/.hack"),
-            ..DoctorCheck::default()
         };
         let run = |checks| {
             DoctorRun::project(

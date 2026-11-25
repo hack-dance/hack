@@ -73,6 +73,8 @@ import {
   nativeRuntimeFailure,
 } from "../src/backends/native-runtime-client.ts";
 import { NATIVE_EXITED_RUNTIME_NOTICE } from "../src/backends/native-runtime-preflight.ts";
+import { selectNativeServices } from "../src/backends/native-service-selection.ts";
+import { watchNativeStartPool } from "../src/backends/native-start-pool-watch.ts";
 import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
   type ComposeEnvFingerprintRecord,
@@ -85,6 +87,41 @@ import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
+
+test("targeted selection keeps transitive conditions and omits unrelated service specs", () => {
+  const selected = selectNativeServices({
+    targets: ["redis", "job"],
+    profiles: [],
+    existingImages: new Map([["web", `sha256:${"a".repeat(64)}`]]),
+    services: {
+      redis: { image: "redis", profiles: ["cache"], depends_on: ["cache"] },
+      cache: {
+        image: "alpine",
+        depends_on: {
+          web: { condition: "service_started" },
+          unused: { condition: "service_started", required: false },
+        },
+      },
+      web: { image: "changed", ports: ["8080:80"], env_file: "web.env" },
+      job: { image: "alpine" },
+      unused: { image: "alpine", profiles: ["other"] },
+    },
+  });
+  expect(Object.keys(selected).sort()).toEqual([
+    "cache",
+    "job",
+    "redis",
+    "web",
+  ]);
+  expect(selected.redis).toMatchObject({ image: "redis" });
+  expect(selected.cache).toEqual({
+    image: "alpine",
+    profiles: undefined,
+    depends_on: { web: { condition: "service_started" } },
+  });
+  expect(selected.web).toEqual({ image: `sha256:${"a".repeat(64)}` });
+});
+
 afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
@@ -3005,7 +3042,12 @@ const httpsSelection = {
 };
 async function httpsFixture() {
   const result = await fixture(false);
-  const { opts } = result;
+  configureHttpsFixture(result.opts);
+  return result;
+}
+function configureHttpsFixture(
+  opts: Awaited<ReturnType<typeof fixture>>["opts"]
+) {
   const prepare = opts.dependencies.prepare!;
   const review = opts.dependencies.review!;
   const probe = {
@@ -3055,7 +3097,6 @@ async function httpsFixture() {
           },
         }),
     });
-  return result;
 }
 test("HTTPS selection requires all explicit canonical fields before effects", async () => {
   expect(parseNativeHttpsSelection({})).toBeUndefined();
@@ -3088,6 +3129,39 @@ test("unrouted graphs do not start the selected HTTPS frontend", async () => {
     throw new Error("unexpected frontend");
   };
   expect(await startNativeProject({ ...opts, https: httpsSelection })).toBe(0);
+});
+test("the first appended route joins shared HTTPS on the existing frontend lifetime", async () => {
+  const { opts, events } = await fixture(false);
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) =>
+    await serve({
+      ...request,
+      onReady: async () => {
+        await request.onReady();
+        expect(events).not.toContain("https-start");
+        request.onRoutesAdded?.();
+        request.onRoutesAdded?.();
+      },
+    });
+  opts.dependencies.https = async (selection) => {
+    events.push("https-start");
+    return {
+      identity: leaseIdentity(selection),
+      caPath: "/synthetic/root.crt",
+      httpsPort: 8443,
+      exited: new Promise(() => {}),
+      verifyHostname: async () => ({ statusCode: 200 }),
+      releaseAfterCleanup: async () => {
+        events.push("https-close");
+      },
+    };
+  };
+  expect(await startNativeProject({ ...opts, https: httpsSelection })).toBe(0);
+  expect(events.filter((event) => event === "https-start")).toHaveLength(1);
+  expect(events.indexOf("save")).toBeLessThan(events.indexOf("https-start"));
+  expect(events.indexOf("https-start")).toBeLessThan(
+    events.indexOf("https-close")
+  );
 });
 test("routed HTTPS verification precedes readiness and closes after graph cleanup", async () => {
   const { opts, events } = await httpsFixture();
@@ -7429,8 +7503,14 @@ function ownerExitedRefusal() {
     message: "The run's foreground owner exited.",
   });
 }
-async function stoppedPoolUnderRunFixture(poolPhase: "stopped" | "running") {
+async function stoppedPoolUnderRunFixture(
+  poolPhase: "stopped" | "running",
+  routed = false
+) {
   const { opts, events } = await retainedFinalizationFixture();
+  if (routed) {
+    configureHttpsFixture(opts);
+  }
   const saved = await opts.dependencies.load!(opts.scope);
   await acknowledgeRetainedFrontend(opts.scope, saved!);
   let recovered = false;
@@ -7512,8 +7592,9 @@ test("up on a pool whose provider exited under a running record recovers it with
     return await invoke(request);
   };
   expect(await startNativeProject(start)).toBe(0);
-  expect(events.slice(0, 4)).toEqual([
+  expect(events.slice(0, 5)).toEqual([
     "graph retained-preflight owner running",
+    "graph inspect",
     "runtime status exited",
     "runtime recover",
     "graph retained-preflight refused",
@@ -7523,6 +7604,112 @@ test("up on a pool whose provider exited under a running record recovers it with
   expect(
     notices.filter((line) => line === NATIVE_EXITED_RUNTIME_NOTICE)
   ).toHaveLength(1);
+});
+
+test.each([
+  { routed: true },
+  { routed: false },
+])("detached recovery only retires after its own provider exits (routed: $routed)", async ({
+  routed,
+}) => {
+  const { start } = await stoppedPoolUnderRunFixture("stopped", routed);
+  const previousBoot = "12345678-1234-1234-1234-123456789abc";
+  const boot = "87654321-4321-4321-4321-cba987654321";
+  const token = "c".repeat(32);
+  const oldPid = 1234;
+  const newPid = 2345;
+  let pid = oldPid;
+  let newProviderGone = false;
+  let exits = 0;
+  let leases = 0;
+  let serveArgs: readonly string[] | undefined;
+  const ready = Promise.withResolvers<void>();
+  const stopped = Promise.withResolvers<void>();
+  const exit = Promise.withResolvers<void>();
+  start.dependencies.watchPool = (options) =>
+    watchNativeStartPool({
+      ...options,
+      checkMs: 5,
+      graceMs: () =>
+        typeof options.graceMs === "function" && options.graceMs() === 0
+          ? 0
+          : 100,
+      read: async () => ({
+        phase: "running",
+        token,
+        guest_boot_id: pid === oldPid ? previousBoot : boot,
+        process: { pid },
+      }),
+      gone: (candidate) => candidate === oldPid || newProviderGone,
+    });
+  const invoke = start.dependencies.invoke!;
+  start.dependencies.invoke = async (request) => {
+    if (request.args[0] === "runtime" && request.args[1] === "up") {
+      pid = newPid;
+      return { phase: "running", process_alive: true, guest_boot_id: boot };
+    }
+    if (
+      request.args[0] === "runtime" &&
+      request.args[1] === "status" &&
+      pid === newPid
+    ) {
+      return { phase: "running", process_alive: true, guest_boot_id: boot };
+    }
+    return await invoke(request);
+  };
+  start.dependencies.https = async (selection) => {
+    expect(selection.pool.bootId).toBe(boot);
+    leases++;
+    return {
+      identity: leaseIdentity(selection),
+      caPath: "/synthetic/ca",
+      httpsPort: selection.httpsPort,
+      exited: new Promise(() => {}),
+      verifyHostname: async () => ({ statusCode: 200 }),
+      releaseAfterCleanup: async () => {},
+    };
+  };
+  const serve = start.dependencies.serve!;
+  start.dependencies.serve = async (request) => {
+    serveArgs = request.args;
+    return await serve({
+      ...request,
+      onReady: async () => {
+        await request.onReady();
+        ready.resolve();
+        await stopped.promise;
+      },
+    });
+  };
+  const attempt = startNativeProject({
+    ...start,
+    ...(routed ? { https: httpsSelection } : {}),
+    watchPool: true,
+    exitOnPoolEnd: () => {
+      exits++;
+      exit.resolve();
+    },
+    recoverStoppedPool: async () => {
+      // Let an eager watch observe the exited provider before the VM is replaced.
+      await Bun.sleep(25);
+      await start.recoverStoppedPool();
+    },
+  });
+  try {
+    await Promise.race([ready.promise, attempt]);
+    expect(leases).toBe(routed ? 1 : 0);
+    await Bun.sleep(150);
+    expect(exits).toBe(0);
+    const bootArg = serveArgs?.indexOf("--expect-boot") ?? -1;
+    expect(bootArg).toBeGreaterThanOrEqual(0);
+    expect(serveArgs?.[bootArg + 1]).toBe(boot);
+    newProviderGone = true;
+    await Promise.race([exit.promise, Bun.sleep(250)]);
+    expect(exits).toBe(1);
+  } finally {
+    stopped.resolve();
+    await attempt;
+  }
 });
 
 test("up keeps the owner-exited refusal on a running pool without recovery or runtime up", async () => {
@@ -7683,6 +7870,7 @@ test("a live foreground owner on a running pool keeps its refusal at once, with 
   );
   expect(events).toEqual([
     "graph retained-preflight owner running",
+    "graph inspect",
     "runtime status",
     "pool record",
   ]);
@@ -7762,4 +7950,123 @@ test("the started envelope comes from observations: running jobs and unmet healt
     completed: [],
     warming: ["db", "migrate", "seed"],
   });
+});
+
+test.each([
+  [["redis"]],
+  [[]],
+])("up reports only owner-started services from the reviewed active closure (%j)", async (targets) => {
+  const { opts, events, saved } = await retainedFinalizationFixture();
+  const invoke = opts.dependencies.invoke!;
+  const boot = "12345678-1234-1234-1234-123456789abc";
+  opts.dependencies.watchPool = () => {
+    events.push("watch pool");
+    return () => {};
+  };
+  const image = `sha256:${"e".repeat(64)}`;
+  const shape = {
+    ...stoppedGraph(saved),
+    receipt: {
+      ...stoppedGraph(saved).receipt,
+      phase: "ready-observed",
+      readiness: { web: "started", redis: "started" },
+    },
+  };
+  opts.dependencies.prepare = async () => ({
+    originalSha256: "a".repeat(64),
+    normalizedComposeJson: JSON.stringify({
+      services: { web: { image }, redis: { image, depends_on: ["web"] } },
+    }),
+    managedEnvironment: {},
+    lifecycleHostEnvironment: {},
+    environmentFiles: [],
+    effectiveEnvName: null,
+    serviceNames: ["web", "redis"],
+  });
+  opts.dependencies.review = async ({ run }) =>
+    run({
+      planId: saved.planId,
+      namespace: saved.namespace,
+      projectArgs: ["--project", opts.scope.projectRoot],
+      report: {
+        plan: {
+          enrollment_compatible: true,
+          services: {
+            web: { active: true, image, dependencies: {} },
+            redis: {
+              active: true,
+              image,
+              dependencies: { web: { condition: "service_started" } },
+            },
+            unrelated: { active: false, image },
+          },
+        },
+      },
+    });
+  opts.dependencies.invoke = async (request) => {
+    switch (request.args[1]) {
+      case "retained-preflight":
+        throw new NativeRuntimeRequestError({
+          nativeCode: "graph_foreground_owner_running",
+          message: "The run has a live foreground owner.",
+        });
+      case "inspect":
+      case "status":
+        if (request.args[0] === "graph") {
+          return shape;
+        }
+        if (request.args[0] === "runtime") {
+          events.push("runtime status");
+          return { phase: "running", process_alive: true, guest_boot_id: boot };
+        }
+        break;
+      case "owner-status":
+        return {
+          ok: true,
+          run: saved.run,
+          phase: "ready-observed",
+          plan: saved.planId,
+          runtime_verified: true,
+          generation: "f".repeat(64),
+          service_images: { web: image },
+        };
+      case "extend":
+        events.push("graph extend");
+        expect(request.args).toContain(saved.run);
+        expect(request.args).toContain("--expect-generation");
+        expect(request.args).not.toContain("--expect-boot");
+        return {
+          ok: true,
+          phase: "ready-observed",
+          receipt: shape.receipt,
+          started: ["redis"],
+          changed: ["web"],
+        };
+      default:
+        break;
+    }
+    return await invoke(request);
+  };
+  const outcomes: unknown[] = [];
+  expect(
+    await startNativeProject({
+      ...opts,
+      targets: targets.length ? targets : undefined,
+      watchPool: true,
+      onReady: (services) => void outcomes.push(services),
+    })
+  ).toBe(0);
+  expect(events).toContain("runtime status");
+  expect(events).toContain("graph extend");
+  expect(events).not.toContain("watch pool");
+  expect(events).not.toContain("before");
+  expect(outcomes).toEqual([
+    {
+      started: ["redis"],
+      completed: [],
+      readiness: "ready",
+      warming: [],
+      warnings: [expect.stringContaining("hack restart web")],
+    },
+  ]);
 });

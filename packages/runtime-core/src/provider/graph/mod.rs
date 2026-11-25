@@ -9,6 +9,8 @@ pub use service_exec::{
     ServiceExecOptions, ServiceExecResult, service_exec, service_exec_generation,
     service_exec_with_environment,
 };
+#[cfg(any(test, target_os = "macos"))]
+mod extend;
 mod hostname_change;
 mod normalized;
 mod plan_reconcile;
@@ -286,6 +288,10 @@ pub struct Resource {
     pub key: String,
     pub name: String,
     pub id: Option<String>,
+    /// Cleanup verified and recorded the ID from an unacknowledged create.
+    /// Cleanup authorizations selected before that observation bound a missing ID.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cleanup_observed_create: bool,
     pub image: Option<String>,
     pub phase: String,
     /// The service's reviewed opt-in policy for running a `linux/amd64` image under Rosetta
@@ -294,6 +300,38 @@ pub struct Resource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amd64_emulation: Option<crate::project::Amd64Emulation>,
 }
+
+impl Resource {
+    fn has_unacknowledged_create(&self) -> bool {
+        // The execution driver records "uncertain" if the engine create call
+        // fails before returning the ID, including when its reply is lost.
+        self.kind == Kind::Container
+            && self.id.is_none()
+            && matches!(self.phase.as_str(), "create-intent" | "uncertain")
+    }
+
+    fn has_cleanup_observed_id(&self, graph_phase: &str) -> bool {
+        self.cleanup_observed_create
+            && self.kind == Kind::Container
+            && self.id.as_deref().is_some_and(|id| hex(id, 64))
+            && matches!(
+                (graph_phase, self.phase.as_str()),
+                (
+                    "cleanup-intent" | "reconciled-cleanup-only",
+                    "create-intent" | "uncertain" | "absent"
+                ) | ("stopped-data-retained" | "removed", "absent")
+            )
+    }
+
+    /// Cleanup may resolve a missing create ID once. It still must match a
+    /// known ID when checking a receipt-bound authorization or archive.
+    #[cfg(any(target_os = "macos", test))]
+    fn matches_cleanup_id(&self, current: &Self, graph_phase: &str) -> bool {
+        self.id == current.id
+            || (self.has_unacknowledged_create() && current.has_cleanup_observed_id(graph_phase))
+    }
+}
+
 /// The phases of a start in progress, before every service has started: fresh,
 /// restore and restart.
 pub(super) const START_PHASES: [&str; 3] = ["preparing", "restoring", "restarting"];
@@ -308,6 +346,9 @@ impl Receipt {
     pub(super) fn set_phase(&mut self, phase: &str) {
         self.phase = phase.into();
         self.started_from = None;
+        if phase != "ready-observed" {
+            self.extending.clear();
+        }
     }
 }
 
@@ -359,11 +400,19 @@ pub struct Receipt {
     /// `restoring` or `restarting`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_from: Option<String>,
+    /// Newly enrolled services whose targeted start has not committed. The
+    /// original graph stays ready and retains ownership of both sets.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub extending: BTreeSet<String>,
     /// Most recent observed startup failure; retained after cleanup and replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_failure: Option<startup_failure::Failure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub normalized_input: Option<NormalizedInputIdentity>,
+    /// Logical review of the combined input. Resource labels retain the plan
+    /// under which the run enrolled, so cleanup and mapping can use one fence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_plan_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_startup: Option<startup::Startup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -695,6 +744,9 @@ fn load_at(
         || receipt.owner != incarnation
         || !hex(&receipt.namespace, 64)
         || !hex(&receipt.plan_id, 64)
+        || receipt.input_plan_id.as_ref().is_some_and(|plan| {
+            !hex(plan, 64) || receipt.normalized_input.is_none()
+        })
         || receipt
             .normalized_input
             .as_ref()
@@ -719,6 +771,9 @@ fn load_at(
             .values()
             .any(|r| r.outbound && r.kind != Kind::Network)
         || receipt.resources.is_empty()
+        || (!receipt.extending.is_empty()
+            && (!matches!(receipt.phase.as_str(), "ready-observed" | "cleanup-intent" | "reconciled-cleanup-only")
+                || !receipt.extending.iter().all(|service| receipt.readiness.contains_key(service))))
         || !resource_counts_fit(&receipt.resources)
         || !network_bindings_valid(&receipt.resources)
         || receipt.resources.values().any(|resource| {
@@ -789,6 +844,7 @@ fn load_at(
             )
             || (r.phase == "released" && r.cache.is_none())
             || r.id.as_deref().is_some_and(|id| !hex(id, 64))
+            || (r.cleanup_observed_create && !r.has_cleanup_observed_id(&receipt.phase))
             || (r.kind == Kind::Container && !r.image.as_deref().is_some_and(image_id))
             || (r.kind != Kind::Container && r.image.is_some())
             || (r.kind == Kind::Volume && r.id.is_some())
@@ -987,6 +1043,15 @@ impl Session<'_, '_> {
         }
         Ok(())
     }
+    /// The start loop's wait between passes: woken by an engine event for one of
+    /// this run's containers, else the whole pass interval (see `engine::changes`).
+    fn engine_changes(&self) -> crate::provider::engine::changes::EngineChanges {
+        use crate::provider::engine::changes::EngineChanges;
+        self.engine.guest().engine_socket().map_or_else(
+            |_| EngineChanges::sleeping(),
+            |socket| EngineChanges::follow(&socket, &self.receipt.run),
+        )
+    }
     fn save(&self) -> Result<(), CandidateError> {
         state::write(&self.root.join("state.json"), &self.receipt)
     }
@@ -999,9 +1064,14 @@ impl Session<'_, '_> {
         self.save()?;
         one_off::record_effect(&self.root, key, &self.receipt.resources[key])
     }
+
+    fn resumes_container(&self, service: &str) -> bool {
+        self.receipt.extending.contains(service)
+            && self.receipt.resources[&format!("container:{service}")]
+                .id
+                .is_some()
+    }
     fn create_resources(&mut self, retain_data: bool) -> Result<(), CandidateError> {
-        // Restore reattaches every settled volume. A volume still `reserved` never
-        // received a create intent; it is created exclusively, never adopted.
         let mut created_volumes = BTreeSet::new();
         let keys: Vec<_> = self
             .receipt
@@ -1011,16 +1081,35 @@ impl Session<'_, '_> {
             .map(|(k, _)| k.clone())
             .collect();
         for key in keys {
-            self.check_cancelled()?;
-            let resource = self.receipt.resources[&key].clone();
-            if retain_data && plan_reconcile::retained_volume(&resource) {
-                if inspect_resource(&self.engine, &self.receipt, &resource)?.is_none() {
-                    return Err(error(
-                        "graph_data_missing",
-                        "Retained data disappeared; restore will not recreate it.",
-                    ));
-                }
-                cache_provenance::verify(&self.engine, &self.receipt, &resource)?;
+            self.create_storage_resource(&key, retain_data, &mut created_volumes)?;
+        }
+        self.apply_created_volume_cadence(&created_volumes);
+        Ok(())
+    }
+
+    fn create_storage_resource(
+        &mut self,
+        key: &str,
+        retain_data: bool,
+        created_volumes: &mut BTreeSet<String>,
+    ) -> Result<(), CandidateError> {
+        // Restore reattaches every settled volume. A volume still `reserved` never
+        // received a create intent; it is created exclusively, never adopted.
+        self.check_cancelled()?;
+        let resource = self.receipt.resources[key].clone();
+        if retain_data && plan_reconcile::retained_volume(&resource) {
+            if inspect_resource(&self.engine, &self.receipt, &resource)?.is_none() {
+                return Err(error(
+                    "graph_data_missing",
+                    "Retained data disappeared; restore will not recreate it.",
+                ));
+            }
+            cache_provenance::verify(&self.engine, &self.receipt, &resource)?;
+            volume_subpaths::prepare(&self.engine, &self.receipt, &resource, &self.configs, false)?;
+            return Ok(());
+        }
+        if inspect_resource(&self.engine, &self.receipt, &resource)?.is_some() {
+            if resource.cache.is_some() {
                 volume_subpaths::prepare(
                     &self.engine,
                     &self.receipt,
@@ -1028,81 +1117,70 @@ impl Session<'_, '_> {
                     &self.configs,
                     false,
                 )?;
-                continue;
+                self.capture_cache_provenance(key, false)?;
+                self.reserve(key, "created")?;
+                return Ok(());
             }
-            if inspect_resource(&self.engine, &self.receipt, &resource)?.is_some() {
-                if resource.cache.is_some() {
-                    volume_subpaths::prepare(
-                        &self.engine,
-                        &self.receipt,
-                        &resource,
-                        &self.configs,
-                        false,
-                    )?;
-                    self.capture_cache_provenance(&key, false)?;
-                    self.reserve(&key, "created")?;
-                    continue;
-                }
-                return Err(error(
-                    "graph_resource_exists",
-                    "Fresh graph cannot adopt an existing resource.",
-                ));
-            }
-            if resource.cache.is_some() {
-                let run_dir = self.engine.guest().candidate().state_root.join("run");
-                check_cache_capacity(&self.engine, &self.receipt.owner, &run_dir)?;
-            }
-            self.check_cancelled()?;
-            self.reserve(&key, "create-intent")?;
-            let labels = expected_labels(&self.receipt, &resource);
-            let body = if resource.kind == Kind::Network {
-                json!({"Name":resource.name,"Driver":"bridge","Internal":!resource.outbound,"Labels":labels})
-            } else {
-                json!({"Name":resource.name,"Driver":"local","Labels":labels})
-            };
-            let value = self.engine.request(
-                Method::POST,
-                &format!("/v1.53/{}/create", resource.kind.collection()),
-                Some(&body),
-            )?;
-            if resource.kind == Kind::Network {
-                self.receipt.resources.get_mut(&key).expect("resource").id = Some(
-                    value["Id"]
-                        .as_str()
-                        .filter(|v| hex(v, 64))
-                        .ok_or_else(|| {
-                            error(
-                                "graph_resource_identity",
-                                "Missing created network identity.",
-                            )
-                        })?
-                        .into(),
-                );
-            }
-            if inspect_resource(&self.engine, &self.receipt, &self.receipt.resources[&key])?
-                .is_none()
-            {
-                return Err(error(
-                    "graph_resource_missing",
-                    "Created graph resource is missing.",
-                ));
-            }
-            volume_subpaths::prepare(&self.engine, &self.receipt, &resource, &self.configs, true)?;
-            self.capture_cache_provenance(&key, true)?;
-            self.reserve(&key, "created")?;
-            if resource.kind == Kind::Volume {
-                created_volumes.insert(resource.name);
-            }
+            return Err(error(
+                "graph_resource_exists",
+                "Fresh graph cannot adopt an existing resource.",
+            ));
         }
+        if resource.cache.is_some() {
+            let run_dir = self.engine.guest().candidate().state_root.join("run");
+            check_cache_capacity(&self.engine, &self.receipt.owner, &run_dir)?;
+        }
+        self.check_cancelled()?;
+        self.reserve(key, "create-intent")?;
+        let labels = expected_labels(&self.receipt, &resource);
+        let body = if resource.kind == Kind::Network {
+            json!({"Name":resource.name,"Driver":"bridge","Internal":!resource.outbound,"Labels":labels})
+        } else {
+            json!({"Name":resource.name,"Driver":"local","Labels":labels})
+        };
+        let value = self.engine.request(
+            Method::POST,
+            &format!("/v1.53/{}/create", resource.kind.collection()),
+            Some(&body),
+        )?;
+        if resource.kind == Kind::Network {
+            self.receipt.resources.get_mut(key).expect("resource").id = Some(
+                value["Id"]
+                    .as_str()
+                    .filter(|v| hex(v, 64))
+                    .ok_or_else(|| {
+                        error(
+                            "graph_resource_identity",
+                            "Missing created network identity.",
+                        )
+                    })?
+                    .into(),
+            );
+        }
+        if inspect_resource(&self.engine, &self.receipt, &self.receipt.resources[key])?.is_none() {
+            return Err(error(
+                "graph_resource_missing",
+                "Created graph resource is missing.",
+            ));
+        }
+        volume_subpaths::prepare(&self.engine, &self.receipt, &resource, &self.configs, true)?;
+        self.capture_cache_provenance(key, true)?;
+        self.reserve(key, "created")?;
+        if resource.kind == Kind::Volume {
+            created_volumes.insert(resource.name);
+        }
+        Ok(())
+    }
+
+    fn apply_created_volume_cadence(&mut self, created_volumes: &BTreeSet<String>) {
         if !created_volumes.is_empty() {
             for (service, cadence) in &self.default_health_cadence {
                 cadence.apply(
                     self.configs.get_mut(service).expect("compiled service"),
-                    &created_volumes,
+                    created_volumes,
                 );
             }
         }
-        Ok(())
     }
 }
 
@@ -1150,10 +1228,13 @@ impl Driver for Session<'_, '_> {
         match event {
             Event::StartIntent { service } => {
                 let key = format!("container:{service}");
+                let resumed = self.resumes_container(service);
                 if self.receipt.resources.get(&key).is_none_or(|r| {
                     r.phase
                         != if self.restarting {
                             "restart-reserved"
+                        } else if resumed {
+                            "started"
                         } else {
                             "reserved"
                         }
@@ -1164,11 +1245,17 @@ impl Driver for Session<'_, '_> {
                     ));
                 }
                 // The durable intent write between a met gate and the create.
-                let phase = if self.restarting {
+                let phase = if self.restarting || resumed {
                     "start-intent"
                 } else {
                     "create-intent"
                 };
+                // A fresh service with managed values stages them right after this
+                // write: its durable attachment marker goes in the same write
+                // instead of a second one (see `start`).
+                if !self.restarting && self.environments.contains_key(service) {
+                    self.receipt.environment_attached = true;
+                }
                 crate::timings::measure_candidate(
                     crate::timings::Step::StartWaveRecord,
                     None,
@@ -1213,6 +1300,10 @@ impl Driver for Session<'_, '_> {
                 if let Some(startup) = self.startup.as_mut() {
                     startup.verify(&self.engine, &mut self.receipt, &self.root)?;
                 }
+                if !self.receipt.extending.is_empty() {
+                    // The extension still has to verify its publication set.
+                    return Ok(());
+                }
                 self.receipt.set_phase("ready-observed");
                 self.save()
             }
@@ -1222,6 +1313,32 @@ impl Driver for Session<'_, '_> {
         self.check_cancelled()?;
         let key = format!("container:{service}");
         let resource = self.receipt.resources[&key].clone();
+        if self.resumes_container(service) {
+            let inspected =
+                inspect_resource(&self.engine, &self.receipt, &resource)?.ok_or_else(|| {
+                    error("graph_resource_missing", "Selected container disappeared.")
+                })?;
+            if resource.phase != "start-intent"
+                || !matches!(observation(&inspected)?, Observation::Exited { .. })
+            {
+                return Err(error(
+                    "graph_extend",
+                    "Selected container is no longer stopped.",
+                ));
+            }
+            restart_policy::verify_admitted(&resource, &inspected)?;
+            self.reset_probe(service, "reset")?;
+            self.check_cancelled()?;
+            let id = resource.id.as_deref().ok_or_else(|| {
+                error(
+                    "graph_resource_identity",
+                    "Selected container has no confirmed ID.",
+                )
+            })?;
+            self.engine
+                .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
+            return self.start_probe(service, id);
+        }
         if self.restarting {
             if resource.phase != "start-intent" {
                 return Err(error("graph_replay_refused", "Restart intent is missing."));
@@ -1289,19 +1406,32 @@ impl Driver for Session<'_, '_> {
         let spec = spec?;
         self.prepare_probe(service)?;
         if let Some(pending) = self.environments.remove(service) {
-            self.receipt.environment_attached = true;
-            self.save()?;
+            // The marker is durable before any bound intent. It is normally already
+            // in this service's start-intent write; only a caller that skipped it
+            // pays a write of its own here.
+            if !self.receipt.environment_attached {
+                self.receipt.environment_attached = true;
+                crate::timings::measure_candidate(
+                    crate::timings::Step::StartWaveRecord,
+                    None,
+                    |_| self.save(),
+                )?;
+            }
             let (uid, gid) = launcher::identity(&self.configs[service])?;
-            let lease = pending.with_identity(uid, gid).stage_bound(
-                self.engine.guest(),
-                Some(super::environment_recovery::GraphBinding {
-                    run: self.receipt.run.clone(),
-                    container: resource.name.clone(),
-                }),
-            )?;
-            #[cfg(test)]
-            self.fault_pause("after-environment-stage")?;
-            let path = lease.verified_path_with_guest(self.engine.guest(), service)?;
+            let (lease, path) =
+                crate::timings::measure_candidate(crate::timings::Step::EnvStage, None, |_| {
+                    let lease = pending.with_identity(uid, gid).stage_bound(
+                        self.engine.guest(),
+                        Some(super::environment_recovery::GraphBinding {
+                            run: self.receipt.run.clone(),
+                            container: resource.name.clone(),
+                        }),
+                    )?;
+                    #[cfg(test)]
+                    self.fault_pause("after-environment-stage")?;
+                    let path = lease.verified_path_with_guest(self.engine.guest(), service)?;
+                    Ok((lease, path))
+                })?;
             let files = lease.file_mounts();
             let wraps = lease.wraps_process();
             self.leases.insert(service.into(), lease);
@@ -1318,6 +1448,7 @@ impl Driver for Session<'_, '_> {
         if let Some(startup) = &self.receipt.relay_startup {
             if let Some(selected) = startup.services.get(service) {
                 startup::attach(
+                    self.engine.guest().socket_layout(),
                     self.configs.get_mut(service).expect("service"),
                     selected,
                     &startup::guest_directory(&self.receipt.run, &selected.generation),
@@ -1393,13 +1524,15 @@ impl Driver for Session<'_, '_> {
         let resource = &self.receipt.resources[&format!("container:{service}")];
         let value = inspect_resource(&self.engine, &self.receipt, resource)?
             .ok_or_else(|| error("graph_resource_missing", "Owned service disappeared."))?;
-        Self::verify_config(
-            &self.receipt,
-            service,
-            &self.configs[service],
-            &self.expected_environment[service],
-            &value,
-        )?;
+        if let Some(config) = self.configs.get(service) {
+            Self::verify_config(
+                &self.receipt,
+                service,
+                config,
+                &self.expected_environment[service],
+                &value,
+            )?;
+        }
         let (observation, found) =
             probes::observe_finding(&self.engine, &self.receipt, service, &value)?;
         match found {
@@ -1813,8 +1946,10 @@ fn run_inputs(
     let probe_states = probes::fresh(&engine, &prepared.configs, prepared.probes)?;
     let receipt = Receipt {
         started_from: None,
+        extending: BTreeSet::new(),
         startup_failure: None,
         normalized_input,
+        input_plan_id: None,
         relay_startup: None,
         relay_cleanup: None,
         probes: probe_states,
@@ -1863,10 +1998,12 @@ fn run_inputs(
             )?;
         }
         session.create_resources(false)?;
-        execution::run(
+        let changes = session.engine_changes();
+        execution::run_with_wait(
             &prepared.graph,
             &mut session,
             admission_deadline.saturating_duration_since(std::time::Instant::now()),
+            |interval| changes.wait(interval),
         )
     })();
     if let Err(failure) = result {
@@ -2126,7 +2263,8 @@ fn unchanged_normalized_review(
     plan_id: &str,
     normalized: &NormalizedInputIdentity,
 ) -> bool {
-    receipt.plan_id == plan_id && receipt.normalized_input.as_ref() == Some(normalized)
+    receipt.input_plan_id.as_deref().unwrap_or(&receipt.plan_id) == plan_id
+        && receipt.normalized_input.as_ref() == Some(normalized)
 }
 
 /// Read-only proof for an exact normalized review or a compatible shared-source
@@ -2442,6 +2580,46 @@ fn cleanup_owned(
     })
 }
 
+/// Remove one journaled resource after stop, then independently observe absence.
+fn remove_owned_resource(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    resource: &Resource,
+    fence: impl Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    fence()?;
+    let kind = resource.kind;
+    if let Some(value) = inspect_resource(engine, receipt, resource)? {
+        let target = if kind == Kind::Volume {
+            resource.name.as_str()
+        } else {
+            value["Id"].as_str().expect("verified id")
+        };
+        fence()?;
+        engine.request(
+            Method::DELETE,
+            &format!(
+                "/v1.53/{}/{target}{}",
+                kind.collection(),
+                if kind == Kind::Container {
+                    "?v=true"
+                } else {
+                    ""
+                }
+            ),
+            None,
+        )?;
+        if inspect_resource(engine, receipt, resource)?.is_some() {
+            return Err(error(
+                "graph_cleanup_uncertain",
+                "Removed graph resource remains visible.",
+            ));
+        }
+    }
+    volume_subpaths::forget_removed(engine, receipt, resource)?;
+    Ok(())
+}
+
 /// An explicit recovery can recheck its independent host proof immediately
 /// before each destructive graph effect. Ordinary callers use the same engine
 /// lease and state machine without an additional recovery witness.
@@ -2491,9 +2669,24 @@ fn cleanup_owned_fenced(
         slots
     };
     fence()?;
-    shutdown::stop_owned(engine, &receipt, root)?;
+    shutdown::stop_owned(engine, &mut receipt, root, &fence)?;
     for kind in [Kind::Container, Kind::Network, Kind::Volume] {
         if kind == Kind::Volume && !remove_data {
+            // A lost append create reply leaves a volume at create-intent.
+            // Settle the retained layout from exact ownership, not the pending
+            // receipt: confirmed data stays retained and an absent allocation
+            // remains eligible for a later create.
+            for key in receipt.resources.keys().cloned().collect::<Vec<_>>() {
+                let resource = &receipt.resources[&key];
+                if resource.kind == Kind::Volume
+                    && matches!(resource.phase.as_str(), "create-intent" | "uncertain")
+                {
+                    fence()?;
+                    let present = inspect_resource(engine, &receipt, resource)?.is_some();
+                    receipt.resources.get_mut(&key).expect("resource").phase =
+                        if present { "created" } else { "reserved" }.into();
+                }
+            }
             continue;
         }
         let keys: Vec<_> = receipt
@@ -2512,35 +2705,7 @@ fn cleanup_owned_fenced(
                 state::write(&root.join("state.json"), &receipt)?;
                 continue;
             }
-            fence()?;
-            if let Some(value) = inspect_resource(engine, &receipt, &resource)? {
-                let target = if kind == Kind::Volume {
-                    resource.name.as_str()
-                } else {
-                    value["Id"].as_str().expect("verified id")
-                };
-                fence()?;
-                engine.request(
-                    Method::DELETE,
-                    &format!(
-                        "/v1.53/{}/{target}{}",
-                        kind.collection(),
-                        if kind == Kind::Container {
-                            "?v=true"
-                        } else {
-                            ""
-                        }
-                    ),
-                    None,
-                )?;
-                if inspect_resource(engine, &receipt, &resource)?.is_some() {
-                    return Err(error(
-                        "graph_cleanup_uncertain",
-                        "Removed graph resource remains visible.",
-                    ));
-                }
-            }
-            volume_subpaths::forget_removed(engine, &receipt, &resource)?;
+            remove_owned_resource(engine, &receipt, &resource, &fence)?;
             receipt.resources.get_mut(&key).expect("resource").phase = "absent".into();
             // The durable cleanup intent owns every retry. Reinspection recovers partial removal;
             // only the final receipt needs another commit, including environment-slot retirement.
@@ -2781,10 +2946,13 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         launcher: None,
     };
     session.save()?;
+    let changes = session.engine_changes();
     // The restarting receipt is committed: the previous start's record is superseded.
-    if let Err(failure) = startup_failure::clear_after_started(&session.root)
-        .and_then(|_| execution::run(&prepared.graph, &mut session, options.timeout))
-    {
+    if let Err(failure) = startup_failure::clear_after_started(&session.root).and_then(|_| {
+        execution::run_with_wait(&prepared.graph, &mut session, options.timeout, |interval| {
+            changes.wait(interval)
+        })
+    }) {
         startup_failure::record_after_started(&session.root, &session.receipt, &failure);
         session.receipt.set_phase("failed-retained");
         session.save()?;
@@ -2801,11 +2969,19 @@ mod tests;
 /// interrupted file is retained, existing resources are verified, and no engine mutation occurs.
 pub fn reconcile(candidate: &Candidate, run: &str) -> Result<Receipt, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;
-    let (mut receipt, root) = archive::load_reconciliation(candidate, &engine, run)?;
+    let (receipt, root) = archive::load_reconciliation(candidate, &engine, run)?;
+    reconcile_receipt(&engine, receipt, &root)
+}
+
+fn reconcile_receipt(
+    engine: &Engine<'_>,
+    mut receipt: Receipt,
+    root: &std::path::Path,
+) -> Result<Receipt, CandidateError> {
     for resource in receipt.resources.values() {
-        inspect_resource(&engine, &receipt, resource)?;
+        inspect_resource(engine, &receipt, resource)?;
     }
-    if let Some(retained) = journal::retain(&root)? {
+    if let Some(retained) = journal::retain(root)? {
         state::write(&retained.join("committed.json"), &receipt)?;
         // Enrollment already fences ordinary mutations. Preserve committed
         // terminal evidence so explicit confirmation can independently recover.
@@ -3134,7 +3310,13 @@ fn verify_images(
 ) -> Result<BTreeMap<String, image_environment::Expected>, CandidateError> {
     let mut expected = BTreeMap::new();
     let mut refusals = process_refusals::Collector::default();
-    for resource in resources.values().filter(|r| r.kind == Kind::Container) {
+    // The selected configs determine which images to inspect. Volume
+    // admission still needs the full set of owned and newly enrolled storage.
+    for service in configs.keys().cloned().collect::<Vec<_>>() {
+        let resource = resources
+            .get(&format!("container:{service}"))
+            .filter(|resource| resource.kind == Kind::Container)
+            .ok_or_else(|| error("graph_image", "Selected service has no container resource."))?;
         let image = engine.request(
             Method::GET,
             &format!(

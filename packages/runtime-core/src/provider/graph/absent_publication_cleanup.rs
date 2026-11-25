@@ -639,6 +639,7 @@ fn verify_static_with(
     if receipt_bytes != serde_json::to_vec_pretty(&receipt).map_err(|_| refused())? {
         return Err(refused());
     }
+    // Selection starts at ready-observed, where compute IDs are already recorded.
     if dead_owner_cleanup::immutable(&receipt)? != dead_owner_cleanup::immutable(original)?
         || !selected.matches_graph(&receipt)
         || !["ready-observed", "cleanup-intent", "stopped-data-retained"]

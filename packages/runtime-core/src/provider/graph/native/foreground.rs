@@ -425,7 +425,7 @@ pub fn serve_with_storage_tool(
         let result = match request.action {
             Action::InteractiveExec => {
                 let selected = request.exec.as_ref().ok_or_else(refused)?;
-                let client = transport::ClientWatch::new(&stream)?;
+                let client = transport::ClientWatch::half_closed(&stream)?;
                 let check = || {
                     publication.verify()?;
                     if signals.pending() || client.disconnected() {

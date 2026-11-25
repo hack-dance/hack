@@ -147,7 +147,7 @@ fn arguments(
         action.to_owned(),
         assignment.reservation.clone(),
         marker,
-        format!("/run/hack-local/bridge-{slot:02}.sock"),
+        engine.guest().socket_layout().bridge(slot),
         relay.binary_sha256.clone(),
         relay.target_pid.to_string(),
         relay.target_start.to_string(),
@@ -281,10 +281,12 @@ pub(super) fn retirement_absence(
     })?;
     let slot_arg = slot.to_string();
     let serial_arg = relay.launch_serial.to_string();
+    let socket = engine.guest().socket_layout().bridge(slot);
     let args = [
         assignment.reservation.as_str(),
         slot_arg.as_str(),
         serial_arg.as_str(),
+        socket.as_str(),
     ];
     let result = engine
         .guest()
@@ -403,7 +405,7 @@ fn observe_cleanup(
             assignment.reservation,
             assignment.boot_id
         ),
-        format!("/run/hack-local/bridge-{slot:02}.sock"),
+        engine.guest().socket_layout().bridge(slot),
         relay.binary_sha256.clone(),
         relay.launch_serial.to_string(),
         slot.to_string(),
@@ -529,7 +531,7 @@ fn observe_normalization(
             assignment.reservation,
             assignment.boot_id
         ),
-        format!("/run/hack-local/bridge-{slot:02}.sock"),
+        engine.guest().socket_layout().bridge(slot),
         relay.binary_sha256.clone(),
         relay.launch_serial.to_string(),
         slot.to_string(),
@@ -613,6 +615,100 @@ pub(super) fn verify_cleanup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn relay_start_requires_private_compact_tmpfs_and_exact_slot() {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
+        use std::os::unix::net::UnixListener;
+        use std::process::Command;
+
+        // A real Unix bind needs a short path even when TMPDIR is deep.
+        let fixture = super::super::tests::Fixture(crate::private_test_root(
+            std::path::Path::new("/tmp"),
+            "hack-relay",
+        ));
+        let base = fixture.0.join("hack-local");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&base)
+            .unwrap();
+        let owner = base.metadata().unwrap();
+        let compact = fixture.0.join("hb");
+        let body = script("", "start");
+        // Run the real launch checks up to payload staging. This fixture
+        // substitutes the guest filesystem and uid, and needs no container netns.
+        let prefix = body.split_once(" mkdir -m 700 \"$root\"").unwrap().0;
+        let program =
+            format!("findmnt() {{ printf '%s\\n' \"$RELAY_TEST_FILESYSTEM\"; }}\n{prefix}\nfi\n")
+                .replace(
+                    "test \"$(findmnt -n -o FSTYPE --target /run/hack-local)\" = tmpfs",
+                    ":",
+                )
+                .replace("/run/hack-local", base.to_str().unwrap())
+                .replace("/run/hb", compact.to_str().unwrap())
+                .replace("0:0:", &format!("{}:{}:", owner.uid(), owner.gid()));
+        #[cfg(target_os = "macos")]
+        let program = program
+            .replace("stat -c %u:%g:%a:%h", "/usr/bin/stat -f %u:%g:%Lp:%l")
+            .replace("stat -c %u:%g:%a", "/usr/bin/stat -f %u:%g:%Lp")
+            .replace("stat -c %s", "/usr/bin/stat -f %z")
+            .replace("flock -w 7 9", ":");
+        let run = |socket: &str, slot: &str, filesystem: &str| {
+            // Each call represents an independent guest start selection.
+            let controls = base.join("relay-slots");
+            if controls.exists() {
+                std::fs::remove_dir_all(controls).unwrap();
+            }
+            let path = socket
+                .replace("/run/hack-local", base.to_str().unwrap())
+                .replace("/run/hb", compact.to_str().unwrap());
+            Command::new("/bin/sh")
+                .env("RELAY_TEST_FILESYSTEM", filesystem)
+                .args([
+                    "-c",
+                    &program,
+                    "relay-start-test",
+                    "start",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "marker",
+                    &path,
+                    "digest",
+                    "1",
+                    "1",
+                    "8080",
+                    "1",
+                    slot,
+                    "reservation-v1",
+                ])
+                .output()
+                .unwrap()
+        };
+        let legacy = super::super::super::PoolLayout::Legacy.bridge(0);
+        assert!(run(&legacy, "0", "ext4").status.success());
+        assert!(!compact.exists());
+
+        let socket = super::super::super::PoolLayout::CompactV1.bridge(1);
+        assert!(!run(&socket, "1", "tmpfs").status.success());
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&compact)
+            .unwrap();
+        assert!(!run(&socket, "1", "ext4").status.success());
+        let result = run(&socket, "1", "tmpfs");
+        assert!(result.status.success(), "{:?}", result.stderr);
+        let listener = UnixListener::bind(compact.join("01")).unwrap();
+        assert!(!run(&socket, "1", "tmpfs").status.success());
+        drop(listener);
+        std::fs::remove_file(compact.join("01")).unwrap();
+        assert!(!run(&socket, "2", "tmpfs").status.success());
+
+        std::fs::set_permissions(&compact, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!run(&socket, "1", "tmpfs").status.success());
+        std::fs::remove_dir(&compact).unwrap();
+        symlink(&base, &compact).unwrap();
+        assert!(!run(&socket, "1", "tmpfs").status.success());
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -772,6 +868,7 @@ mod tests {
                     allocation,
                     "0",
                     serial,
+                    base.join("bridge-00.sock").to_str().unwrap(),
                 ])
                 .output()
                 .unwrap()
@@ -784,6 +881,22 @@ mod tests {
         let valid = run(&allocation, "7");
         assert!(valid.status.success(), "{:?}", valid.stderr);
         assert_eq!(valid.stdout, b"absent\n");
+        let wrong_slot_socket = base.join("bridge-01.sock");
+        assert!(
+            !Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    &script,
+                    "retired-absence-test",
+                    &allocation,
+                    "0",
+                    "7",
+                    wrong_slot_socket.to_str().unwrap(),
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
         assert!(!run(&"b".repeat(32), "7").status.success());
         assert!(!run(&allocation, "8").status.success());
         for phase in [

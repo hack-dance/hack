@@ -20,8 +20,8 @@ original operation's successful return or runtime effect authority.
 
 The positive exploration exhausts 38 distinct states. Four guard-removal
 controls must fail `NoExistingAdoption`, `OriginalBirthAtCommit`, `NoPendingMatch`
-and `RetirementPreservesData` at their corresponding named action with the exact
-same-state witness. Registry/checker contracts reject incomplete exploration and
+and `RetirementPreservesData` with the exact final-state witness.
+Registry/checker contracts reject incomplete exploration and
 unrelated failures. This model does not prove fsync/crash durability, real guest or
 volume observations, atomic ownership against unsynchronized external writers,
 transport cancellation, SQL contents/retention or NC05 application acceptance.
@@ -676,8 +676,9 @@ notice (traffic drift or a watched listener exit) arms one attempt; attempts are
 single-flight; a refusal before the rebind journal re-arms after a bounded
 backoff; a completed rebind clears it; and a failure after the journal closes
 the schedule. The negative control removes the close guard (`EnforceClose =
-FALSE`) and must fail `NoReplayAfterUnconfirmed` at `Start` with a second attempt
-after an unconfirmed rebind.
+FALSE`) and must fail `NoReplayAfterUnconfirmed` when it starts another attempt
+after an unconfirmed rebind. Earlier attempts may have completed or refused
+before writing a journal.
 
 | Model operation | Source boundary |
 | --- | --- |
@@ -703,6 +704,40 @@ refused the recovery for ever.
 | --- | --- | --- |
 | `positive` | the oldest proven finished record makes room (`DropOldest`) and files that cannot be proven finished are not counted, over twelve pool stops with a bound of eight | passes: `AlwaysRecoverable`, `Bounded`, `Recovers` |
 | `negative` | today: the archive step refuses at the bound and counts every file with the prefix | `AlwaysRecoverable` fails: the stopped run can no longer be recovered |
+
+## Detached native start after a provider exit
+
+[`DetachedPoolWatch.tla`](detached-pool-watch/DetachedPoolWatch.tla) checks
+whether a detached frontend's expiry can cause cleanup of a running graph in
+a different VM boot. It starts with an exited provider whose record still
+looks running, models one recovering start, and permits two subsequent boots
+and a provider loss after either. The timer may expire before or after the
+graph starts. Frontend exit and Rust owner cleanup are distinct steps.
+
+![Detached pool watch state chart](../../../docs/diagrams/detached-pool-watch.png)
+[SVG](../../../docs/diagrams/detached-pool-watch.svg) ·
+[Source](../../../docs/diagrams/detached-pool-watch.mmd)
+
+| Control | Result |
+| --- | --- |
+| `positive` | `NoStaleCleanup` holds across 53 reachable states and three boot IDs. |
+| `negative` | A premature record read binds the watch to boot 1. Boot 2 serves, then the timer for boot 1 retires its frontend. Cleanup of boot 2 violates `NoStaleCleanup`. |
+| `unfenced-serve` | The watch binds to boot 2, then the pool reboots before graph admission. With the boot comparison removed, the graph serves in boot 3 and the timer for boot 2 stops it. |
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `BootPool`, `Bind` | `startNativeProjectAttempt` recovers the retained run, then binds the detached pool watch to the successful `runtime up` reply. |
+| `Serve`, `Refuse` | The foreground graph receives `--expect-boot`. `HostRelayRuntime::new_scoped` compares the verified boot under the provider lease before creating the relay owner. The relay context also binds subsequent graph admission to that boot. |
+| `ObserveEnded`, `ExpireGrace` | `watchNativeStartPool` reads the pool record and observes a matching provider PID or a replaced boot. The callback exits only its own detached frontend. |
+| `OwnerCleanup` | `Events::watch_frontend` and `OwnerLoop::step` consume the actual parent exit. The owner cleans up its own enrolled graph. |
+| `Finish` | The start's finalizer cancels the watch. User-initiated stop follows the existing owned cleanup path. |
+
+The model assumes unique boot IDs, correct boot observations, and exclusive
+native graph ownership. It models indeterminate observations as stuttering and
+checks safety without fairness. Shared HTTPS archival, OS timing and VM effects
+are outside the model. The TypeScript lifecycle regression exercises both
+routed and unrouted recovery and a second provider exit. The macOS-only Rust
+regression exercises the stale boot refusal with an owned development VM.
 
 ## Native pool stop under a live run
 
@@ -737,7 +772,7 @@ publication left. `BootBoundUnreached` shows the boot bound (8) never limits a c
 | `https` | recovery from any earlier boot with every fault, for a project with HTTPS routes (`Https`) | 608 states; all hold, including `NoArchiveOverListener` |
 | `https-no-retire` | `https` controls: the shared HTTPS owner keeps running after its boot ended | fails in `RecoverRunning` (or `RecoverStopped`): pool running, `https = "live"` bound to the old boot, `fin = TRUE` |
 | `https-archive` | the previous-boot archive cannot prove the owner quiescent | fails with `https = "records"`, `fin = TRUE`, pool running |
-| `https-stopped` | `hack down --recover` does not start a stopped pool for a pending finalization | fails with the pool stopped, `run = "retained"`, `fin = TRUE` |
+| `https-stopped` | `hack down --recover` does not start a stopped pool for a pending finalization | `NoDeadEnd` fails with a stopped pool, a retained run, pending finalization, retired HTTPS records, a free port and no publication. The final step is `TimeWaitEnds`, `ListenerExits`, `RuntimeDown` or `PoolRecover`. |
 | `https-finish-bound` | `https`, but a completed recovery's archive may run only in the boot the recovery ran in (`FinishAnyBoot = FALSE`) | fails once that boot ends with the archive still owed: `https = "records"`, `fin = TRUE`, pool running |
 | `reuse-no-check` | `https`, with the archive's port claim binding with address reuse but of the wildcard alone, without the exact claim of every local address (`ListenerCheck = FALSE`) | `NoArchiveOverListener` fails: the archive runs while another process listens on the port |
 | `idle-restart` | `positive`, plus another project's `up` that stops the running pool to add its share when the pool is idle (`IdleRestart`, HACK-2535) | passes: `NoDeadEnd`, `Recovers` and `NoRestartOverLiveRun` (a run that became live before the stop is never stopped by it) |
@@ -810,7 +845,7 @@ stopped pool as it was recorded.
 | Control | Switches | Result |
 | --- | --- | --- |
 | `positive` | the gone-home release: the path no longer holds the home and the process scan finds no process naming it | 21 states; both invariants hold |
-| `negative` | today: only the clean-stop release from the home's own records | `NoStrandedMapping` fails right after `Delete` (or `Move`) |
+| `negative` | today: only the clean-stop release from the home's own records | `NoStrandedMapping` fails with a held mapping, a deleted, moved or replaced home, and no remaining processes |
 | `path-only` | the gone-home release without the process scan | `NeverReleaseLive` fails: released while a process of the home lives |
 
 | Model action | Implementation boundary |
@@ -838,7 +873,7 @@ with `amd64 = TRUE`, `intent = TRUE`, `config = FALSE`, `registered = FALSE` and
 `engine = TRUE`. Allowing a running pool to gain intent must fail
 `EngineMatchesIntent` in one `RequestRunning` state with `phase = "running"`,
 `intent = TRUE`, `config = FALSE` and `engine = TRUE`. Both controls require TLC
-exit 12, the named action and same-state witness.
+exit 12, the named invariant and final-state witness.
 
 | Model action | Implementation boundary |
 | --- | --- |
@@ -1020,7 +1055,7 @@ with `attempts = 1`, `bootSelectionMatched = FALSE`, both selected generations
 equal to 1, and `locked = TRUE`. Removing the no-replay guard must fail
 `NoUncertainReplay` in one `Retry` state with `attempts = 2`, `uncertain = TRUE`,
 `bootSelectionMatched = TRUE`, `authority = FALSE` and `locked = TRUE`. Both
-controls require TLC exit 12, the named action and same-state witness; parser
+controls require TLC exit 12, the named invariant and final-state witness. Parser
 errors or other nonzero exits do not qualify.
 
 | Model action | Implementation boundary |
@@ -1343,9 +1378,10 @@ qualification. A passing abstract model does not close those runtime gates.
 
 Runtime contracts in `scripts/lib/tla-runtime-models.ts` require completed positive
 exploration at the stated bound. Negative runs must exit with TLC code 12, name the
-intended invariant, and contain the expected action and violating fields together
-in one state. Parser failures, wrong invariants, split-state evidence and timeouts
-are rejected.
+intended invariant, and contain all required witness fields together in the final
+state of the counterexample. TLC workers can discover the same bad state through
+different transitions, so action labels and source locations are diagnostic.
+Parser failures, wrong invariants, split-state evidence and timeouts are rejected.
 
 ## MCP startup watchdog design
 
@@ -1635,8 +1671,8 @@ its own reviewed source, and a share stays while any graph of that project is li
 or retained.
 
 The positive configuration (three roots, a two-share bound) exhausts **55 distinct
-states**. Four guard-removal controls must fail at the named action with the exact
-same-state witness: `negative` (a graph may select any mounted share) fails
+states**. Four guard-removal controls must fail with the exact final-state
+witness: `negative` (a graph may select any mounted share) fails
 `OwnShareOnly` at `StartGraph`; `unfenced-boot` fails `RunningMountsAudited` at
 `Boot`; `owner-first` fails `OwnerNeverAhead` at `CommitOwner`; and
 `referenced-removal` fails `ReferencedSharesKept` at `CommitRecord`. The controls
@@ -1675,7 +1711,7 @@ storage incarnations. The positive configuration exhausts **6,181 distinct state
 | `StartGraph` / `RemoveContainers` / `Restore` | Graphs use only a verified image of this incarnation and keep a reference to it; data-retaining cleanup removes containers but not the reference; restore never builds. |
 | `Reclaim` / `PruneCache` | Owned, non-current, unreferenced, unused images only, with no build admitted; cache pruning never touches images. |
 
-Three controls each remove one guard and must fail at the named action:
+Three controls each remove one guard and produce a violating state:
 `negative` (reclaim ignores retained references) fails `NoReclaimReferenced` at
 `Reclaim`; `foreign-adoption` (adoption without the label/incarnation check) fails
 `NoForeignAdoption` at `CompleteBuild`; `down-under-build` (down ignores the fence)
@@ -1689,6 +1725,15 @@ and recreated services. Its 43-state positive bound separates stopped history,
 evidence reset, receipt publication and crash/retry. The two negative controls
 remove reset and fresh old-ID absence respectively. Source mapping, regression
 coverage and native proof limits are in `docs/reference/v5-model-coverage.md`.
+
+`shutdown-receipt/ShutdownReceipt.tla` checks the durable ID handoff from
+cleanup to restore after an unacknowledged create. The 16-state positive
+configuration separates the receipt and shutdown commits from deletion and
+allows cleanup to retry after each commit. The missing-receipt control fails
+`CleanupAdmitsRestore` at `Refuse` after cleanup finished and compute is absent.
+The reachability control reaches
+`Restore` after both IDs match and compute is absent. See the
+[source mapping and state chart](../../../docs/reference/v5-model-coverage.md#cleanup-identity-after-an-unacknowledged-create-hack-2628).
 
 ## Foreground port publisher shutdown
 
@@ -1986,3 +2031,10 @@ protected-ID scan and keeper removal. The negative
 control removes the fence guard and can remove the base while pinning. The model
 abstracts failed requests, multiple IDs, graph and build receipts, and Docker's
 last-tag deletion behavior.
+
+## Targeted native Compose start
+
+[TargetedStart](targeted-start/COVERAGE.md) checks appending services and their
+dependencies under the existing owner. TLC checks 1,229 distinct states and
+three negative controls. They drop create ownership, replace a running service,
+and report confirmed cancellation without an owner reply.

@@ -493,6 +493,14 @@ pub(super) fn prepare_shared_changed(
     prepare_shared_review(engine, plan, receipt, revision, false)
 }
 
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn review_shared_contract(
+    plan: &PlanData,
+) -> Result<project::live_source::Contract, CandidateError> {
+    let current = project::snapshot::capture_plan(plan)?;
+    project::live_source::Contract::from_plan(plan, current.receipt())
+}
+
 /// Used only by the normalized hostname transition verifier under the provider lease.
 pub(super) fn prepare_shared_hostnames(
     engine: &Engine<'_>,
@@ -777,7 +785,9 @@ mod tests {
             config::prepare(executable, &goals, &run, &owner, Some(&baseline_inputs)).unwrap();
         let receipt = Receipt {
             started_from: None,
+            extending: BTreeSet::new(),
             normalized_input: None,
+            input_plan_id: None,
             version: 1,
             run,
             owner,
@@ -873,7 +883,9 @@ mod tests {
         let owner = "c".repeat(32);
         let mut receipt = Receipt {
             started_from: None,
+            extending: BTreeSet::new(),
             normalized_input: None,
+            input_plan_id: None,
             version: 1,
             run: run.clone(),
             owner: owner.clone(),
@@ -911,6 +923,7 @@ mod tests {
                     key: "web".into(),
                     name: format!("hkg-{run}-container-0"),
                     id: None,
+                    cleanup_observed_create: false,
                     image: Some(format!("sha256:{}", "a".repeat(64))),
                     phase: "reserved".into(),
                     routing: None,

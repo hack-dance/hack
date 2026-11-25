@@ -456,6 +456,10 @@ describe("CI workflow wiring", () => {
         "${{ needs.changes.outputs.docker_suite == 'true' && needs.changes.outputs.draft != 'true' }}"
       );
     }
+    expect(jobs["resource-e2e"]?.needs).toBe("changes");
+    expect(jobs["resource-e2e"]?.if).toBe(
+      "${{ needs.changes.outputs.resource_e2e == 'true' }}"
+    );
     // `docs site` is a required check: the job always runs, and every step
     // after the scope report is gated, so it passes as a no-op when unneeded.
     expect(jobs["docs-site"]?.needs).toBe("changes");

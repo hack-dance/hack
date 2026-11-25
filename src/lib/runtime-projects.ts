@@ -36,6 +36,8 @@ export type RuntimeContainer = {
   readonly ports: string;
   readonly workingDir: string | null;
   readonly image: string | null;
+  /** Applied Docker hard limit. Zero is unlimited, null is unknown. */
+  readonly configuredMemoryLimitBytes?: number | null;
   readonly labels: Readonly<Record<string, string>> | null;
   readonly mounts: readonly RuntimeContainerMount[];
   readonly networks: readonly RuntimeContainerNetwork[];
@@ -88,6 +90,7 @@ export type ContainerInspectData = {
   readonly observation?: ServiceMemberEvidence | null;
   readonly labels: Record<string, string>;
   readonly image: string | null;
+  readonly configuredMemoryLimitBytes?: number | null;
   readonly mounts: readonly RuntimeContainerMount[];
   readonly networks: readonly RuntimeContainerNetwork[];
 };
@@ -160,6 +163,7 @@ export async function readRuntimeProjects(opts: {
   readonly inspectCache?: RuntimeInspectCache;
   readonly forceInspect?: boolean;
   readonly inventoryOnly?: boolean;
+  readonly readOnlyLifecycle?: boolean;
   readonly profiler?: OperationTimings;
 }): Promise<RuntimeProjectsResult> {
   const profiler = opts.profiler ?? createOperationTimings();
@@ -181,6 +185,7 @@ export async function readRuntimeProjects(opts: {
           "docker",
           "ps",
           "-a",
+          "--no-trunc",
           "--filter",
           "label=com.docker.compose.project",
           "--format",
@@ -286,6 +291,7 @@ export async function readRuntimeProjects(opts: {
       ports,
       workingDir,
       image: inspect?.image ?? null,
+      configuredMemoryLimitBytes: inspect?.configuredMemoryLimitBytes ?? null,
       labels: Object.keys(labels).length > 0 ? labels : null,
       mounts: inspect?.mounts ?? [],
       networks: inspect?.networks ?? [],
@@ -340,6 +346,7 @@ export async function readRuntimeProjects(opts: {
     : await profiler.measure("lifecycle_ms", () =>
         addLifecycleProcessServices({
           runtime: out,
+          readOnly: opts.readOnlyLifecycle,
         })
       );
 
@@ -405,6 +412,7 @@ type LifecycleActivity = {
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Lifecycle pseudo-services are derived from several runtime sources in one normalization step.
 export async function addLifecycleProcessServices(opts: {
   readonly runtime: readonly RuntimeProject[];
+  readonly readOnly?: boolean;
 }): Promise<RuntimeProject[]> {
   if (opts.runtime.length === 0) {
     return [];
@@ -421,7 +429,10 @@ export async function addLifecycleProcessServices(opts: {
       continue;
     }
     try {
-      const state = await readLifecycleState({ projectDir: workingDir });
+      const state = await readLifecycleState({
+        projectDir: workingDir,
+        readOnly: opts.readOnly,
+      });
       stateByWorkingDir.set(workingDir, state);
     } catch {
       unreadable.add(workingDir);
@@ -712,6 +723,7 @@ export function serializeRuntimeProject(
         name: container.name,
         ports: container.ports,
         working_dir: container.workingDir ?? null,
+        started_at: container.observation?.startedAt ?? null,
         image: container.image,
         labels: container.labels,
         mounts: container.mounts.map((mount) => ({
@@ -746,7 +758,7 @@ export async function readContainerLabels(opts: {
 
 // Request only fields used by the runtime model; Docker must not return env values or command arguments.
 const RUNTIME_INSPECT_FORMAT =
-  '{"Id":{{json .Id}},"Config":{"Labels":{{json .Config.Labels}},"Image":{{json .Config.Image}}},"State":{"Status":{{json .State.Status}},"ExitCode":{{json .State.ExitCode}},"StartedAt":{{json .State.StartedAt}},"Health":{{with index .State "Health"}}{"Status":{{json .Status}}}{{else}}null{{end}}},"Mounts":{{json .Mounts}},"NetworkSettings":{"Networks":{{json .NetworkSettings.Networks}}}}';
+  '{"Id":{{json .Id}},"Config":{"Labels":{{json .Config.Labels}},"Image":{{json .Config.Image}}},"State":{"Status":{{json .State.Status}},"ExitCode":{{json .State.ExitCode}},"StartedAt":{{json .State.StartedAt}},"Health":{{with index .State "Health"}}{"Status":{{json .Status}}}{{else}}null{{end}}},"Memory":{{json .HostConfig.Memory}},"Mounts":{{json .Mounts}},"Tmpfs":{{json (index .HostConfig "Tmpfs")}},"NetworkSettings":{"Networks":{{json .NetworkSettings.Networks}}}}';
 
 async function readContainerInspectData(opts: {
   readonly ids: readonly string[];
@@ -789,13 +801,14 @@ async function readContainerInspectData(opts: {
     const config = item.Config;
     const labels = parseInspectLabels(config);
     const image = parseInspectImage(config);
-    const mounts = parseInspectMounts(item.Mounts);
+    const mounts = parseInspectMounts(item.Mounts, item.Tmpfs);
     const networks = parseInspectNetworks(item.NetworkSettings);
 
     const detail: ContainerInspectData = {
       observation: readContainerState(item.State),
       labels,
       image,
+      configuredMemoryLimitBytes: parseInspectMemoryLimit(item.Memory),
       mounts,
       networks,
     };
@@ -896,24 +909,30 @@ function parseInspectImage(config: unknown): string | null {
   return getString(config, "Image") ?? null;
 }
 
-function parseInspectMounts(raw: unknown): RuntimeContainerMount[] {
-  if (!Array.isArray(raw)) {
-    return [];
-  }
+function parseInspectMemoryLimit(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
 
+function parseInspectMounts(
+  raw: unknown,
+  tmpfs: unknown
+): RuntimeContainerMount[] {
   const mounts: RuntimeContainerMount[] = [];
-  for (const value of raw) {
+  for (const value of Array.isArray(raw) ? raw : []) {
     if (!isRecord(value)) {
       continue;
     }
     const source = getString(value, "Source") ?? "";
     const destination = getString(value, "Destination") ?? "";
-    if (!(source && destination)) {
+    const type = getString(value, "Type") ?? "";
+    if (!destination || (!source && type !== "tmpfs")) {
       continue;
     }
     const rwValue = value.RW;
     mounts.push({
-      type: getString(value, "Type") ?? "",
+      type,
       name: getString(value, "Name") ?? null,
       source,
       destination,
@@ -921,7 +940,23 @@ function parseInspectMounts(raw: unknown): RuntimeContainerMount[] {
       rw: typeof rwValue === "boolean" ? rwValue : null,
     });
   }
-  return mounts;
+  return [...mounts, ...inspectTmpfsOnlyMounts(tmpfs, mounts)];
+}
+
+// Compose's tmpfs shorthand can appear only in HostConfig.Tmpfs.
+function inspectTmpfsOnlyMounts(
+  tmpfs: unknown,
+  mounts: readonly RuntimeContainerMount[]
+): RuntimeContainerMount[] {
+  if (!isRecord(tmpfs)) {
+    return [];
+  }
+  const destinations = new Set(mounts.map((mount) => mount.destination));
+  return Object.entries(tmpfs).flatMap(([destination, mode]) =>
+    destination && typeof mode === "string" && !destinations.has(destination)
+      ? [{ type: "tmpfs", source: "", destination, mode, rw: null }]
+      : []
+  );
 }
 
 function parseInspectNetworks(raw: unknown): RuntimeContainerNetwork[] {

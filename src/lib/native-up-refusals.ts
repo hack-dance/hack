@@ -2,6 +2,13 @@ import { HackCliError } from "./cli-result.ts";
 
 export const NATIVE_AUTHORED_ATTEMPT_LIMIT = "native_graph_attempt_limit";
 
+export function nativeStartOutcomeUnknown(): HackCliError {
+  return new HackCliError({
+    code: "E_NATIVE_START_OUTCOME_UNKNOWN",
+    message: "The start may have completed; check hack ps",
+  });
+}
+
 export class NativeAuthoredAttemptLimitError extends HackCliError {
   constructor() {
     super({
@@ -63,7 +70,7 @@ export function refuseUnsupportedNativeUpOptions(opts: {
       `Native \`${command}\` does not support --target; it starts the selected project on this host. Run it without --target.`
     );
   }
-  if (opts.services && opts.services.length > 0) {
+  if (opts.restart && opts.services && opts.services.length > 0) {
     refuse(
       `Native \`${command}\` starts the whole project; service selection is not supported. Run it without service names.`
     );

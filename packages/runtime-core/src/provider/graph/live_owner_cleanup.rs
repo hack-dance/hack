@@ -162,7 +162,7 @@ fn settled_startup(receipt: &Receipt) -> Result<(), CandidateError> {
     if (!starting
         && !matches!(
             receipt.phase.as_str(),
-            "ready-observed" | STARTED_OBSERVED | "failed-retained"
+            "ready-observed" | STARTED_OBSERVED | "failed-retained" | "reconciled-cleanup-only"
         ))
         || !startup.valid(receipt)
         || startup.services.values().any(|s| {
@@ -175,23 +175,6 @@ fn settled_startup(receipt: &Receipt) -> Result<(), CandidateError> {
         return Err(refused());
     }
     initializer_cache::require_resolved(receipt)
-}
-fn immutable(receipt: &Receipt) -> Result<Value, CandidateError> {
-    let mut value = serde_json::to_value(receipt).map_err(|_| refused())?;
-    {
-        // `started_from` is part of the phase (`Receipt::set_phase`).
-        let value = value.as_object_mut().ok_or_else(refused)?;
-        value.remove("phase");
-        value.remove("started_from");
-    }
-    for group in ["resources", "probes"] {
-        if let Some(items) = value.get_mut(group).and_then(Value::as_object_mut) {
-            for item in items.values_mut() {
-                item.as_object_mut().ok_or_else(refused)?.remove("phase");
-            }
-        }
-    }
-    Ok(value)
 }
 fn validate(
     intent: &Intent,
@@ -219,7 +202,7 @@ fn validate(
         || intent.original_sha256 != expected
         || digest(&intent.original)? != expected
         || !hex(&intent.foreground_sha256, 64)
-        || immutable(&intent.original)? != immutable(receipt)?
+        || !cleanup_enrollment::matches_cleanup_progress(&intent.original, receipt)?
         || intent
             .complete_sha256
             .as_deref()
@@ -375,7 +358,30 @@ pub fn recover_live_owner(
         return Err(refused());
     }
     let engine = Engine::connect_cleanup_wait(candidate)?;
-    let (receipt, root) = load(candidate, &engine, run)?;
+    let (mut receipt, root) = load(candidate, &engine, run)?;
+    let mut dead = None;
+    let reconciled;
+    let expected = if matches!(
+        receipt.phase.as_str(),
+        "ready-observed" | "reconciled-cleanup-only"
+    ) && exists(&root.join("state.pending"))?
+    {
+        if digest(&receipt)? != expected {
+            return Err(refused());
+        }
+        let foreground = foreground::DeadOwner::acquire(candidate, run)?;
+        foreground.verify_retirement_ready()?;
+        settled_startup(&receipt)?;
+        // A crash can leave the *first* admission write pending. In that case
+        // the committed receipt has no extending marker and the new names
+        // were never authorized. In all cases pending bytes are evidence only.
+        receipt = reconcile_receipt(&engine, receipt, &root)?;
+        reconciled = digest(&receipt)?;
+        dead = Some(foreground);
+        reconciled.as_str()
+    } else {
+        expected
+    };
     no_pending(&root, &receipt)?;
     if exists(&root.join(FILE))? {
         let intent: Intent = state::read(&root.join(FILE))?;
@@ -387,7 +393,7 @@ pub fn recover_live_owner(
             );
         }
     }
-    let foreground = foreground::DeadOwner::acquire(candidate, run)?;
+    let foreground = dead.map_or_else(|| foreground::DeadOwner::acquire(candidate, run), Ok)?;
     foreground.verify_retirement_ready()?;
     let startup = receipt.relay_startup.as_ref().ok_or_else(refused)?;
     let context = host_relay::context(&receipt.owner, engine.guest().boot_id())?;
@@ -567,23 +573,7 @@ fn finish_retirement(
         return Err(refused());
     }
     host_relay::cleanup_preflight(engine, receipt, root, false)?;
-    for resource in receipt.resources.values() {
-        let observed = inspect_resource(engine, receipt, resource)?;
-        if resource.kind == Kind::Volume {
-            if observed.is_none() {
-                return Err(refused());
-            }
-        } else {
-            let mut by_name = resource.clone();
-            by_name.id = None;
-            if resource.phase != "absent"
-                || observed.is_some()
-                || inspect_resource(engine, receipt, &by_name)?.is_some()
-            {
-                return Err(refused());
-            }
-        }
-    }
+    verify_retired_resources(engine, receipt)?;
     startup::verify_cleanup(engine, receipt)?;
     probes::verify_cleanup(engine, receipt)?;
     let publisher = foreground::transport::root(candidate, &receipt.run)?;
@@ -640,6 +630,35 @@ fn finish_retirement(
     verify()?;
     dependency_slots::recover_cleaned(candidate, receipt, None)?;
     verify()
+}
+
+pub(super) fn verify_retired_resources(
+    engine: &impl Inspection,
+    receipt: &Receipt,
+) -> Result<(), CandidateError> {
+    for resource in receipt.resources.values() {
+        let observed = inspect_resource(engine, receipt, resource)?;
+        if resource.kind == Kind::Volume {
+            // A reserved content-addressed cache can already exist for
+            // another graph. Inspection still requires matching ownership.
+            let retained = plan_reconcile::retained_volume(resource);
+            if (retained && observed.is_none())
+                || (!retained && resource.cache.is_none() && observed.is_some())
+            {
+                return Err(refused());
+            }
+        } else {
+            let mut by_name = resource.clone();
+            by_name.id = None;
+            if resource.phase != "absent"
+                || observed.is_some()
+                || inspect_resource(engine, receipt, &by_name)?.is_some()
+            {
+                return Err(refused());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Completed cleanup grants archival, not refresh replay. The same exact ready
@@ -1053,12 +1072,12 @@ mod tests {
         let value = receipt();
         let mut changed = value.clone();
         changed.phase = "cleanup-intent".into();
-        assert_eq!(immutable(&value).unwrap(), immutable(&changed).unwrap());
+        assert!(cleanup_enrollment::matches_cleanup_progress(&value, &changed).unwrap());
         changed.owner = "f".repeat(32);
-        assert_ne!(immutable(&value).unwrap(), immutable(&changed).unwrap());
+        assert!(!cleanup_enrollment::matches_cleanup_progress(&value, &changed).unwrap());
         changed = value.clone();
         changed.relay_startup.as_mut().unwrap().control_root = "/private/foreign".into();
-        assert_ne!(immutable(&value).unwrap(), immutable(&changed).unwrap());
+        assert!(!cleanup_enrollment::matches_cleanup_progress(&value, &changed).unwrap());
     }
     fn generation(number: u64, phase: &str) -> Receipt {
         let mut value = receipt();
@@ -1258,6 +1277,64 @@ mod tests {
         changed.phase = "removed".into();
         state::write(&path, &changed).unwrap();
         assert!(relay::verify_receipt(&fixture.0, &original).is_err());
+    }
+    #[test]
+    fn live_owner_recovery_admits_first_observed_id_and_pins_known_ids() {
+        let fixture = super::super::tests::Fixture::new();
+        let mut original = generation(1, "preparing");
+        let resource = original.resources.get_mut("container:web").unwrap();
+        resource.id = None;
+        resource.phase = "create-intent".into();
+        let intent = completed(original.clone());
+        let chosen = &intent.original_sha256;
+        let mut observed = original.clone();
+        observed.set_phase("cleanup-intent");
+        let resource = observed.resources.get_mut("container:web").unwrap();
+        resource.id = Some("a".repeat(64));
+        resource.cleanup_observed_create = true;
+        validate(&intent, &observed, chosen, "boot").unwrap();
+
+        let path = fixture.0.join("state.json");
+        state::write(&path, &observed).unwrap();
+        relay::verify_receipt(&fixture.0, &original).unwrap();
+        relay::verify_receipt(&fixture.0, &observed).unwrap();
+
+        // A selection that already carries the observed ID requires that exact ID.
+        let mut different = observed.clone();
+        different.resources.get_mut("container:web").unwrap().id = Some("b".repeat(64));
+        state::write(&path, &different).unwrap();
+        assert_eq!(
+            relay::verify_receipt(&fixture.0, &observed)
+                .unwrap_err()
+                .code,
+            refused().code
+        );
+
+        let mut pinned = original.clone();
+        let resource = pinned.resources.get_mut("container:web").unwrap();
+        resource.id = observed.resources["container:web"].id.clone();
+        resource.phase = "created".into();
+        let pinned_intent = completed(pinned.clone());
+        pinned.set_phase("cleanup-intent");
+        validate(
+            &pinned_intent,
+            &pinned,
+            &pinned_intent.original_sha256,
+            "boot",
+        )
+        .unwrap();
+        pinned.resources.get_mut("container:web").unwrap().id = Some("b".repeat(64));
+        assert_eq!(
+            validate(
+                &pinned_intent,
+                &pinned,
+                &pinned_intent.original_sha256,
+                "boot"
+            )
+            .unwrap_err()
+            .code,
+            refused().code
+        );
     }
     #[test]
     fn historical_recovery_survives_eviction_without_lending_current_authority() {

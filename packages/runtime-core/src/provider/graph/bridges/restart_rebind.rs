@@ -60,7 +60,12 @@ fn probe_tick<L>(
         if !supervised_service(excluded, &name) {
             continue;
         }
-        if generations.get(&name).ok_or_else(refused)? == &expected {
+        // Only a confirmed publication may enroll a new supervisor target.
+        // An uncommitted extension can already have a running container.
+        if generations
+            .get(&name)
+            .is_none_or(|previous| previous == &expected)
+        {
             continue;
         }
         let lease = match acquire(ConnectionMode::Allocation) {
@@ -114,16 +119,22 @@ fn current(
     check: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
     check()?;
-    let snapshot = inspect_using(candidate, engine, &selected.previous.run)?;
-    let resource = snapshot
+    let targets = inspect_targets_scoped(
+        candidate,
+        engine,
+        &selected.previous.run,
+        &BTreeSet::from([selected.previous.service.as_str()]),
+        None,
+    )?;
+    let resource = targets
         .receipt
         .resources
         .get(&format!("container:{}", selected.previous.service))
         .ok_or_else(refused)?;
-    let endpoint = bridge_endpoint(&snapshot, &selected.previous).ok_or_else(refused)?;
+    let endpoint = targets.endpoint(&selected.previous).ok_or_else(refused)?;
     restart_policy::verify_admitted(
         resource,
-        &inspect_resource(engine, &snapshot.receipt, resource)?.ok_or_else(refused)?,
+        &inspect_resource(engine, &targets.receipt, resource)?.ok_or_else(refused)?,
     )?;
     if !eligible(
         &selected.previous,
@@ -148,19 +159,44 @@ pub(in crate::provider::graph) fn changed_publications(
     with_available_lease(
         || Engine::connect_cleanup(candidate),
         |engine| {
-            let snapshot = inspect_using(candidate, &engine, run)?;
-            let store = load_store(candidate, &engine, false)?;
-            let mut changed = Vec::new();
-            for (&slot, assignment) in &store.slots {
-                if assignment.run != run || assignment.phase != "running" {
-                    continue;
+            let (receipt, _) = load(candidate, &engine, run)?;
+            let store = match load_store(candidate, &engine, false) {
+                // An interrupted extension can leave a shared pending bridge
+                // write. Existing probes still run, while bridge mutations
+                // wait for the journal to be reconciled.
+                Err(error)
+                    if error.code == "bridge_journal_uncertain"
+                        && !receipt.extending.is_empty() =>
+                {
+                    return Ok(Vec::new());
                 }
-                let resource = snapshot
+                result => result?,
+            };
+            let assignments = store
+                .slots
+                .iter()
+                .filter(|(_, assignment)| {
+                    assignment.run == run
+                        && assignment.phase == "running"
+                        && !receipt.extending.contains(&assignment.service)
+                })
+                .collect::<Vec<_>>();
+            if assignments.is_empty() {
+                return Ok(Vec::new());
+            }
+            let services = assignments
+                .iter()
+                .map(|(_, assignment)| assignment.service.as_str())
+                .collect();
+            let targets = inspect_targets_scoped(candidate, &engine, run, &services, None)?;
+            let mut changed = Vec::new();
+            for (&slot, assignment) in assignments {
+                let resource = targets
                     .receipt
                     .resources
                     .get(&format!("container:{}", assignment.service))
                     .ok_or_else(refused)?;
-                let Some(endpoint) = bridge_endpoint(&snapshot, assignment) else {
+                let Some(endpoint) = targets.endpoint(assignment) else {
                     continue;
                 };
                 if eligible(assignment, resource, endpoint, engine.guest().boot_id())? {
@@ -254,20 +290,19 @@ fn route_endpoint(
         .resources
         .get(&format!("container:{name}"))
         .ok_or_else(refused)?;
+    if receipt.extending.contains(name) {
+        return Ok(None);
+    }
+    if resource.phase != "started" {
+        return Err(refused());
+    }
     let route = resource.routing.as_ref().ok_or_else(refused)?;
     let inspected = inspect_resource(engine, receipt, resource)?.ok_or_else(refused)?;
     restart_policy::verify_admitted(resource, &inspected)?;
     if !matches!(observation(&inspected)?, Observation::Running { .. }) {
         return Ok(None);
     }
-    let mut networks = BTreeMap::new();
-    for (key, network) in receipt
-        .resources
-        .iter()
-        .filter(|(_, r)| r.kind == Kind::Network)
-    {
-        networks.insert(key.clone(), inspect_resource(engine, receipt, network)?);
-    }
+    let networks = inspect_selected_networks(engine, receipt, &BTreeSet::from([name]))?;
     endpoints::resolve_attached(
         &inspected,
         &networks,
@@ -324,6 +359,12 @@ pub(in crate::provider::graph) fn supervise_probes(
             // endpoint under this independently admitted mutation lease.
             let (mut receipt, root) = load(candidate, engine, run)?;
             check()?;
+            let pending = root.join("state.pending");
+            if pending.exists() || pending.is_symlink() {
+                // A receipt write cannot safely enroll a new probe generation
+                // until the pending graph journal is reconciled.
+                return Ok(false);
+            }
             let Some(endpoint) = route_endpoint(engine, &receipt, name)? else {
                 return Ok(false);
             };
@@ -349,6 +390,33 @@ pub(in crate::provider::graph) fn supervise_probes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unseen_route_does_not_stop_or_rearm_until_publication_seeds_it() {
+        let mut generations = BTreeMap::from([("web".into(), "before".into())]);
+        let mut rearmed = Vec::new();
+        for seed in [false, true] {
+            if seed {
+                generations.insert("redis".into(), "published".into());
+            }
+            probe_tick(
+                false,
+                &mut generations,
+                &BTreeSet::new(),
+                |_| Ok(()),
+                |_| Ok(BTreeMap::from([("redis".into(), "restarted".into())])),
+                |_, service, _| {
+                    rearmed.push(service.to_owned());
+                    Ok(true)
+                },
+            )
+            .unwrap();
+            assert_eq!(rearmed.len(), usize::from(seed));
+        }
+        assert_eq!(rearmed, ["redis"]);
+        assert_eq!(generations["web"], "before");
+        assert_eq!(generations["redis"], "restarted");
+    }
 
     #[test]
     fn exited_publishers_never_rearm_but_healthy_siblings_follow_new_generations() {

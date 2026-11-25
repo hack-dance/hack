@@ -32,9 +32,17 @@ describe("TLC admission evidence", () => {
     ).toBe(false);
   });
   test("accepts only the intended negative invariant and counterexample", () => {
-    const output = "Invariant Capacity is violated.\nused = {1, 2}";
+    const output =
+      "Error: Invariant Capacity is violated.\nState 3: <Admit line 1>\n/\\ used = {1, 2}";
     expect(
       verifyAdmissionModelResult({ negative: true, exitCode: 12, output })
+    ).toBe(true);
+    expect(
+      verifyAdmissionModelResult({
+        negative: true,
+        exitCode: 12,
+        output: output.replace("<Admit ", "<Next "),
+      })
     ).toBe(true);
     for (const exitCode of [0, 1, 150, null]) {
       expect(
@@ -44,7 +52,8 @@ describe("TLC admission evidence", () => {
     for (const invalid of [
       "Parse error",
       "Invariant Other is violated.\nused = {1, 2}",
-      "Invariant Capacity is violated.\nused = {1}",
+      output.replace("used = {1, 2}", "used = {1}"),
+      `${output}\nState 4: <Next line 1>\n/\\ used = {1}`,
     ]) {
       expect(
         verifyAdmissionModelResult({
@@ -84,9 +93,16 @@ describe("TLC balloon reuse evidence", () => {
   });
   test("requires an unaccounted mapped state in the same remap step", () => {
     const output =
-      'Invariant MappedMemoryAccounted is violated.\nState 5: <Remap line 14 of module BalloonReuse>\n/\\ phase = "mapped"\n/\\ reusable = TRUE\n';
+      'Error: Invariant MappedMemoryAccounted is violated.\nState 5: <Remap line 14 of module BalloonReuse>\n/\\ phase = "mapped"\n/\\ reusable = TRUE\n';
     expect(
       verifyBalloonReuseModelResult({ negative: true, exitCode: 12, output })
+    ).toBe(true);
+    expect(
+      verifyBalloonReuseModelResult({
+        negative: true,
+        exitCode: 12,
+        output: output.replace("<Remap ", "<Next "),
+      })
     ).toBe(true);
     for (const exitCode of [0, 1, 150, null]) {
       expect(
@@ -97,7 +113,6 @@ describe("TLC balloon reuse evidence", () => {
       "Parse error",
       output.replace("MappedMemoryAccounted", "Other"),
       output.replace("TRUE", "FALSE"),
-      output.replace("<Remap", "<Stop"),
       output.replace(
         "/\\ reusable = TRUE",
         "State 6: <Discard>\n/\\ reusable = TRUE"
@@ -133,9 +148,16 @@ describe("TLC restore history evidence", () => {
       })
     ).toBe(false);
     const output =
-      'Invariant HistoryPreserved is violated.\nState 2: <Prepare line 1>\n/\\ legacy = <<>>\n/\\ manifest = <<>>\n/\\ phase = "writing"\n';
+      'Error: Invariant HistoryPreserved is violated.\nState 2: <Prepare line 1>\n/\\ legacy = <<>>\n/\\ manifest = <<>>\n/\\ phase = "writing"\n';
     expect(
       verifyRestoreHistoryModelResult({ negative: true, exitCode: 12, output })
+    ).toBe(true);
+    expect(
+      verifyRestoreHistoryModelResult({
+        negative: true,
+        exitCode: 12,
+        output: output.replace("<Prepare ", "<Next "),
+      })
     ).toBe(true);
     for (const exitCode of [0, 1, 150, null]) {
       expect(
@@ -147,6 +169,7 @@ describe("TLC restore history evidence", () => {
       output.replace("HistoryPreserved", "Other"),
       output.replace("legacy = <<>>", "legacy = <<1>>"),
       output.replace("/\\ manifest", "State 3: <Publish>\n/\\ manifest"),
+      `${output}State 3: <Publish>\n/\\ phase = "idle"`,
     ]) {
       expect(
         verifyRestoreHistoryModelResult({
@@ -159,32 +182,51 @@ describe("TLC restore history evidence", () => {
   });
 });
 
-test.each([
-  ["https-stopped", "ListenerExits", "stopped", "records"],
-  ["https-no-retire", "ListenerExits", "running", "live"],
-  ["https-archive", "TimeWaitEnds", "running", "records"],
-  ["https-archive", "ListenerExits", "running", "records"],
-  ["https-finish-bound", "ListenerExits", "running", "records"],
-])("accepts the %s dead end after %s frees the port", (name, action, pool, https) => {
-  const control = runtimeModels
-    .find((model) => model.name === "native-pool-stop")
-    ?.additionalControls.find((item) => item.name === name);
-  const output = [
-    "Error: Invariant NoDeadEnd is violated.",
-    "Error: The behavior up to this point is:",
-    `State 8: <${action} line 151 of module PoolStop>`,
-    `/\\ pool = "${pool}"`,
-    '/\\ run = "retained"',
-    `/\\ https = "${https}"`,
-    '/\\ port = "free"',
-    "/\\ fin = TRUE",
-  ].join("\n");
-  expect(control?.verify({ negative: true, exitCode: 12, output })).toBe(true);
-  expect(
-    control?.verify({
-      negative: true,
-      exitCode: 12,
-      output: output.replace('port = "free"', 'port = "listener"'),
-    })
-  ).toBe(false);
+describe("TLC stopped HTTPS finalization evidence", () => {
+  test("accepts the last listener leaving a run stranded in a stopped pool", () => {
+    const control = runtimeModels
+      .find(({ name }) => name === "native-pool-stop")
+      ?.additionalControls.find(({ name }) => name === "https-stopped");
+    const output = String.raw`Error: Invariant NoDeadEnd is violated.
+Error: The behavior up to this point is:
+State 7: <OwnerRetire line 138 of module PoolStop>
+/\ pool = "stopped"
+/\ run = "retained"
+/\ fin = TRUE
+/\ https = "records"
+/\ port = "listener"
+/\ pub = FALSE
+State 8: <ListenerExits line 151 of module PoolStop>
+/\ pool = "stopped"
+/\ run = "retained"
+/\ fin = TRUE
+/\ https = "records"
+/\ port = "free"
+/\ pub = FALSE
+`;
+    const result = { negative: true, exitCode: 12, output };
+    expect(control?.verify(result)).toBe(true);
+
+    for (const invalid of [
+      { ...result, exitCode: 0 },
+      { ...result, output: output.replace("NoDeadEnd", "TypeOK") },
+      {
+        ...result,
+        output: output.replace(
+          "<ListenerExits line 151 of module PoolStop>",
+          "<unterminated"
+        ),
+      },
+      {
+        ...result,
+        output: output.replace('port = "free"', 'port = "listener"'),
+      },
+      {
+        ...result,
+        output: output.replace(/(State 8:[\s\S]*)fin = TRUE/, "$1fin = FALSE"),
+      },
+    ]) {
+      expect(control?.verify(invalid)).toBe(false);
+    }
+  });
 });

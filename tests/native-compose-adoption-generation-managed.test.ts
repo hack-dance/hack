@@ -135,9 +135,9 @@ test("v3 saved adoption consumes canonical original generated sources without en
 });
 
 boundedTest(
-  "rollback releases a moved-aside generated env override that execution still refuses (HACK-1437)",
+  "rollback releases a moved-aside generated env override used through a foreground alias (HACK-1437)",
   async () => {
-    const files = await publishedManagedAdoption();
+    const files = await publishedManagedAdoption("references");
     const override = files[2] ?? "";
     const envText = await readFile(override, "utf8");
     const aside = join(context.root, "moved-aside-override.yml");
@@ -166,6 +166,42 @@ boundedTest(
   },
   ROLLBACK_RECOVERY_BUDGET_MS
 );
+
+test("an empty foreground env override can be adopted and rolled back", async () => {
+  const files = await publishedManagedAdoption("empty");
+  const saved = await openLegacyComposeAdoptedGenerationStore({
+    projectRoot: context.projectRoot,
+    mode: "saved",
+  });
+  try {
+    expect(await saved.loadActive()).toBeDefined();
+    await saved.rollback();
+  } finally {
+    await saved.close();
+  }
+  expect((await readReceipt()).publication.phase).toBe("rolled-back");
+  expect(await readFile(files[2] ?? "", "utf8")).toBe("services: {}\n");
+});
+
+test("adoption accepts a restarted container that omitted the empty env override", async () => {
+  const files = await publishedManagedAdoption("empty-omitted");
+  const override = files[2] ?? "";
+  const aside = join(context.root, "moved-empty-override.yml");
+  const saved = await openLegacyComposeAdoptedGenerationStore({
+    projectRoot: context.projectRoot,
+    mode: "saved",
+  });
+  try {
+    expect(await saved.loadActive()).toBeDefined();
+    await rename(override, aside);
+    await saved.rollback();
+  } finally {
+    await saved.close();
+  }
+  expect((await readReceipt()).publication.phase).toBe("rolled-back");
+  expect(await lstat(override).catch(() => null)).toBeNull();
+  expect(await readFile(aside, "utf8")).toBe("services: {}\n");
+});
 
 boundedTest(
   "rollback still binds the generated runtime override when the env override is released (HACK-1437)",

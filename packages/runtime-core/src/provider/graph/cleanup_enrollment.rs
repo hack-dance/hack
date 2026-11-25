@@ -93,6 +93,48 @@ fn refused() -> CandidateError {
         "Graph relay enrollment requires explicit recovery or confirmed acknowledgement before this operation.",
     )
 }
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn immutable(receipt: &Receipt) -> Result<Value, CandidateError> {
+    let mut value = serde_json::to_value(receipt).map_err(|_| refused())?;
+    {
+        // `started_from` is part of the phase (`Receipt::set_phase`).
+        let value = value.as_object_mut().ok_or_else(refused)?;
+        value.remove("phase");
+        value.remove("started_from");
+        value.remove("extending");
+    }
+    for group in ["resources", "probes"] {
+        if let Some(items) = value.get_mut(group).and_then(Value::as_object_mut) {
+            for item in items.values_mut() {
+                item.as_object_mut().ok_or_else(refused)?.remove("phase");
+            }
+        }
+    }
+    Ok(value)
+}
+
+/// An existing cleanup may advance an unacknowledged create to its observed
+/// ID. Keep every already-selected ID in the immutable comparison.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn matches_cleanup_progress(
+    original: &Receipt,
+    current: &Receipt,
+) -> Result<bool, CandidateError> {
+    let mut selected = immutable(current)?;
+    for (key, resource) in &current.resources {
+        if original.resources.get(key).is_some_and(|previous| {
+            previous.id != resource.id && previous.matches_cleanup_id(resource, &current.phase)
+        }) {
+            let item = selected["resources"][key]
+                .as_object_mut()
+                .ok_or_else(refused)?;
+            item.insert("id".into(), Value::Null);
+            item.remove("cleanup_observed_create");
+        }
+    }
+    Ok(immutable(original)? == selected)
+}
+
 fn exists(path: &Path) -> Result<bool, CandidateError> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),

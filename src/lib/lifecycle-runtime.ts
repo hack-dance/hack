@@ -164,6 +164,8 @@ export async function ensurePrivateLifecycleLog(opts: {
 export async function readLifecycleState(opts: {
   readonly projectDir: string;
   readonly stateLocked?: boolean;
+  /** Observation must not archive an unreadable legacy journal. */
+  readonly readOnly?: boolean;
 }): Promise<readonly LifecycleStateEntry[]> {
   const root = resolveLifecycleRootDir(opts);
   const path = resolveLifecycleStatePath(opts);
@@ -201,7 +203,7 @@ export async function readLifecycleState(opts: {
   try {
     parsed = JSON.parse(text);
   } catch {
-    if (await supervisorStateRecorded(root)) {
+    if (opts.readOnly || (await supervisorStateRecorded(root))) {
       throw lifecycleStateRefused();
     }
     if (!opts.stateLocked) {

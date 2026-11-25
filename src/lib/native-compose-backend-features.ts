@@ -9,6 +9,7 @@ import {
   selectNativePlatformModes,
 } from "../backends/native-project-platform.ts";
 import { readNativeSelection } from "../backends/native-project-selection.ts";
+import { selectNativeServices } from "../backends/native-service-selection.ts";
 import {
   type CandidateLauncher,
   currentCandidateLauncher,
@@ -834,6 +835,8 @@ export async function refuseNativeComposeBackendFeatures(
     readonly adaptationFile?: string;
     /** Every adaptation native start could apply; see {@link readComposeBackendFeatures}. */
     readonly adaptationCandidates?: readonly (string | undefined)[];
+    readonly targets?: readonly string[];
+    readonly profiles?: readonly string[];
     readonly restart: boolean;
     /** The selected project's root, printed as `--path` in the fallback. */
     readonly projectRoot?: string;
@@ -843,17 +846,24 @@ export async function refuseNativeComposeBackendFeatures(
     readonly env?: string;
   } & ComposeBackendFeatureOptions
 ): Promise<void> {
-  const features = await readComposeBackendFeatures(opts.composeFile, {
-    adaptationFile: opts.adaptationFile,
-    adaptationCandidates: opts.adaptationCandidates,
-    buildsEnabled: opts.buildsEnabled,
-  });
+  const source = await readNativeComposeDocument(opts.composeFile);
+  const document =
+    opts.targets?.length && isRecord(source) && isRecord(source.services)
+      ? {
+          ...source,
+          services: selectNativeServices({
+            services: source.services,
+            targets: opts.targets,
+            profiles: opts.profiles ?? [],
+          }),
+        }
+      : source;
+  const features = await classifyAdapted(
+    document,
+    adaptationCandidates(opts),
+    opts.buildsEnabled === true
+  );
   if (features.length > 0) {
-    const document =
-      features.includes("external_network") ||
-      (opts.buildsEnabled === true && features.includes("unsupported_build"))
-        ? await readNativeComposeDocument(opts.composeFile)
-        : undefined;
     const foreignNetworks = features.includes("external_network")
       ? foreignComposeNetworkNames(document)
       : [];

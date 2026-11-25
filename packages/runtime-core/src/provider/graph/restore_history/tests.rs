@@ -3,7 +3,9 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 fn receipt(index: usize) -> Receipt {
     Receipt {
         started_from: None,
+        extending: BTreeSet::new(),
         normalized_input: None,
+        input_plan_id: None,
         relay_startup: None,
         relay_cleanup: None,
         version: 1,
@@ -33,6 +35,7 @@ fn receipt(index: usize) -> Receipt {
                 key: "web".into(),
                 name: "owned-web".into(),
                 id: Some(format!("{index:064x}")),
+                cleanup_observed_create: false,
                 image: None,
                 phase: "absent".into(),
                 amd64_emulation: None,

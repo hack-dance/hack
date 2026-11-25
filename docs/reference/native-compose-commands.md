@@ -65,6 +65,15 @@ running, healthy when it declares a health check, and each initializer job must
 have exited successfully. An older healthy container does not satisfy a new
 generation's readiness.
 
+Each readiness scan uses the remaining start-phase budget in whole milliseconds,
+capped at 60 seconds per scan. Until a timeout has been retried, each Docker
+read gets at most half the time left in its scan, up to 15 seconds. This
+leaves time for one fresh scan if a read stalls. A timeout discards the partial
+scan and retries the complete read-only proof once within the same start deadline. Only an owned,
+ready observation made before that deadline can advance startup. The existing
+post-deadline check for a transient restart endpoint can diagnose a topology
+refusal and cannot report readiness.
+
 Compiler-selected HTTP routes use the already running global Caddy proxy and the
 external `hack-dev` network on the selected Docker engine. Only routed services
 join that ingress. Hack verifies the exact engine, proxy and network before effects,
@@ -133,6 +142,23 @@ detect changes; they do not freeze arbitrary external filesystem edits. Generate
 documents can contain decrypted values and remain in owned private files with
 restricted permissions. They are never part of the public plan or JSON output.
 Do not copy these documents into source control or attach them to diagnostics.
+
+## Shared pool socket capacity
+
+A fresh development pool started with a project share reserves space for 16
+application bridge sockets and eight host-dependency sockets by default. The
+combined limit is 32, subject to the pinned provider’s boot command-line
+budget. Project shares also consume that budget. Project minimums take precedence over spare capacity,
+and explicit exact counts are honored. Projects and branches share the available
+slots in each direction. A new start can be refused if the live pool has too
+few free slots. The default applies at pool creation; existing pool capacities
+stay in effect.
+
+Fresh pools use compact guest paths for project shares and sockets. Pools
+created with the previous layout keep their recorded paths across stop,
+restart, and recovery. An older runtime refuses a compact pool. Keep the
+original home when its data is needed, or select a separate native home for
+a fresh pool.
 
 ## Owned project networks
 
@@ -369,6 +395,18 @@ then rechecks generation, ownership and pending intent. A crash after retirement
 leaves the pending generation; retry proves absence again and preserves any later
 foreign claim. A receipt already lost by an older version cannot be reconstructed
 from orphan generation files by this recovery path.
+
+A readiness read timeout that leaves engine intent pending reports
+`E_RECOVERY_REQUIRED`, with `compose-readiness` and `probe-timeout` under
+`error.detail.native_compose_effect_refusal` in JSON. Inspect with
+`hack ps --json` or run `hack down --recover` before trying another start.
+When Docker responds and workloads remain unready through the deadline,
+startup reports `E_STARTUP_INCOMPLETE`. A standalone ownership read timeout
+reports `E_COMPOSE_FAILED`.
+
+An owned initializer from the proposed generation that exits nonzero with
+restart disabled makes startup incomplete as soon as Hack verifies the exit.
+The generation remains pending for explicit recovery.
 
 Storage startup diagnostics retain the first closed owner boundary through witness
 error normalization. The stage distinguishes selection, cold absence, dependency,

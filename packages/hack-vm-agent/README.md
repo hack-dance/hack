@@ -12,10 +12,13 @@ and keeps the leader unreaped through Release. Signal targets the pinned group,
 including descendants after the leader exits. Release kills the group, reaps
 the leader and closes the agent's pipe ends even if an escaped descendant
 holds a writer. Release discards unread output. Output offsets address
-the retained tail of each pipe (64 KiB). After overflow, the stream reports truncation on every subsequent read. The output reply carries its absolute start offset and signals truncation and EOF
-separately. Read both streams through EOF when complete output is required. A descendant
-that inherits a writer can delay EOF indefinitely. An agent
-restart changes the incarnation and invalidates every old handle. A timed-out
+the retained tail of each pipe (64 KiB). After overflow, the stream reports
+truncation on every subsequent read. The output reply carries its absolute
+start offset and signals truncation and EOF separately. The leader's terminal
+status can arrive while the supervisor still has bytes to drain. Read both
+streams through EOF when complete output is required. A descendant that inherits
+a writer can delay EOF indefinitely. An agent restart changes the incarnation
+and invalidates every old handle. A timed-out
 start can arrive after another connection observes absence. Inspect and keep
 the outcome unknown while the old request can still arrive.
 

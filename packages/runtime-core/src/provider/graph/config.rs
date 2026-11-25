@@ -676,6 +676,18 @@ pub(super) fn prepare_delivery(
     source: Option<&source::Inputs>,
     options: DeliveryOptions,
 ) -> Result<Prepared, CandidateError> {
+    prepare_with_ownership(inputs, readiness, run, owner, source, options, None)
+}
+
+pub(super) fn prepare_with_ownership(
+    inputs: ExecutionInputs,
+    readiness: &BTreeMap<String, Condition>,
+    run: &str,
+    owner: &str,
+    source: Option<&source::Inputs>,
+    options: DeliveryOptions,
+    current: Option<&Receipt>,
+) -> Result<Prepared, CandidateError> {
     let DeliveryOptions {
         environment: delivery,
         dependency_hosts,
@@ -766,6 +778,24 @@ pub(super) fn prepare_delivery(
         }
     }
     let mut resources = BTreeMap::new();
+    let mut used_names: BTreeSet<String> = current
+        .into_iter()
+        .flat_map(|receipt| receipt.resources.values().map(|r| r.name.clone()))
+        .collect();
+    let mut resource_name = |kind: Kind, key: &str, index: usize| {
+        if let Some(owned) =
+            current.and_then(|receipt| receipt.resources.get(&format!("{}:{key}", kind.word())))
+        {
+            return Ok(owned.name.clone());
+        }
+        let prefix = format!("hkg-{run}-{}-", kind.word());
+        (index..64)
+            .chain(0..index)
+            .map(|slot| format!("{prefix}{slot}"))
+            .find(|candidate| used_names.insert(candidate.clone()))
+            .ok_or_else(|| error("graph_budget", "No graph resource name is available."))
+    };
+    let plan_id = current.map_or(inputs.review.plan_id.as_str(), |receipt| &receipt.plan_id);
     for (kind, entries) in [(Kind::Network, networks), (Kind::Volume, volumes)] {
         for (index, key) in entries.into_iter().enumerate() {
             let cache = (kind == Kind::Volume).then(|| caches.get(&key)).flatten();
@@ -785,11 +815,12 @@ pub(super) fn prepare_delivery(
                 restart_policy: None,
                 kind,
                 key: key.clone(),
-                name: cache.map_or_else(
-                    || format!("hkg-{run}-{}-{index}", kind.word()),
-                    |cache| cache.name(),
-                ),
+                name: match cache {
+                    Some(cache) => cache.name(),
+                    None => resource_name(kind, &key, index)?,
+                },
                 id: None,
+                cleanup_observed_create: false,
                 image: None,
                 phase: "reserved".into(),
                 amd64_emulation: None,
@@ -814,19 +845,14 @@ pub(super) fn prepare_delivery(
             restart_policy: restart_policies.get(name).copied(),
             kind: Kind::Container,
             key: name.clone(),
-            name: format!("hkg-{run}-container-{index}"),
+            name: resource_name(Kind::Container, name, index)?,
             id: None,
+            cleanup_observed_create: false,
             image: Some(image.clone()),
             phase: "reserved".into(),
             amd64_emulation: service.amd64_emulation,
         };
-        let labels = labels(
-            owner,
-            run,
-            &plan.namespace,
-            &inputs.review.plan_id,
-            &resource,
-        );
+        let labels = labels(owner, run, &plan.namespace, plan_id, &resource);
         let network_names = resources
             .values()
             .filter(|resource| resource.kind == Kind::Network)
@@ -1066,7 +1092,7 @@ pub(super) fn prepare_delivery(
         probes,
         resources,
         namespace: plan.namespace.clone(),
-        plan_id: inputs.review.plan_id.clone(),
+        plan_id: plan_id.to_owned(),
     })
 }
 

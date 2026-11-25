@@ -19,6 +19,7 @@ async function run(
   let ended = 0;
   const stop = watchNativeStartPool({
     home: "/fixture",
+    bootId: boot,
     checkMs: 5,
     graceMs: 20,
     read: () => {
@@ -46,7 +47,6 @@ test("a start whose pool stopped, crashed into recovery or booted again ends aft
     record({ phase: "stopped" }),
     record({ phase: "recovered-unclean" }),
     record({ guest_boot_id: "87654321-4321-4321-4321-cba987654321" }),
-    record({ token: "b".repeat(32) }),
   ]) {
     expect(await run([record({}), ended])).toBe(1);
   }
@@ -55,6 +55,11 @@ test("a start whose pool stopped, crashed into recovery or booted again ends aft
 test("a pool that is only slow never ends the start", async () => {
   for (const slow of [
     record({ phase: "starting" }),
+    record({
+      phase: "starting",
+      guest_boot_id: null,
+      previous_guest_boot_id: boot,
+    }),
     record({ phase: "stopping" }),
     new Error("unreadable"),
     "not json",
@@ -64,12 +69,30 @@ test("a pool that is only slow never ends the start", async () => {
   }
 });
 
-test("a start that never saw its pool running is not ended by a stopped record", async () => {
-  // The start may be booting the pool itself: no identity is recorded yet.
-  expect(await run([record({ phase: "stopped" })])).toBe(0);
+test("the first poll can prove the admitted boot already stopped", async () => {
+  expect(await run([record({ phase: "stopped" })])).toBe(1);
   expect(
-    await run([record({ phase: "starting" }), record({ phase: "stopped" })])
-  ).toBe(0);
+    await run([
+      record({
+        phase: "stopped-before-engine",
+        guest_boot_id: null,
+        previous_guest_boot_id: boot,
+      }),
+    ])
+  ).toBe(1);
+  expect(await run([record({ phase: "stopped", guest_boot_id: null })])).toBe(
+    0
+  );
+});
+
+test("a new pool owner proves loss once a matching boot identified the former owner", async () => {
+  const replacement = record({
+    phase: "starting",
+    token: "b".repeat(32),
+    guest_boot_id: null,
+  });
+  expect(await run([replacement])).toBe(0);
+  expect(await run([record({}), replacement])).toBe(1);
 });
 
 test("a start that finishes on its own within the grace is not ended", async () => {
@@ -90,6 +113,7 @@ test("a start whose provider process vanished while the record still says runnin
     const asked: number[] = [];
     const stop = watchNativeStartPool({
       home: "/fixture",
+      bootId: boot,
       checkMs: 5,
       graceMs: 10,
       read: () => Promise.resolve(running),
@@ -108,27 +132,37 @@ test("a start whose provider process vanished while the record still says runnin
   }
   // A record that names another provider (a new boot) is the existing rule's case,
   // never this one: no pid of it is asked about.
-  let asked = 0;
-  let reads = 0;
+});
+
+test("a successor boot retires the attempt without probing the successor's PID", async () => {
+  const pids: number[] = [];
+  const retired = Promise.withResolvers<void>();
   const stop = watchNativeStartPool({
     home: "/fixture",
-    checkMs: 5,
-    graceMs: 10,
-    read: () => {
-      reads += 1;
-      return Promise.resolve(
-        reads === 1 ? running : record({ process: { pid: 5151 } })
-      );
-    },
-    gone: () => {
-      asked += 1;
+    bootId: boot,
+    graceMs: 0,
+    read: async () =>
+      record({
+        guest_boot_id: "87654321-4321-4321-4321-cba987654321",
+        process: { pid: 5151 },
+      }),
+    gone: (pid) => {
+      pids.push(pid);
       return true;
     },
-    onEnded: () => undefined,
+    onEnded: retired.resolve,
   });
-  await Bun.sleep(60);
-  stop();
-  expect(asked).toBe(0);
+  try {
+    expect(
+      await Promise.race([
+        retired.promise,
+        Bun.sleep(100).then(() => "timeout"),
+      ])
+    ).toBeUndefined();
+    expect(pids).toEqual([]);
+  } finally {
+    stop();
+  }
 });
 
 test("a ready start ends at the first check that sees its boot ended; one still starting keeps the grace", async () => {
@@ -144,6 +178,7 @@ test("a ready start ends at the first check that sees its boot ended; one still 
     const records = [record({}), record({ phase: "stopped" })];
     const stop = watchNativeStartPool({
       home: "/fixture",
+      bootId: boot,
       checkMs: 5,
       graceMs: () => {
         readAt = index;

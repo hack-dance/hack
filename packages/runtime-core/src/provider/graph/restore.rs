@@ -136,7 +136,7 @@ fn verify_fresh_change(
         || generation != fresh.generation
         || (receipt.normalized_input.as_ref() != Some(&fresh.identity)
             && !change.is_some_and(|change| change.matches_fresh(receipt, &fresh.identity)))
-        || (plan != receipt.plan_id
+        || ((plan != receipt.input_plan_id.as_deref().unwrap_or(&receipt.plan_id))
             && receipt
                 .source
                 .as_ref()
@@ -351,7 +351,7 @@ fn restore_inputs(
             // A source-independent review of the exact retained Compose input
             // replays under the retained plan; resource bindings are rechecked below.
             let plan = if normalized::source_independent_review(&receipt, &inputs.review.plan) {
-                &receipt.plan_id
+                receipt.input_plan_id.as_deref().unwrap_or(&receipt.plan_id)
             } else {
                 &inputs.review.plan_id
             };
@@ -447,7 +447,10 @@ fn restore_inputs(
         .as_ref()
         .map(|change| &change.source)
         .or(ordinary_source.as_ref());
-    let mut prepared = config::prepare_delivery(
+    let projected_input = inputs.review.plan_id.clone();
+    let current_layout =
+        (reconcile.is_none() && receipt.input_plan_id.is_some()).then_some(&receipt);
+    let mut prepared = config::prepare_with_ownership(
         inputs,
         options.readiness,
         options.run_id,
@@ -459,6 +462,7 @@ fn restore_inputs(
             routing_enrolled: options.routing_enrolled,
             loopback_ports: options.loopback_ports,
         },
+        current_layout,
     )?;
     let projection = if let Some(proof) = &reconcile {
         Some(proof.project(&mut prepared, &receipt)?)
@@ -635,6 +639,9 @@ fn restore_inputs(
                 .as_ref()
                 .map(|inputs| inputs.binding.clone()),
         )?;
+        if receipt.input_plan_id.is_some() {
+            receipt.input_plan_id = Some(projected_input);
+        }
     }
     receipt.startup_failure = None;
     receipt.probes = probes::fresh(&engine, &prepared.configs, prepared.probes)?;
@@ -706,7 +713,10 @@ fn restore_inputs(
             );
         }
         session.create_resources(true)?;
-        execution::run(&prepared.graph, &mut session, options.timeout)
+        let changes = session.engine_changes();
+        execution::run_with_wait(&prepared.graph, &mut session, options.timeout, |interval| {
+            changes.wait(interval)
+        })
     })();
     if let Err(failure) = result {
         super::startup_failure::record_after_started(&session.root, &session.receipt, &failure);
@@ -724,7 +734,7 @@ fn restore_inputs(
     Ok(session.receipt)
 }
 
-fn retain_restore_failure(
+pub(super) fn retain_restore_failure(
     root: &std::path::Path,
     receipt: &mut Receipt,
     fresh: bool,

@@ -188,7 +188,8 @@ fn selection(
     let mut next = owner.clone();
     if let Some(share) = &owner.project_share {
         let observed =
-            crate::provider::ProjectShareIntent::approve(&share.project, share.unfiltered_source)?;
+            crate::provider::ProjectShareIntent::approve(&share.project, share.unfiltered_source)?
+                .with_layout(owner.socket_layout)?;
         let mut expected = share.clone();
         expected.device = storage.device;
         if share.device != before.device || observed != expected {

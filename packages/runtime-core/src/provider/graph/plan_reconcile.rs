@@ -82,6 +82,21 @@ fn eligible(receipt: &Receipt) -> bool {
 /// writes. Such graphs always take this path, which keeps the cache only when its
 /// freshly resolved instance-scoped identity equals the recorded binding exactly.
 fn ordinary_layout(receipt: &Receipt, plan: &project::PlanData) -> bool {
+    // A stopped receipt may include compute that had been enrolled for an
+    // interrupted append. Its input identity still describes the prior graph.
+    if !plan
+        .services
+        .iter()
+        .filter(|(_, service)| service.active)
+        .map(|(name, _)| name)
+        .eq(receipt
+            .resources
+            .values()
+            .filter(|resource| resource.kind == Kind::Container)
+            .map(|resource| &resource.key))
+    {
+        return false;
+    }
     let scoped = dependency_cache::instance_scoped_volumes(plan);
     if receipt.resources.values().any(|resource| {
         resource.kind == Kind::Volume && resource.cache.is_some() && scoped.contains(&resource.key)
@@ -98,7 +113,8 @@ fn ordinary_layout(receipt: &Receipt, plan: &project::PlanData) -> bool {
     recorded.len() == declared.len()
         && declared.iter().enumerate().all(|(index, key)| {
             recorded.get(key).is_some_and(|resource| {
-                resource.cache.is_some()
+                receipt.input_plan_id.is_some()
+                    || resource.cache.is_some()
                     || resource.name == format!("{}{index}", volume_prefix(&receipt.run))
             })
         })
@@ -117,9 +133,7 @@ pub(super) fn applies(
 ) -> bool {
     !source_rebind
         && eligible(receipt)
-        && !(receipt.plan_id == plan_id
-            && receipt.normalized_input.as_ref() == Some(next)
-            && ordinary_layout(receipt, plan))
+        && !(unchanged_normalized_review(receipt, plan_id, next) && ordinary_layout(receipt, plan))
 }
 
 /// Read-only proof of a reconciliation selection. Admission repeats it under the
@@ -583,8 +597,10 @@ mod tests {
         }
         Receipt {
             started_from: None,
+            extending: BTreeSet::new(),
             startup_failure: None,
             normalized_input: Some(identity.clone()),
+            input_plan_id: None,
             relay_startup: None,
             relay_cleanup: None,
             probes: BTreeMap::new(),
@@ -671,6 +687,42 @@ mod tests {
             false
         ));
         (receipt, prepared)
+    }
+
+    #[test]
+    fn stopped_compute_from_an_interrupted_append_does_not_select_exact_replay() {
+        let project = Project::new();
+        let (report, identity, prepared) = project.prepared(compose(
+            json!({"db": service("serve", 'a', &["data"])}),
+            &["data"],
+        ));
+        let mut receipt = stopped(&prepared, &identity);
+        let mut extra = receipt.resources["container:db"].clone();
+        extra.key = "slow".into();
+        extra.name = format!("hkg-{RUN}-container-1");
+        extra.id = None;
+        receipt.resources.insert("container:slow".into(), extra);
+        receipt.readiness.insert("slow".into(), Condition::Healthy);
+        assert!(applies(
+            &receipt,
+            &report.plan_id,
+            &report.plan,
+            &identity,
+            false
+        ));
+        let (_, _, mut same_review) = project.prepared(compose(
+            json!({"db": service("serve", 'a', &["data"])}),
+            &["data"],
+        ));
+        let projection = prepare(&report.plan, &receipt, &identity)
+            .unwrap()
+            .project(&mut same_review, &receipt)
+            .unwrap();
+        assert!(!projection.resources.contains_key("container:slow"));
+        assert_eq!(
+            projection.resources["volume:data"].name,
+            receipt.resources["volume:data"].name
+        );
     }
 
     #[test]
@@ -1289,6 +1341,78 @@ mod tests {
                 .unwrap_err()
                 .code,
             "graph_resource_exists"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn down_retires_failed_reconciled_restore_with_an_existing_reserved_cache() {
+        struct Guest(BTreeMap<String, Value>);
+        impl Inspection for Guest {
+            fn incarnation(&self) -> &str {
+                unreachable!()
+            }
+            fn boot_id(&self) -> Result<&str, CandidateError> {
+                unreachable!()
+            }
+            fn verify(&self) -> Result<(), CandidateError> {
+                unreachable!()
+            }
+            fn get(&self, path: &str) -> Result<Value, CandidateError> {
+                self.0
+                    .get(path)
+                    .cloned()
+                    .ok_or_else(|| error("engine_not_found", "Resource absent."))
+            }
+            fn probe_status(&self, _: &str) -> Result<Option<String>, CandidateError> {
+                unreachable!()
+            }
+        }
+
+        let (project, mut receipt, _) = cached_project();
+        let (_, projection) =
+            reconcile_cached(&project, &receipt, cached("one", "/bin/install-v2"));
+        receipt.resources = projection.resources;
+        assert_eq!(receipt.resources["volume:deps"].phase, "reserved");
+        receipt.set_phase("restoring");
+        let fixture = super::super::tests::Fixture::new();
+        restore::retain_restore_failure(&fixture.0, &mut receipt, true, true).unwrap();
+        assert_eq!(receipt.phase, "failed-retained");
+
+        // Recovery has confirmed compute absence and committed the retained
+        // receipt. The newly selected cache already exists for a sibling.
+        for resource in receipt
+            .resources
+            .values_mut()
+            .filter(|r| r.kind != Kind::Volume)
+        {
+            resource.phase = "absent".into();
+        }
+        receipt.set_phase("stopped-data-retained");
+        let cache = &receipt.resources["volume:deps"];
+        let data = &receipt.resources["volume:data"];
+        let volume = |resource: &Resource| {
+            (
+                format!("/v1.53/volumes/{}", resource.name),
+                json!({"Name":resource.name,"Driver":"local","Labels":expected_labels(&receipt, resource)}),
+            )
+        };
+        let mut guest = Guest(BTreeMap::from([volume(cache), volume(data)]));
+        live_owner_cleanup::verify_retired_resources(&guest, &receipt).unwrap();
+        guest.0.get_mut(&volume(cache).0).unwrap()["Labels"] = json!({});
+        assert_eq!(
+            live_owner_cleanup::verify_retired_resources(&guest, &receipt)
+                .unwrap_err()
+                .code,
+            "graph_foreign_resource"
+        );
+        guest.0.remove(&volume(cache).0);
+        guest.0.remove(&volume(data).0);
+        assert_eq!(
+            live_owner_cleanup::verify_retired_resources(&guest, &receipt)
+                .unwrap_err()
+                .code,
+            "graph_live_owner_recovery"
         );
     }
 }

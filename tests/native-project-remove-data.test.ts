@@ -176,8 +176,80 @@ test("a running project refuses before confirmation or cleanup", async () => {
     "requires a stopped project; run `hack down` first"
   );
   expect(asked).toBe(false);
-  expect(r.verbs()).toEqual(["inspect"]);
+  expect(r.verbs()).toEqual(["inspect", "owner-status"]);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test.each([
+  false,
+  true,
+])("confirmed removal requests a guarded append stop before stopped-only cleanup (commit raced: %s)", async (committed) => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  let phase: Phase = "ready-observed";
+  const removal = nativeProjectRemoveData({
+    ...opts,
+    confirm: async (appending) => {
+      expect(appending).toBe(true);
+      calls.push("confirmed");
+      return true;
+    },
+    invoke: async ({ args }) => {
+      if (args[1] === "status") {
+        calls.push("observed");
+        const current = graph(phase);
+        return {
+          ...current,
+          receipt: { ...current.receipt, extending: ["redis"] },
+        };
+      }
+      if (args.includes("--cancel-append")) {
+        calls.push("guarded stop");
+        expect(args).not.toContain("--remove-data");
+        if (committed) {
+          throw new NativeRuntimeRequestError({
+            message: "Append already completed.",
+            nativeCode: "graph_owner_recovery",
+            nativeCauseCode: "graph_append_not_active",
+          });
+        }
+        phase = "stopped-data-retained";
+        return {};
+      }
+      if (args.includes("--remove-data")) {
+        calls.push("retained-only removal");
+        expect(phase).toBe("stopped-data-retained");
+        expect(args).toContain("--retained-only");
+        phase = "removed";
+        return {};
+      }
+      expect(args[1]).toBe("inspect");
+      if (phase === "ready-observed") {
+        throw new NativeRuntimeRequestError({
+          message: "Provider lease held by append.",
+          nativeCode: "provider_busy",
+        });
+      }
+      calls.push(phase);
+      return graph(phase);
+    },
+  });
+  if (committed) {
+    await expectClosedRefusal(removal, "requires a stopped project");
+    expect(calls).toEqual(["observed", "confirmed", "guarded stop"]);
+    expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+  } else {
+    expect(await removal).toMatchObject({ status: "removed" });
+    expect(calls).toEqual([
+      "observed",
+      "confirmed",
+      "guarded stop",
+      "stopped-data-retained",
+      "retained-only removal",
+      "removed",
+    ]);
+    expect(await loadNativeProjectRun(opts.scope)).toBeNull();
+  }
 });
 
 test("a declined confirmation keeps the data and the mapping", async () => {

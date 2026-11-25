@@ -21,6 +21,11 @@ Failures use a stable error code and a nonzero exit status:
 Errors may carry `error.detail`. A refused administrator plan uses
 `E_PLAN_REFUSED` (exit 1); an incomplete plan uses `E_PLAN_INCOMPLETE` (exit 3).
 Both retain the partial plan, including its schema, at `error.detail.plan`.
+If `hack down --service <name> --json` fails after Docker confirms some replica
+stops, `E_COMPOSE_FAILED` includes their IDs in `error.detail.stoppedContainerIds`
+and the receipt time in `error.detail.stoppedAt`. When inspect identified the
+execution before Stop, `error.detail.stoppedContainers` pairs the confirmed ID
+with its `startedAt`. Successful service stops include those fields in `data`.
 Unknown/offline state in an observation is still a successful observation;
 it is not a claim that the runtime is healthy.
 
@@ -48,6 +53,18 @@ neither stream.
 
 A `--json` that belongs to a child command, as in `hack run web tool --json`,
 is the child's: Hack passes its output through unchanged.
+
+For Compose-file projects, `hack up <service> --json` uses `data.action`,
+`project`, `branch`, `composeProject`, `services`, and `durationMs` on both
+backends. `services` contains the `started`, `completed`, `stopped`, and
+`failed` arrays. Native returns this result after its selected services meet
+their startup goals.
+
+If Ctrl-C interrupts an append to a running native project, the launcher waits
+for the owner's rollback reply within the selected services' stop budget.
+Confirmed cancellation exits 130 with `E_CANCELLED` in JSON. If the append
+committed, the wait expires, or a second Ctrl-C ends the wait, the command exits
+1 with `E_NATIVE_START_OUTCOME_UNKNOWN`.
 
 ## Command inventory
 
@@ -151,8 +168,11 @@ success behavior stays covered by command-specific suites.
 | `hack projects prune --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack ps --json` | Backend-dependent: envelope or legacy bare object |
 | `hack pull --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
+| `hack resources list --json` | Envelope; versioned `data.schema`: `hack.resources.v1` |
+| `hack resources remove --json` | Envelope; versioned `data.schema`: `hack.resource-remove.v1` |
 | `hack restart --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack run --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
+| `hack service add --json` | Envelope; versioned `data.schema`: `hack.service-add.v1` |
 | `hack session capture --json` | NDJSON events / terminal event, not a single envelope |
 | `hack session panes --json` | NDJSON events / terminal event, not a single envelope |
 | `hack session tail --json` | NDJSON events / terminal event, not a single envelope |
@@ -174,6 +194,33 @@ success behavior stays covered by command-specific suites.
 | `hack update --json --check --observe` | Envelope; `data.schema: hack.update-check.v1` |
 | `hack doctor --json --machine` | Envelope; `data.schema: hack.doctor.machine.v1` |
 <!-- json-inventory:end -->
+
+### Native resource inventory coverage
+
+`hack resources list --json` sets `data.nativeComplete` to false when
+native run discovery, owner attribution, or observation is incomplete.
+`data.nativeIssues` lists human-readable reasons. An unattributed volume
+has an empty `owners` array.
+
+### Resource removal refusals
+
+`hack resources remove --json` reports a machine-readable `error.detail.reason`
+for safety refusals. `confirmation_required` accompanies `E_INTERACTIVE_REQUIRED`.
+The remaining reasons below accompany `E_PLAN_REFUSED`. Invalid selectors and
+combining `--dry-run` with `--confirm` return `E_USAGE`.
+
+| Reason | Meaning |
+| --- | --- |
+| `engine_context_unknown`, `engine_unknown`, `engine_changed` | Docker context or engine identity could not be pinned, verified, or stayed inconsistent. |
+| `receipt_mismatch` | The resource is absent or does not match a Hack launch receipt on this engine. |
+| `container_active`, `project_not_down` | The container or its Compose project has an active or unverified container state. |
+| `volume_references_unknown`, `volume_referenced` | Container references could not be checked, or a container references the volume. |
+| `checkout_present`, `checkout_unknown` | A launch checkout exists or its absence cannot be verified. |
+| `registry_reference`, `run_reference` | A registered checkout or a runtime or lifecycle entry still refers to the Compose project. |
+| `registry_unknown`, `state_unknown`, `history_unknown` | The registry, checkout state, or launch history could not be verified. |
+| `confirmation_stale`, `resource_changed` | The preview token or final identity check no longer matches. |
+| `engine_refused` | Docker declined the non-forced removal. |
+
 
 ## Additive fields
 

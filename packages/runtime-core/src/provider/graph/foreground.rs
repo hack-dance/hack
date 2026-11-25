@@ -20,7 +20,11 @@ pub use dependency_refresh::request as refresh_dependencies_request;
 #[cfg(all(test, feature = "native-stream-relay"))]
 mod lifetime_tests;
 mod retained_data;
+mod service_start;
 pub(in crate::provider::graph) mod signals;
+#[cfg(target_os = "macos")]
+pub use service_start::CombinedInput as CombinedExtensionInput;
+pub use service_start::request as extend_request;
 #[cfg(test)]
 mod tests;
 pub(in crate::provider::graph) mod transport;
@@ -39,6 +43,8 @@ struct StartupServer {
     run: String,
     owner: String,
     stop: std::rc::Rc<std::cell::RefCell<Option<std::os::unix::net::UnixStream>>>,
+    client: Option<transport::AppendClientWatch>,
+    ports: Vec<Value>,
 }
 impl startup::StartupRequests for StartupServer {
     fn serve(&mut self) -> bool {
@@ -54,21 +60,21 @@ impl startup::StartupRequests for StartupServer {
             if transport::peer(&stream).is_err() || stream.set_nonblocking(false).is_err() {
                 continue;
             }
-            let Ok(request) = transport::read::<WireRequest>(
-                &mut stream,
-                Duration::from_secs(1),
-                transport::REQUEST_LIMIT,
-            ) else {
+            let Ok(request) = transport::read_request(&stream, Duration::from_secs(1)) else {
                 continue;
             };
-            if request.version != 1 || request.run != self.run || !request.exclusive() {
+            if request.run != self.run || !request.exclusive() {
+                continue;
+            }
+            if service_start::refuse_legacy_append(&mut stream, &request) {
                 continue;
             }
             let plain = request.restore.is_none()
                 && request.job.is_none()
-                && request.refresh_dependencies.is_none();
+                && request.refresh_dependencies.is_none()
+                && request.extend.is_none();
             let reply = match request.remove_data {
-                Some(false) if plain => {
+                Some(false) if plain && (!request.cancel_append || self.client.is_some()) => {
                     *self.stop.borrow_mut() = Some(stream);
                     break;
                 }
@@ -78,6 +84,10 @@ impl startup::StartupRequests for StartupServer {
             let _ = transport::write(&mut stream, &reply, Duration::from_secs(1));
         }
         self.stop.borrow().is_some()
+            || self
+                .client
+                .as_ref()
+                .is_some_and(transport::AppendClientWatch::disconnected)
     }
 }
 impl StartupServer {
@@ -88,7 +98,8 @@ impl StartupServer {
         match receipt {
             Ok((generation, receipt)) => json!({"ok":true,"run":receipt.run,"phase":receipt.phase,
                 "plan":receipt.plan_id,"generation":generation,"foreground_alive":true,
-                "runtime_verified":false,"runtime_error":"graph_starting","publisher_ports":[]}),
+                "runtime_verified":false,"runtime_error":"graph_starting","publisher_ports":self.ports,
+                "extending":receipt.extending}),
             Err(error) => json!({"ok":false,"run":self.run,"code":error.code}),
         }
     }
@@ -105,6 +116,24 @@ fn reply_stop(
         Err(code) => json!({"ok":false,"run":run,"code":code}),
     };
     let _ = transport::write(&mut stream, &reply, Duration::from_secs(5));
+}
+
+fn refuse_without_append(
+    stream: &mut std::os::unix::net::UnixStream,
+    request: &WireRequest,
+) -> bool {
+    if service_start::refuse_legacy_append(stream, request) {
+        return true;
+    }
+    if !request.cancel_append {
+        return false;
+    }
+    let _ = transport::write(
+        stream,
+        &json!({"ok":false,"run":request.run,"code":"graph_append_not_active"}),
+        Duration::from_secs(1),
+    );
+    true
 }
 
 fn refused() -> CandidateError {
@@ -301,6 +330,10 @@ fn serve_input<'a>(
         if !files.is_empty() {
             super::pending_environments(&compiled, files, deadline)?;
         }
+        // Authored spec comparison is advisory. Normalized admission already
+        // verified the actual input and its binding to the source file.
+        runtime.extension_input =
+            super::extend::Input::read(compose, &compiled.executable.review.plan).ok();
     } else if !managed.is_empty() || !files.is_empty() {
         // Refuse invalid scoped ownership or payload before publishing an owner.
         // Runtime admission compiles again to detect intervening project changes.
@@ -339,6 +372,8 @@ fn serve_input<'a>(
             run: run_id.clone(),
             owner: owner.token,
             stop: std::rc::Rc::clone(&stop_request),
+            client: None,
+            ports: Vec::new(),
         })));
     }
     // Explicit slots reserve as one batch so earlier automatic allocations
@@ -473,7 +508,7 @@ fn serve_input<'a>(
         drop(stdout);
         publishers.announce();
         let mut queued = None;
-        let supervise_restarts = receipt.resources.values().any(|r| {
+        let mut supervise_restarts = receipt.resources.values().any(|r| {
             r.restart_policy.is_some() && (r.routing.is_some() || !r.loopback_ports.is_empty())
         });
         let mut restart_tick = Instant::now() + Duration::from_secs(1);
@@ -546,23 +581,84 @@ fn serve_input<'a>(
             let (mut stream, request) = if let Some(pending) = queued.take() {
                 pending
             } else {
-                let Some(mut stream) = publication.accept()? else {
+                let Some(stream) = publication.accept()? else {
                     continue;
                 };
-                let request: WireRequest = match transport::read(
-                    &mut stream,
-                    Duration::from_secs(5),
-                    transport::REQUEST_LIMIT,
-                ) {
+                let request = match transport::read_request(&stream, Duration::from_secs(5)) {
                     Ok(value) => value,
                     Err(_) => continue,
                 };
                 (stream, request)
             };
-            if request.version != 1 || request.run != receipt.run || !request.exclusive() {
+            if request.run != receipt.run || !request.exclusive() {
                 continue;
             }
             publication.verify()?;
+            if refuse_without_append(&mut stream, &request) {
+                continue;
+            }
+            if let Some(extend) = request.extend {
+                let has_routes = extend.has_routes();
+                let stop = std::rc::Rc::new(std::cell::RefCell::new(None));
+                let serve = (|| {
+                    Ok::<_, CandidateError>(StartupServer {
+                        listener: publication.startup_listener()?,
+                        root: super::directory(candidate, &receipt.run)?,
+                        run: receipt.run.clone(),
+                        owner: receipt.owner.clone(),
+                        stop: std::rc::Rc::clone(&stop),
+                        client: Some(transport::AppendClientWatch::new(&stream)?),
+                        ports: publishers.port_status(),
+                    })
+                })();
+                let response = match serve.and_then(|server| {
+                    service_start::handle(
+                        candidate,
+                        &mut runtime,
+                        &mut publishers,
+                        &signals,
+                        &receipt.run,
+                        extend,
+                        server,
+                    )
+                }) {
+                    Ok(value) => {
+                        // An added route or port may introduce the first restart-supervised service.
+                        supervise_restarts = true;
+                        if has_routes {
+                            // The frontend may have started this graph without
+                            // HTTPS. It can now acquire an ingress lease on the
+                            // same run. A lost notification never changes ownership.
+                            let _ = writeln!(
+                                std::io::stdout().lock(),
+                                "{}",
+                                json!({
+                                    "kind":"graph_foreground_routes_added", "run":receipt.run, "phase":"ready-observed"
+                                })
+                            );
+                        }
+                        value
+                    }
+                    Err(error) => service_start::owner_failure(&receipt.run, &error),
+                };
+                let _ = transport::write(&mut stream, &response, Duration::from_secs(5));
+                if let Some(stream) = stop.borrow_mut().take() {
+                    queued = Some((
+                        stream,
+                        WireRequest {
+                            cancel_append: false,
+                            version: 1,
+                            run: receipt.run.clone(),
+                            remove_data: Some(false),
+                            restore: None,
+                            job: None,
+                            refresh_dependencies: None,
+                            extend: None,
+                        },
+                    ));
+                }
+                continue;
+            }
             if let Some(refresh) = request.refresh_dependencies {
                 let response = match dependency_refresh::handle(
                     candidate,
@@ -683,7 +779,6 @@ fn serve_input<'a>(
                     );
                 }
                 let publisher_error = publishers.observe_readonly(candidate)?;
-                let publishers_live = publisher_error.is_none();
                 if let Some(code) = publisher_error {
                     return Ok(
                         json!({"ok":true,"run":receipt.run,"phase":receipt.phase,"plan":receipt.plan_id,"generation":redelivery::generation(&receipt)?,"foreground_alive":true,"runtime_verified":false,"runtime_error":code,"publisher_ports":publishers.port_status()}),
@@ -696,8 +791,21 @@ fn serve_input<'a>(
                     let checked = runtime.check_readonly(&observer, &snapshot.receipt, &root);
                     Ok((snapshot, checked))
                 })?;
+                let images = snapshot
+                    .receipt
+                    .resources
+                    .values()
+                    .filter_map(|resource| {
+                        resource.image.as_ref().map(|image| (&resource.key, image))
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let runtime_error = if snapshot.receipt.extending.is_empty() {
+                    checked.err().map(|error| error.code)
+                } else {
+                    Some("graph_extend_incomplete")
+                };
                 Ok::<_, CandidateError>(
-                    json!({"ok":true,"run":snapshot.receipt.run,"phase":snapshot.receipt.phase,"plan":snapshot.receipt.plan_id,"generation":redelivery::generation(&snapshot.receipt)?,"foreground_alive":true,"runtime_verified":publishers_live && checked.is_ok(),"runtime_error":if !publishers_live {Some("publisher_exited")} else {checked.err().map(|error|error.code)},"publisher_ports":publishers.port_status()}),
+                    json!({"ok":true,"run":snapshot.receipt.run,"phase":snapshot.receipt.phase,"plan":snapshot.receipt.plan_id,"generation":redelivery::generation(&snapshot.receipt)?,"foreground_alive":true,"runtime_verified":runtime_error.is_none(),"runtime_error":runtime_error,"publisher_ports":publishers.port_status(),"service_images":images}),
                 )
             })();
             let value = match status {
@@ -773,6 +881,21 @@ pub fn request(
     run: &str,
     remove_data: Option<bool>,
 ) -> Result<Value, CandidateError> {
+    request_with_append_guard(candidate, run, remove_data, false)
+}
+
+/// Hold a retaining stop only while the live owner is appending services.
+/// The frontend can then perform its independently fenced data-only removal.
+pub fn cancel_append_request(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
+    request_with_append_guard(candidate, run, Some(false), true)
+}
+
+fn request_with_append_guard(
+    candidate: &Candidate,
+    run: &str,
+    remove_data: Option<bool>,
+    cancel_append: bool,
+) -> Result<Value, CandidateError> {
     let pin = transport::Pin::load(candidate, run)?;
     // A cleanup diagnostic may name only services in this pinned run's receipt.
     // Retain its identity before the effect and compare again after the reply.
@@ -781,7 +904,9 @@ pub fn request(
     transport::write(
         &mut stream,
         &WireRequest {
+            cancel_append,
             version: 1,
+            extend: None,
             refresh_dependencies: None,
             run: run.to_owned(),
             remove_data,
@@ -954,7 +1079,9 @@ pub fn restore_request(
     }
     let bytes = managed.forward(plan, run)?;
     let request = WireRequest {
+        cancel_append: false,
         version: 1,
+        extend: None,
         refresh_dependencies: None,
         run: run.into(),
         remove_data: None,

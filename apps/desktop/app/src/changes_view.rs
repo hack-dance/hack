@@ -90,7 +90,7 @@ impl HackApp {
                     report
                         .files
                         .is_empty()
-                        .then_some("No uncommitted changes under .hack/."),
+                        .then_some("No uncommitted changes to Hack files."),
                 )
                 .children(report.files.iter().map(|file| {
                     div()

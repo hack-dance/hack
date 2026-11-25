@@ -60,6 +60,8 @@ pub(in crate::provider::graph) struct EarlyPublications {
     slots: BTreeMap<String, graph::RouteSlot>,
     deadline: Instant,
     deferred: BTreeMap<String, String>,
+    pub(super) rolled_back: bool,
+    pub(super) resumed: BTreeSet<String>,
 }
 
 impl EarlyPublications {
@@ -69,6 +71,8 @@ impl EarlyPublications {
             slots: slots.clone(),
             deadline,
             deferred: BTreeMap::new(),
+            rolled_back: false,
+            resumed: BTreeSet::new(),
         }
     }
 
@@ -78,6 +82,7 @@ impl EarlyPublications {
         receipt: &Receipt,
         service: &str,
         container_id: &str,
+        cancel: impl Fn() -> Result<(), CandidateError>,
     ) -> Result<(), CandidateError> {
         let resource = receipt
             .resources
@@ -92,6 +97,7 @@ impl EarlyPublications {
         let candidate = engine.guest().candidate();
         let run = &receipt.run;
         let check = || {
+            cancel()?;
             if signals::startup_pending() || Instant::now() >= self.deadline {
                 Err(refused())
             } else {
@@ -195,6 +201,11 @@ impl EarlyPublications {
                 owned.exited = Some(owned.child.wait().map_err(|_| refused())?);
                 return Err(error);
             }
+            if port.is_none() && resource.restart_policy.is_some() {
+                self.publishers
+                    .probe_generations
+                    .insert(service.to_owned(), assignment.generation);
+            }
         }
         Ok(())
     }
@@ -208,7 +219,7 @@ impl EarlyPublications {
         while !self.deferred.is_empty() {
             for (service, id) in std::mem::take(&mut self.deferred) {
                 stop()?;
-                self.publish(engine, receipt, &service, &id)?;
+                self.publish(engine, receipt, &service, &id, &stop)?;
             }
             if !self.deferred.is_empty() {
                 std::thread::sleep(
@@ -218,6 +229,36 @@ impl EarlyPublications {
             }
         }
         Ok(())
+    }
+
+    pub(in crate::provider::graph) fn verify_extension(
+        &mut self,
+        candidate: &Candidate,
+        receipt: &Receipt,
+    ) -> Result<(), CandidateError> {
+        self.publishers
+            .verify_count(receipt, Some(&receipt.extending))?;
+        self.publishers.verify_live(candidate)
+    }
+
+    pub(in crate::provider::graph) fn mark_rolled_back(&mut self) {
+        self.rolled_back = true;
+    }
+
+    pub(in crate::provider::graph) fn resume(
+        &mut self,
+        receipt: &Receipt,
+        services: &BTreeSet<String>,
+    ) {
+        for service in services {
+            if receipt.resources[&format!("container:{service}")]
+                .routing
+                .is_some()
+            {
+                self.slots.insert(service.clone(), graph::RouteSlot::Auto);
+            }
+        }
+        self.resumed.clone_from(services);
     }
 }
 
@@ -255,6 +296,36 @@ fn command(
 }
 
 impl Publishers {
+    pub(super) fn reap_resumed(
+        &mut self,
+        services: &BTreeSet<String>,
+        signals: &signals::Events,
+    ) -> Result<(), CandidateError> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for index in (0..self.children.len()).rev() {
+            if services.contains(&self.children[index].service) {
+                self.reap_one_after_cleanup(index, signals, deadline)?;
+            }
+        }
+        self.probe_generations
+            .retain(|name, _| !services.contains(name));
+        Ok(())
+    }
+
+    pub(super) fn absorb(
+        &mut self,
+        other: Self,
+        signals: &signals::Events,
+    ) -> Result<(), CandidateError> {
+        let first = self.children.len();
+        self.children.extend(other.children);
+        self.probe_generations.extend(other.probe_generations);
+        for owned in &self.children[first..] {
+            signals.watch_child(&owned.child)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn finish_early_start(
         &mut self,
         candidate: &Candidate,
@@ -263,15 +334,8 @@ impl Publishers {
         deadline: Instant,
         slots: &BTreeMap<String, graph::RouteSlot>,
     ) -> Result<(), CandidateError> {
-        let count: usize = receipt
-            .resources
-            .values()
-            .map(|resource| resource.loopback_ports.len() + usize::from(resource.routing.is_some()))
-            .sum();
-        if count != self.children.len() {
-            return Err(refused());
-        }
-        if count == 0 && slots.is_empty() {
+        self.verify_count(receipt, None)?;
+        if self.children.is_empty() && slots.is_empty() {
             return Ok(());
         }
         for owned in &self.children {
@@ -286,6 +350,23 @@ impl Publishers {
             &|| check_deadline(signals, deadline),
         )?;
         self.verify_live(candidate)
+    }
+
+    fn verify_count(
+        &self,
+        receipt: &Receipt,
+        services: Option<&BTreeSet<String>>,
+    ) -> Result<(), CandidateError> {
+        let count: usize = receipt
+            .resources
+            .values()
+            .filter(|resource| services.is_none_or(|set| set.contains(&resource.key)))
+            .map(|resource| resource.loopback_ports.len() + usize::from(resource.routing.is_some()))
+            .sum();
+        if count != self.children.len() {
+            return Err(refused());
+        }
+        Ok(())
     }
 
     /// Notices may follow only the successfully flushed foreground readiness frame.

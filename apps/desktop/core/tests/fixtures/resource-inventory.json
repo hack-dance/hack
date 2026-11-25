@@ -1,0 +1,75 @@
+{
+  "composeComplete": true,
+  "nativeComplete": true,
+  "rows": [
+    {
+      "id": "old-copy_data",
+      "name": "old-copy_data",
+      "kind": "volume",
+      "backend": "compose",
+      "bytes": 2097152,
+      "state": null,
+      "owners": [
+        {
+          "project": "old-copy",
+          "branch": "review",
+          "detached": true,
+          "checkout": "/work/old-copy"
+        }
+      ],
+      "labels": {
+        "com.docker.compose.project": "old-copy",
+        "com.docker.compose.volume": "data"
+      },
+      "refusal": null
+    },
+    {
+      "id": "0000000000000000000000000000000000000000000000000000000000000001",
+      "name": "storefront-web-1",
+      "kind": "container",
+      "backend": "compose",
+      "bytes": null,
+      "state": "running",
+      "owners": [
+        {
+          "project": "storefront",
+          "branch": null,
+          "detached": false,
+          "checkout": "/work/storefront"
+        }
+      ],
+      "ports": "127.0.0.1:8080 → 8080/tcp",
+      "mounts": [
+        { "name": "storefront_data", "destination": "/data", "type": "volume" }
+      ],
+      "refusal": "The container is running."
+    },
+    {
+      "id": "redis:7-alpine",
+      "name": "redis:7-alpine",
+      "kind": "image",
+      "backend": "compose",
+      "owners": [
+        {
+          "project": "storefront",
+          "branch": null,
+          "detached": false,
+          "checkout": null
+        }
+      ],
+      "bytes": 42000000,
+      "state": null,
+      "refusal": "Referenced by an observed container."
+    },
+    {
+      "id": "native-home",
+      "name": "Native home",
+      "kind": "disk",
+      "backend": "native",
+      "owners": [],
+      "bytes": 301989888,
+      "state": null,
+      "refusal": "Native home contains shared runtime state."
+    }
+  ]
+}

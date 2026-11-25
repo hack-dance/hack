@@ -29,6 +29,14 @@ if findmnt -n --mountpoint /run/hack-local >/dev/null; then exit 41; fi
 mount --bind /storage/docker /var/lib/docker
 mount --bind /storage/containerd /var/lib/containerd
 mount -t tmpfs -o size=16m,nr_inodes=4096,mode=700 tmpfs /run/hack-local
+if test "$6" = compact; then
+  test ! -L /run/hb
+  test -e /run/hb || mkdir -m 700 /run/hb
+  test -d /run/hb
+  test "$(stat -c %u:%g:%a /run/hb)" = 0:0:700
+  if findmnt -n --mountpoint /run/hb >/dev/null; then exit 41; fi
+  mount -t tmpfs -o size=16m,nr_inodes=4096,mode=700 tmpfs /run/hb
+fi
 test "$(findmnt -n -o FSTYPE --mountpoint /var/lib/docker)" = ext4
 test "$(findmnt -n -o FSTYPE --mountpoint /var/lib/containerd)" = ext4
 if test -L /var/run/docker.sock; then

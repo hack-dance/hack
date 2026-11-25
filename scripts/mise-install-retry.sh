@@ -19,9 +19,15 @@ MISE_HTTP_TIMEOUT=${MISE_HTTP_TIMEOUT:-90s}
 export MISE_HTTP_TIMEOUT
 attempts=${MISE_INSTALL_ATTEMPTS:-4}
 delay=${MISE_INSTALL_RETRY_DELAY:-15}
-case "$attempts$delay" in
-  *[!0-9]*) echo "mise-install-retry: MISE_INSTALL_ATTEMPTS and MISE_INSTALL_RETRY_DELAY must be whole numbers" >&2; exit 2 ;;
-esac
+# Whole numbers up to 4 digits without a leading zero, so every comparison
+# and the backoff arithmetic below is well defined; attempts must be >= 1.
+for value in "$attempts" "$delay"; do
+  case "$value" in
+    *[!0-9]*|0?*|?????*)
+      echo "mise-install-retry: MISE_INSTALL_ATTEMPTS and MISE_INSTALL_RETRY_DELAY must be whole numbers from 0 to 9999" >&2
+      exit 2 ;;
+  esac
+done
 if [ "$attempts" -lt 1 ]; then
   echo "mise-install-retry: MISE_INSTALL_ATTEMPTS must be at least 1" >&2
   exit 2

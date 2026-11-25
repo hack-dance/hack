@@ -126,7 +126,7 @@ calls=$(wc -l < "${log}")
   test("refuses a non-numeric attempt limit instead of retrying forever", async () => {
     const dir = await workDir();
     const log = await fakeMise(dir);
-    for (const attempts of ["abc", "0", ""]) {
+    for (const attempts of ["abc", "0", "007", "99999999999999999999999", ""]) {
       const result = run({
         cmd: ["sh", script, "zig"],
         dir,

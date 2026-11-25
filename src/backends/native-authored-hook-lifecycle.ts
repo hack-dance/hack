@@ -169,6 +169,7 @@ export function hookPhaseRunner(opts: {
 export async function publishAuthoredReady(
   opts: {
     readonly run: string;
+    readonly recordInventoryOwner: () => Promise<void>;
     readonly observe: (event: NativeHookDiagnostic) => void;
     readonly onReady: (value: NativeAuthoredProjectRunSelection) => void;
     readonly payload: () => Buffer | undefined;
@@ -258,6 +259,7 @@ export async function publishAuthoredReady(
     opts.endpoint(endpoint);
     opts.liveStop(endpoint);
   }
+  await opts.recordInventoryOwner();
   publishReady();
   opts.published();
 

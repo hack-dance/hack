@@ -8,6 +8,8 @@ pub struct InventoryReport {
     pub rows: Vec<Resource>,
     pub compose_complete: bool,
     pub native_complete: bool,
+    #[serde(default)]
+    pub native_issues: Vec<String>,
 }
 
 #[derive(Clone, Deserialize)]

@@ -2644,7 +2644,10 @@ A foreground `hack up` (or `hack restart`) watches its pool the same way
 VM was lost (the provider's pid, or the boot that ended), that it ends with exit
 code 1 and the run's data kept, and the one command to run next: `hack down
 --recover`, which retires the run with its data kept (running `runtime recover`
-first when the provider exited). `hack up` then starts it again. The start exits
+first when the provider exited). `hack up` then starts it again; when the lost
+start was the replacement of a `hack restart` that had not yet become ready, its
+restart is still pending (`hack up` refuses until it finishes), so the message
+names `hack restart` instead, which resumes it with the retained data. The start exits
 within about a second once it is ready, or about 11 seconds later while it is
 still starting or stopping; earlier versions waited on the lost VM and never
 exited. Once the run's graph has stopped, the pool counts as idle and may stop

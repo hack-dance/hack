@@ -7736,12 +7736,38 @@ test("the foreground lost-VM bound covers one pool check and the grace", () => {
  * while it is still starting.
  */
 test.each([
-  { readyFirst: true },
-  { readyFirst: false },
-])("a foreground start exits non-zero when its provider VM dies (ready: $readyFirst)", async ({
+  { readyFirst: true, restartPending: false },
+  { readyFirst: false, restartPending: false },
+  { readyFirst: false, restartPending: true },
+])("a foreground start exits non-zero when its provider VM dies (ready: $readyFirst, restart pending: $restartPending)", async ({
   readyFirst,
+  restartPending,
 }) => {
   const { opts } = await fixture(false);
+  // Codex review on #1253: a restart's replacement lost before readiness keeps
+  // its pending intent, so `hack up` would refuse. The intent appears only once
+  // the start is under way (a fresh start with one pending refuses up front),
+  // modelling the restart's cleaned intent the message reads at loss time.
+  let intentVisible = false;
+  const restartRun = {
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+  };
+  opts.dependencies.loadRestart = async () =>
+    intentVisible
+      ? {
+          phase: "cleaned",
+          run: restartRun,
+          finalization: (
+            await beginNativeProjectFinalization({
+              scope: opts.scope,
+              run: restartRun,
+            })
+          ).token,
+        }
+      : null;
   const boot = "87654321-4321-4321-4321-cba987654321";
   const pid = 2345;
   const graceMs = 40;
@@ -7809,6 +7835,7 @@ test.each([
     await Bun.sleep(30);
     expect(exits).toEqual([]);
     expect(warnings.join("\n")).not.toContain("native runtime VM");
+    intentVisible = restartPending;
     const killedAt = performance.now();
     providerGone = true;
     await Promise.race([
@@ -7829,6 +7856,13 @@ test.each([
     expect(message).toContain(`pid ${pid}`);
     expect(message).toContain(boot);
     expect(message).toContain("hack down --recover");
+    if (restartPending) {
+      expect(message).toContain("then hack restart");
+      expect(message).not.toContain("then hack up");
+    } else {
+      expect(message).toContain("then hack up");
+      expect(message).not.toContain("hack restart");
+    }
   } finally {
     released.resolve();
     await attempt.catch(() => undefined);

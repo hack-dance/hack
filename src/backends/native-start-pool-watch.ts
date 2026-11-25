@@ -56,9 +56,15 @@ export type NativeStartPoolEnd = {
  * this start exits non-zero with data kept, and the one command that retires the
  * run. `hack down --recover` first runs `runtime recover` for an exited provider
  * (HACK-2579), so it needs nothing else; `hack up` afterwards starts it again.
+ *
+ * A `hack restart` whose replacement was lost before it became ready keeps its
+ * pending restart intent (only readiness retires it), and `down --recover` does
+ * not remove it, so `hack up` would refuse. With `restartPending` the message
+ * names `hack restart`, which resumes that intent with the retained data.
  */
 export function nativeForegroundPoolEndMessage(
-  end: NativeStartPoolEnd
+  end: NativeStartPoolEnd,
+  opts: { readonly restartPending?: boolean } = {}
 ): string {
   const lost =
     end.providerPid === undefined
@@ -67,7 +73,9 @@ export function nativeForegroundPoolEndMessage(
   return [
     lost,
     "This foreground start ends now with exit code 1; the run's data is kept.",
-    "Run hack down --recover to retire this run with its data kept, then hack up to start it again.",
+    opts.restartPending
+      ? "Run hack down --recover to retire this run with its data kept, then hack restart to finish the pending restart (hack up refuses while it is pending)."
+      : "Run hack down --recover to retire this run with its data kept, then hack up to start it again.",
   ].join("\n");
 }
 

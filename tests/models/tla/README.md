@@ -774,7 +774,7 @@ sets the report and the code together); the evidence is `BoundedExit` and
 | `GraphStopped` | `startNativeProjectAttempt` sets `graphCleanupConfirmed` and calls `onGraphStopped`, which cancels the watch (`stopPoolWatch`) and makes a pending `onEnded` a no-op. |
 | `Finish` | Lifecycle cleanup, `down.after` and `acknowledgeFinalization` settle; the finalizer cancels any watch. |
 | `Observe` | `watchNativeStartPool` polls the pool record every second and sees the gone provider pid or the ended boot; the grace comes from `serving`. |
-| `ExitOnLoss` | The `onEnded` callback in `startNativeProject` prints `nativeForegroundPoolEndMessage` (lost VM, exit 1, `hack down --recover`), finishes the startup observation and exits 1. |
+| `ExitOnLoss` | The `onEnded` callback in `startNativeProject` prints `nativeForegroundPoolEndMessage` (lost VM, exit 1, `hack down --recover`, then `hack up`, or `hack restart` while a restart intent is pending), finishes the startup observation and exits 1. |
 
 The bound in code is about 1 s once ready and about 11 s while starting or
 stopping; the test bound of 15 s is asserted to exceed

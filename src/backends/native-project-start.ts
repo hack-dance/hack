@@ -4815,7 +4815,19 @@ export async function startNativeProject(
                 return;
               }
               if (!detached) {
-                warn(nativeForegroundPoolEndMessage(end));
+                // A restart lost before readiness keeps its pending intent, so
+                // the follow-up is hack restart, not hack up. Read at loss time:
+                // a ready restart has already retired it.
+                const restartPending = await (
+                  opts.dependencies?.loadRestart ?? DEFAULTS.loadRestart
+                )(opts.scope).then(
+                  (intent) => intent !== null,
+                  () => opts.restore !== undefined
+                );
+                if (settled || graphStopped) {
+                  return;
+                }
+                warn(nativeForegroundPoolEndMessage(end, { restartPending }));
               }
               await finish?.();
               if (!settled) {

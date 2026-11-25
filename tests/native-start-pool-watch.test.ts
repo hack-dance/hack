@@ -253,5 +253,20 @@ test("the foreground message names the lost VM and the one recovery command", ()
     // One retire command, named once; no fresh-home detour.
     expect(message.match(/hack down --recover/g)).toHaveLength(1);
     expect(message).not.toContain("fresh");
+    expect(message).toContain("then hack up to start it again");
+    expect(message).not.toContain("hack restart");
   }
+});
+
+test("a lost restart names hack restart, which its pending intent requires", () => {
+  // Codex review on #1253: the replacement of a `hack restart` lost before
+  // readiness keeps its pending intent, and `hack up` then refuses with "use
+  // hack restart"; the message must not send the user there.
+  const message = nativeForegroundPoolEndMessage(
+    { bootId: boot, providerPid: 4242 },
+    { restartPending: true }
+  );
+  expect(message.match(/hack down --recover/g)).toHaveLength(1);
+  expect(message).toContain("then hack restart to finish the pending restart");
+  expect(message).not.toContain("then hack up");
 });

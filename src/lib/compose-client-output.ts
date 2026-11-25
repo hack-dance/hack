@@ -56,6 +56,13 @@ const YES_NO_CHOICE = /[[(]\s*y(?:es)?\s*\/?\s*n(?:o)?\s*[\])]/i;
 const SURVEY_PROMPT = /^\?\s+\S/;
 /** A BuildKit step line (`#12 …`), whose text is the build's, not a question. */
 const BUILD_STEP_LINE = /^#\d+\s/;
+/**
+ * A question sentence ending in `?` and then whitespace or the end of the line.
+ * Without a terminal Compose prints its question with no line break, so the
+ * next progress text joins the same line:
+ * `… Recreate (data will be lost)? Container shop-db-1 Running`.
+ */
+const QUESTION_SENTENCE = /^(.*?\S\?)(?=\s|$)/;
 
 /**
  * A question the Compose client asked, such as `Volume "shop_db" exists but
@@ -66,12 +73,21 @@ const BUILD_STEP_LINE = /^#\d+\s/;
  * never questions.
  */
 export function isComposeQuestionLine(line: string): boolean {
+  return composeQuestionText(line) !== undefined;
+}
+
+/**
+ * The question a line carries, without any progress text Compose printed
+ * after it on the same line, or `undefined` when the line asks nothing.
+ */
+export function composeQuestionText(line: string): string | undefined {
   if (BUILD_STEP_LINE.test(line) || isComposeWarningLine(line)) {
-    return false;
+    return undefined;
   }
-  return (
-    YES_NO_CHOICE.test(line) || SURVEY_PROMPT.test(line) || line.endsWith("?")
-  );
+  if (YES_NO_CHOICE.test(line) || SURVEY_PROMPT.test(line)) {
+    return line.trim();
+  }
+  return QUESTION_SENTENCE.exec(line)?.[1]?.trim();
 }
 
 /** A warning line's message without its log prefix (`WARN[0000]`, `time="…" level=warning msg=`). */
@@ -141,7 +157,8 @@ export function openComposeClientCapture(): ComposeClientCapture {
     if (isComposeWarningLine(line)) {
       return `warning:${composeWarningMessage(line)}`;
     }
-    return isComposeQuestionLine(line) ? `question:${line}` : undefined;
+    const question = composeQuestionText(line);
+    return question === undefined ? undefined : `question:${question}`;
   };
   const keep = (raw: string) => {
     const line = cleanComposeClientLine(raw);
@@ -228,7 +245,10 @@ export function openComposeClientCapture(): ComposeClientCapture {
       const lines = sanitizeComposeClientLines({
         text: [...warningLines, ...pending()].join("\n"),
         redactValues: opts?.redactValues,
-      }).filter(isComposeQuestionLine);
+      }).flatMap((line) => {
+        const question = composeQuestionText(line);
+        return question === undefined ? [] : [question];
+      });
       return [...new Set(lines)].slice(
         0,
         opts?.limit ?? COMPOSE_CLIENT_QUESTION_LINES

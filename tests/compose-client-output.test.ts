@@ -8,6 +8,7 @@ import {
   COMPOSE_CLIENT_WARNING_CHARS,
   type ComposeClientCapture,
   composeClientWarnings,
+  composeQuestionText,
   isComposeQuestionLine,
   openComposeClientCapture,
   sanitizeComposeClientLines,
@@ -157,6 +158,34 @@ test("questions are told apart from warnings, build steps and ordinary lines", (
     "Error response from daemon: conflict",
   ]) {
     expect(isComposeQuestionLine(line), line).toBe(false);
+  }
+});
+
+test("a question that Compose's next progress text joined on the same line is still found, without that text", () => {
+  // Docker Compose v5.7.1 with stdin closed and no terminal, against a volume
+  // whose labels changed: it prints the question with no line break, reads
+  // end-of-input, keeps the volume, goes on, and exits 0.
+  const joined =
+    'Volume "cq_data" exists but doesn\'t match configuration in compose file. Recreate (data will be lost)? Container cq-app-1 Running ';
+  const question =
+    'Volume "cq_data" exists but doesn\'t match configuration in compose file. Recreate (data will be lost)?';
+  expect(isComposeQuestionLine(joined)).toBe(true);
+  expect(composeQuestionText(joined)).toBe(question);
+  for (const line of [
+    "Pulling https://registry.example/v2/app/manifests/1?digest=sha256",
+    " Container cq-app-1  Running",
+  ]) {
+    expect(isComposeQuestionLine(line), line).toBe(false);
+  }
+  const capture = openComposeClientCapture();
+  try {
+    feed(capture, joined, "stderr");
+    capture.end?.("stderr");
+    feed(capture, joined, "stderr");
+    capture.end?.("stderr");
+    expect(capture.questions()).toEqual([question]);
+  } finally {
+    capture.close();
   }
 });
 

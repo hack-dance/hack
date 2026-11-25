@@ -1,6 +1,9 @@
 //! Inventory attributable to the current CLI and daemon observations.
 
-use crate::{models::ProjectsPayload, viewmodel::InstanceKey};
+use crate::{
+    models::ProjectsPayload,
+    viewmodel::{InstanceKey, instance_runtimes},
+};
 use std::collections::BTreeSet;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -23,7 +26,11 @@ pub struct ObservedContainer {
 #[must_use]
 pub fn inventory(projects: &ProjectsPayload) -> Vec<ResourceGroup> {
     let mut groups = Vec::new();
-    for project in &projects.projects {
+    for project in projects
+        .projects
+        .iter()
+        .filter(|row| row.kind.as_deref() != Some("unregistered"))
+    {
         if project.is_native() {
             if let Some(ps) = project.native.as_ref().filter(|_| !project.native_pending) {
                 let containers = ps
@@ -54,12 +61,7 @@ pub fn inventory(projects: &ProjectsPayload) -> Vec<ResourceGroup> {
         if projects.engine_down() {
             continue;
         }
-        let base = project.runtime.iter().map(|r| (None, r));
-        let branches = project
-            .branch_runtime
-            .iter()
-            .map(|b| (Some(b.branch.clone()), &b.runtime));
-        for (branch, runtime) in base.chain(branches) {
+        for (key, runtime) in instance_runtimes(project) {
             let containers = runtime
                 .services
                 .iter()
@@ -81,10 +83,7 @@ pub fn inventory(projects: &ProjectsPayload) -> Vec<ResourceGroup> {
                 .collect::<Vec<_>>();
             if !containers.is_empty() {
                 groups.push(ResourceGroup {
-                    key: InstanceKey {
-                        project: project.name.clone(),
-                        branch,
-                    },
+                    key,
                     native: false,
                     containers,
                 });
@@ -107,7 +106,9 @@ mod tests {
                 "containers":[{"name":"storefront-review-api","id":"fixture","state":"running",
                   "image":"example.invalid/api:1","mounts":[{"type":"volume","name":"api-data"},
                   {"type":"bind","name":"fixture-bind","source":"/work/local-only"}],
-                  "networks":[{"name":"storefront-review"}]}]}]}}]}]
+                  "networks":[{"name":"storefront-review"}]}]}]}}]},
+            {"name":"foreign","kind":"unregistered","runtime":{"services":[{"service":"other",
+              "containers":[{"name":"foreign","state":"running"}]}]}}]
         }"#,
         )
         .unwrap();

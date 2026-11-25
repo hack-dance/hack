@@ -48,7 +48,14 @@ A pass qualifies the selected CLI's portable host-command path in that
 environment. It does not prove the CLI installer, Docker-in-container access,
 native VM support, application OAuth, browser routing, or provider secret
 delivery. Test installation separately with an explicit release tag and verify
-the installed executable before running this check.
+the installed executable before running this check. Keep the JSON result with
+the release tag, archive checksum, and source revision. The
+`selectedExecutableSha256` field identifies the file supplied to `--hack-bin`.
+If that file is a launcher, also retain the verified bundle manifest or record
+the downstream CLI digest from that bundle. Run from an operator-controlled
+installation that stays untouched during the check. The smoke checks digest
+consistency at its boundaries. Verifying the archive and installation establishes
+provenance separately.
 
 For Codex Cloud, run this check inside the actual environment after its Install
 script succeeds. Record the checked-out branch and SHA, runtime versions,

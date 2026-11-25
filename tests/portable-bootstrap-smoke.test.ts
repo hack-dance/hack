@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { readdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   entrypoint,
@@ -21,6 +22,9 @@ test("portable runner qualifies real CLI env, HTTP, dev write, restart, and clea
   expect(summary).toMatchObject({
     ok: true,
     cleanup: true,
+    selectedExecutableSha256: createHash("sha256")
+      .update(await readFile(f.binary))
+      .digest("hex"),
     checks: [
       "selected executable",
       "missing and wrong keys refuse child launch",
@@ -64,4 +68,16 @@ test("a CLI that leaks the wrong injected key is refused without forwarding it o
     "Portable bootstrap failed: step=env reason=secret_free_command_output\n"
   );
   expect(await readdir(join(f.root, "tmp"))).toEqual([]);
+});
+
+test("a selected file that changes during version discovery produces no receipt", async () => {
+  const f = await fixture(
+    'printf "\\n# changed\\n" >> "$0"\n echo fake-version'
+  );
+  const result = await run(f);
+  expect(result.code).toBe(1);
+  expect(result.stdout).toBe("");
+  expect(result.stderr).toBe(
+    "Portable bootstrap failed: step=identity reason=cli_identity\n"
+  );
 });

@@ -21,6 +21,11 @@ Failures use a stable error code and a nonzero exit status:
 Errors may carry `error.detail`. A refused administrator plan uses
 `E_PLAN_REFUSED` (exit 1); an incomplete plan uses `E_PLAN_INCOMPLETE` (exit 3).
 Both retain the partial plan, including its schema, at `error.detail.plan`.
+If `hack down --service <name> --json` fails after Docker confirms some replica
+stops, `E_COMPOSE_FAILED` includes their IDs in `error.detail.stoppedContainerIds`
+and the receipt time in `error.detail.stoppedAt`. When inspect identified the
+execution before Stop, `error.detail.stoppedContainers` pairs the confirmed ID
+with its `startedAt`. Successful service stops include those fields in `data`.
 Unknown/offline state in an observation is still a successful observation;
 it is not a claim that the runtime is healthy.
 
@@ -153,6 +158,7 @@ success behavior stays covered by command-specific suites.
 | `hack pull --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack restart --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack run --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
+| `hack service add --json` | Envelope; versioned `data.schema`: `hack.service-add.v1` |
 | `hack session capture --json` | NDJSON events / terminal event, not a single envelope |
 | `hack session panes --json` | NDJSON events / terminal event, not a single envelope |
 | `hack session tail --json` | NDJSON events / terminal event, not a single envelope |

@@ -210,6 +210,73 @@ fn record_directory(candidate: &Candidate, reference: &str) -> std::path::PathBu
     candidate.state_root.join("artifacts/image-tags").join(key)
 }
 
+fn service_pins(candidate: &Candidate) -> std::path::PathBuf {
+    candidate.state_root.join("artifacts/service-image-pins")
+}
+
+/// Immutable service inputs have no mutable tag record. Record the verified ID
+/// under the shared fence before returning it to the caller. The pin store grows by
+/// one empty directory per immutable service image. Eviction owns removal (HACK-2569).
+pub(super) fn protect_service_image(candidate: &Candidate, id: &str) -> Result<(), CandidateError> {
+    if !matches!(normalize(id), Ok(ImageReference::ImageId(_))) {
+        return Err(invalid());
+    }
+    state::private_directory(&service_pins(candidate).join(id))
+}
+
+/// Current selections are retained even after their registry freshness expires.
+pub(super) fn protected_image_ids(
+    candidate: &Candidate,
+) -> Result<std::collections::BTreeSet<String>, CandidateError> {
+    let root = candidate.state_root.join("artifacts/image-tags");
+    crate::reject_aliased_state(&root)?;
+    let mut ids = std::collections::BTreeSet::new();
+    let pins = service_pins(candidate);
+    crate::reject_aliased_state(&pins)?;
+    if pins.try_exists().map_err(state::io)? {
+        for entry in std::fs::read_dir(&pins).map_err(state::io)? {
+            let entry = entry.map_err(state::io)?;
+            let id = entry.file_name().into_string().map_err(|_| invalid())?;
+            if !matches!(normalize(&id), Ok(ImageReference::ImageId(_))) {
+                return Err(invalid());
+            }
+            state::check_private_directory(&entry.path())?;
+            ids.insert(id);
+        }
+    }
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(ids),
+        Err(error) => return Err(state::io(error)),
+    };
+    for entry in entries {
+        let directory = entry.map_err(state::io)?.path();
+        crate::reject_aliased_state(&directory)?;
+        let path = directory.join("resolution.json");
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(state::io(error)),
+            Ok(_) => {}
+        }
+        let record: TagRecord = state::read_bounded(&path, 4096)?;
+        let ImageReference::Named(named) = normalize(&record.reference).map_err(|_| invalid())?
+        else {
+            return Err(invalid());
+        };
+        record.validate(&named)?;
+        if record_directory(candidate, &record.reference) != directory {
+            return Err(invalid());
+        }
+        ids.extend(
+            record
+                .selections
+                .into_iter()
+                .map(|selection| selection.image_id),
+        );
+    }
+    Ok(ids)
+}
+
 #[derive(Serialize)]
 pub struct TagStatus {
     #[serde(flatten)]
@@ -423,20 +490,14 @@ fn resolve_pending(
     // Recheck under the writer lock so an automatic refresh can reuse a
     // resolution another process just published.
     let lock = match state::Lock::acquire(&root) {
-        Err(error) if error.code == "provider_busy" => {
-            let report_wait = std::env::var("HACK_INTERNAL_REPORT_IMAGE_WAIT").unwrap_or_default();
-            match report_wait.as_str() {
-                "batch" => eprintln!("hack.image-wait:begin {canonical}"),
-                "1" => eprintln!("hack.image-wait:begin"),
-                _ => (),
-            }
-            let lock =
-                state::Lock::acquire_existing_waiting(&root, std::time::Duration::from_secs(590));
-            match report_wait.as_str() {
-                "batch" => eprintln!("hack.image-wait:end {canonical}"),
-                "1" => eprintln!("hack.image-wait:end"),
-                _ => (),
-            }
+        Err(error) if error.code == "provider_busy" && policy.retention_root.is_none() => {
+            let lock = policy
+                .image_wait(std::time::Duration::from_secs(590))
+                .and_then(|wait| {
+                    state::wait_for_image_lock(wait, &canonical, || {
+                        state::Lock::acquire_existing(&root)
+                    })
+                });
             lock.map_err(|error| {
                 if error.code == "provider_busy" {
                     CandidateError::new(
@@ -651,6 +712,29 @@ mod tests {
             image_id: digest('d'),
             platform: "linux/arm64",
         }
+    }
+
+    #[test]
+    fn keeper_retention_collects_current_tag_selections_and_immutable_service_ids() {
+        let f = Fixture::new();
+        protect_service_image(&f.0, &digest('e')).unwrap();
+        let policy = ImagePolicy::default();
+        resolve_pending(
+            &f.0,
+            TAG,
+            &policy,
+            PlatformPolicy::Native,
+            || Ok(1),
+            |_| Ok(false),
+            |_, _, _| Ok(result('a')),
+        )
+        .unwrap()
+        .publish()
+        .unwrap();
+        assert_eq!(
+            protected_image_ids(&f.0).unwrap(),
+            [digest('d'), digest('e')].into_iter().collect()
+        );
     }
 
     #[test]

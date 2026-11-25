@@ -11,6 +11,7 @@ import {
   renderComposeEnvReferenceOverride,
   withoutComposeEnvReferences,
 } from "../src/lib/compose-managed-env.ts";
+import { isRecord } from "../src/lib/guards.ts";
 import {
   resolveProjectEnvConfig,
   setProjectEnvValue,
@@ -310,3 +311,105 @@ test("with metadata and values from one resolution the value guard never fires, 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test.skipIf(process.env.HACK_TEST_COMPOSE_CONFIG !== "1")(
+  "desktop catalog credentials compile from managed service scopes",
+  async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "hack-catalog-config-"))
+    );
+    try {
+      const projectDir = join(root, ".hack");
+      await mkdir(projectDir);
+      const credentials = {
+        postgres: ["POSTGRES_PASSWORD"],
+        mysql: ["MYSQL_ROOT_PASSWORD"],
+        minio: ["MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD"],
+      };
+      const serviceNames = Object.keys(credentials);
+      for (const [scope, keys] of Object.entries(credentials)) {
+        for (const key of keys) {
+          await setProjectEnvValue({
+            projectRoot: root,
+            projectDir,
+            envName: null,
+            scope,
+            key,
+            value: `FAKE_TEST_ONLY_${key}`,
+            secret: false,
+          });
+        }
+      }
+      const resolved = await resolveProjectEnvConfig({
+        projectRoot: root,
+        projectDir,
+        serviceNames,
+      });
+      if (!resolved) {
+        throw new Error("expected a resolved env config");
+      }
+      expect(Object.keys(resolved.globalEnv)).toEqual([]);
+      const rendered = renderComposeEnvReferenceOverride({
+        targetServices: serviceNames,
+        globalEnv: resolved.globalEnv,
+        serviceEnv: resolved.serviceEnv,
+        effectiveScopes: resolved.effectiveMetadata,
+      });
+      if (!rendered) {
+        throw new Error("expected a managed Compose override");
+      }
+      await Bun.write(join(root, "managed.yaml"), rendered.text);
+      await Bun.write(
+        join(root, "compose.yaml"),
+        Bun.file(
+          new URL(
+            "../apps/desktop/app/fixtures/catalog-credentials.yaml",
+            import.meta.url
+          )
+        )
+      );
+      const result = Bun.spawnSync(
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "-f",
+          "managed.yaml",
+          "config",
+          "--format",
+          "json",
+        ],
+        {
+          cwd: root,
+          env: {
+            PATH: process.env.PATH,
+            HOME: process.env.HOME,
+            ...rendered.env,
+          },
+          stderr: "pipe",
+          timeout: 15_000,
+        }
+      );
+      expect(result.exitCode).toBe(0);
+      const config: unknown = JSON.parse(result.stdout.toString());
+      if (!(isRecord(config) && isRecord(config.services))) {
+        throw new Error("expected compiled Compose services");
+      }
+      for (const [service, keys] of Object.entries(credentials)) {
+        const compiled = config.services[service];
+        if (!(isRecord(compiled) && isRecord(compiled.environment))) {
+          throw new Error(`expected a compiled environment for ${service}`);
+        }
+        const { environment } = compiled;
+        expect(Object.keys(environment).sort()).toEqual([...keys].sort());
+        for (const key of keys) {
+          expect(environment[key] === `FAKE_TEST_ONLY_${key}`).toBe(true);
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+  30_000
+);

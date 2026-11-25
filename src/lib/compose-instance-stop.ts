@@ -1,7 +1,91 @@
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { COMPOSE_DOWN_TIMEOUT_CONFIG } from "./compose-down-budget.ts";
-import { isRecord } from "./guards.ts";
+import { getString, isRecord } from "./guards.ts";
+import { parseJsonLines } from "./json-lines.ts";
+import { readContainerState } from "./runtime-service-state.ts";
+import type { exec } from "./shell.ts";
+
+const STOP_EXECUTION_INSPECT_FORMAT =
+  '{"Id":{{json .Id}},"State":{"Status":{{json .State.Status}},"StartedAt":{{json .State.StartedAt}}}}';
+
+const STOP_CONTAINER_LIST_FORMAT =
+  '{"ID":{{json .ID}},"Service":{{json (.Label "com.docker.compose.service")}},"State":{{json .State}},"Labels":{"com.docker.compose.project.working_dir":{{json (.Label "com.docker.compose.project.working_dir")}},"com.docker.compose.oneoff":{{json (.Label "com.docker.compose.oneoff")}}}}';
+
+/** Read the named project's container labels without loading its Compose model. */
+export async function listDockerProjectContainers(opts: {
+  readonly composeProject: string;
+  readonly cwd: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly timeoutMs: number;
+  readonly executeDocker: typeof exec;
+}): Promise<InstanceContainerListing> {
+  const result = await opts.executeDocker(
+    [
+      "docker",
+      "ps",
+      "--all",
+      "--no-trunc",
+      "--filter",
+      `label=com.docker.compose.project=${opts.composeProject}`,
+      "--format",
+      STOP_CONTAINER_LIST_FORMAT,
+    ],
+    {
+      cwd: opts.cwd,
+      env: { ...opts.env },
+      stdin: "ignore",
+      timeoutMs: opts.timeoutMs,
+    }
+  );
+  if (result.exitCode !== 0) {
+    return { ok: false, reason: `docker ps failed (exit ${result.exitCode})` };
+  }
+  return parseComposePsInstanceContainers(result.stdout);
+}
+
+/** Read only execution identity. Missing inspect evidence does not prevent Stop. */
+export async function readServiceStopExecutions(opts: {
+  readonly ids: readonly string[];
+  readonly cwd: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly timeoutMs: number;
+  readonly executeDocker: typeof exec;
+}): Promise<ReadonlyMap<string, string>> {
+  const result = await opts
+    .executeDocker(
+      [
+        "docker",
+        "inspect",
+        "--type",
+        "container",
+        "--format",
+        STOP_EXECUTION_INSPECT_FORMAT,
+        "--",
+        ...opts.ids,
+      ],
+      {
+        cwd: opts.cwd,
+        env: { ...opts.env },
+        stdin: "ignore",
+        timeoutMs: opts.timeoutMs,
+        maxStdoutBytes: opts.ids.length * 256,
+        maxStderrBytes: 4096,
+      }
+    )
+    .catch(() => null);
+  const executions = new Map<string, string>();
+  if (result) {
+    for (const row of parseJsonLines(result.stdout)) {
+      const id = getString(row, "Id");
+      const startedAt = readContainerState(row.State)?.startedAt;
+      if (id && startedAt) {
+        executions.set(id, startedAt);
+      }
+    }
+  }
+  return executions;
+}
 
 /**
  * Rules for stopping a whole Compose instance (HACK-2340).
@@ -168,10 +252,14 @@ export function parseComposePsInstanceContainers(
         reason: "docker compose ps printed an unexpected entry",
       };
     }
-    const labels =
-      typeof value.Labels === "string" ? parseComposeLabels(value.Labels) : {};
-    const workingDir = labels[WORKING_DIR_LABEL];
-    const oneOff = (labels[ONE_OFF_LABEL] ?? "").toLowerCase() === "true";
+    const labels = isRecord(value.Labels) ? value.Labels : {};
+    const parsedLabels =
+      typeof value.Labels === "string"
+        ? parseComposeLabels(value.Labels)
+        : labels;
+    const workingDir = getString(parsedLabels, WORKING_DIR_LABEL);
+    const oneOff =
+      getString(parsedLabels, ONE_OFF_LABEL)?.toLowerCase() === "true";
     containers.push({
       ...(oneOff ? { oneOff: true } : {}),
       id: value.ID,

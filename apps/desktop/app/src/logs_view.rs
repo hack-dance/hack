@@ -177,6 +177,13 @@ impl HackApp {
     /// The equivalent terminal command for the current project and filter,
     /// shell-quoted. Following, so it keeps streaming in the terminal.
     fn logs_command(&self) -> Option<String> {
+        if self
+            .model
+            .detail()
+            .is_none_or(|detail| !detail.runtime_addressable)
+        {
+            return None;
+        }
         let (root, native) = self.selected_root()?;
         if native {
             return None;
@@ -186,6 +193,14 @@ impl HackApp {
         if let Some(branch) = self.model.selected_key().and_then(|k| k.branch) {
             cmd.push_str(" --branch ");
             cmd.push_str(&quote(&branch));
+        }
+        if let Some(name) = self
+            .model
+            .selected_runtime_target()
+            .and_then(|target| target.compose_project)
+        {
+            cmd.push_str(" --expect-compose-project ");
+            cmd.push_str(&quote(&name));
         }
         if let Some(svc) = &self.logs.model.service {
             cmd.push(' ');
@@ -230,6 +245,18 @@ impl HackApp {
     /// (Re)open the stream for the selected project and current filter.
     pub(crate) fn open_logs(&mut self, cx: &mut Context<Self>) {
         self.logs.close();
+        if self
+            .model
+            .detail()
+            .is_some_and(|detail| !detail.runtime_addressable)
+        {
+            self.logs
+                .model
+                .unavailable("The displayed runtime has no current checkout or Compose target.");
+            self.refresh_log_rows();
+            cx.notify();
+            return;
+        }
         let Some((root, native)) = self.selected_root() else {
             // No folder to read from: never leave another project's lines.
             self.logs
@@ -248,7 +275,14 @@ impl HackApp {
             return;
         }
         let running = self.displayed_logs_running();
-        let args = self.logs.model.cli_args(running);
+        let mut args = self.logs.model.cli_args(running);
+        if let Some(name) = self
+            .model
+            .selected_runtime_target()
+            .and_then(|target| target.compose_project)
+        {
+            args.insert(1, format!("--expect-compose-project={name}"));
+        }
         self.logs.model.start(running);
         self.refresh_log_rows();
         let generation = self.logs.generation;

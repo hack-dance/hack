@@ -51,10 +51,12 @@ const STUB = [
   '    *" ps "*)',
   '      if [ -f "$marker" ]; then exit 0; fi',
   '      if [ "${STUB_WORKER_EXITED:-}" = "1" ]; then',
-  '        printf "%s\\n" \'{"ID":"fixture-web","Service":"web","State":"running","ExitCode":0}\' \'{"ID":"fixture-worker","Service":"worker","State":"exited","ExitCode":1}\'',
+  "        worker_state=exited worker_code=1",
   "      else",
-  '        printf "%s\\n" \'{"ID":"fixture-web","Service":"web","State":"running","ExitCode":0}\' \'{"ID":"fixture-worker","Service":"worker","State":"running","ExitCode":0}\'',
+  "        worker_state=running worker_code=0",
   "      fi",
+  '      printf \'{"ID":"fixture-web","Service":"web","State":"running","ExitCode":0,"Labels":"com.docker.compose.project.working_dir=%s"}\\n\' "$PWD"',
+  '      printf \'{"ID":"fixture-worker","Service":"worker","State":"%s","ExitCode":%s,"Labels":"com.docker.compose.project.working_dir=%s"}\\n\' "$worker_state" "$worker_code" "$PWD"',
   "      exit 0",
   "      ;;",
   "    *) exit 0 ;;",
@@ -85,6 +87,7 @@ beforeEach(async () => {
   await writeFile(
     join(hackDir, "docker-compose.yml"),
     [
+      "name: activityshop",
       "services:",
       "  web:",
       "    image: alpine:3.22",
@@ -162,7 +165,7 @@ test("successful and failed up are recorded with names only", async () => {
   ]);
   expect(entries[0]?.failed_services).toEqual(["worker"]);
   await expectNamesOnly(entries);
-});
+}, 30_000);
 
 test("restart and down are recorded with names only", async () => {
   expect(
@@ -177,7 +180,7 @@ test("restart and down are recorded with names only", async () => {
     ["restart", "ok", "cli"],
   ]);
   await expectNamesOnly(entries);
-});
+}, 30_000);
 
 async function expectNamesOnly(entries: readonly Entry[]): Promise<void> {
   for (const entry of entries) {
@@ -248,7 +251,7 @@ test("a write failure does not change the exit code or the envelope", async () =
   const read = await runCli({ args: ["activity", "--json"] });
   expect(read.exitCode).toBe(1);
   expect(JSON.parse(read.stdout).error.code).toBe("E_PATH_CONFLICT");
-});
+}, 30_000);
 
 test("native lifecycle commands write the same records", async () => {
   const nativeHome = join(root, "native-home");

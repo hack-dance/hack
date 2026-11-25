@@ -27,6 +27,7 @@ const IMAGE_WORKERS: usize = 3;
 #[derive(Default)]
 struct CacheState {
     lease: Option<state::Lock>,
+    users: usize,
     reservations: BTreeMap<String, u64>,
     disk_reserved: u64,
 }
@@ -64,18 +65,51 @@ impl ImageCache {
         }
     }
 
-    fn enter(&self, root: &Path) -> Result<MutexGuard<'_, CacheState>, CandidateError> {
+    fn enter(&self, root: &Path, policy: &ImagePolicy) -> Result<CacheLease<'_>, CandidateError> {
         let mut cache = self.state.lock().unwrap();
-        if cache.lease.is_none() {
-            let lease = lifecycle::startup_lease(root, lifecycle::STARTUP_LEASE_WAIT)?;
+        if let Some(lease) = &cache.lease {
+            lease.verify_path(root)?;
+        } else {
+            let lease = if policy.retention_root.is_some() {
+                state::Lock::acquire(root)?
+            } else {
+                state::wait_for_image_lock(
+                    policy.image_wait(std::time::Duration::from_secs(590))?,
+                    "image-cache",
+                    || state::Lock::acquire(root),
+                )?
+            };
             let staging = root.with_file_name("image-staging");
             if staging.try_exists().map_err(state::io)? {
                 clean_staging(&staging, 0)?;
             }
+            lease.verify_path(root)?;
             cache.lease = Some(lease);
         }
+        cache.users += 1;
+        Ok(CacheLease(self))
+    }
+}
+
+/// Only workers using the cache hold this lease. Workers still resolving tags
+/// can never keep it alive while another command needs it to confirm a tag.
+struct CacheLease<'a>(&'a ImageCache);
+
+impl CacheLease<'_> {
+    fn lock(&self, root: &Path) -> Result<MutexGuard<'_, CacheState>, CandidateError> {
+        let cache = self.0.state.lock().unwrap();
         cache.lease.as_ref().unwrap().verify_path(root)?;
         Ok(cache)
+    }
+}
+
+impl Drop for CacheLease<'_> {
+    fn drop(&mut self) {
+        let mut cache = self.0.state.lock().unwrap();
+        cache.users -= 1;
+        if cache.users == 0 {
+            cache.lease = None;
+        }
     }
 }
 
@@ -252,7 +286,7 @@ impl CacheReceipt {
         Ok(())
     }
 }
-fn read_receipt(path: &Path) -> Result<CacheReceipt, CandidateError> {
+fn open_receipt(path: &Path) -> Result<fs::File, CandidateError> {
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -267,6 +301,11 @@ fn read_receipt(path: &Path) -> Result<CacheReceipt, CandidateError> {
     {
         return Err(refused("Unsafe image cache receipt."));
     }
+    Ok(file)
+}
+
+fn read_receipt(path: &Path) -> Result<CacheReceipt, CandidateError> {
+    let file = open_receipt(path)?;
     let mut bytes = Vec::new();
     file.take(4097).read_to_end(&mut bytes).map_err(state::io)?;
     if bytes.len() > 4096 {
@@ -589,6 +628,7 @@ pub fn ensure_with(
     policy: &ImagePolicy,
     platform: PlatformPolicy,
 ) -> Result<EnsuredImage, CandidateError> {
+    let _fence = super::image_build::wait_for_image_fence(candidate, policy)?;
     timed_acquire(
         Step::ImageEnsure,
         candidate,
@@ -600,12 +640,15 @@ pub fn ensure_with(
     )
 }
 
+type ImageBatchEntry = (usize, Result<EnsuredImage, CandidateError>, u64);
+
 /// Distinct references can prepare archives together. Only the existing loader imports.
 pub fn ensure_batch(
     candidate: &Candidate,
     jobs: &[(String, PlatformPolicy)],
     policy: &ImagePolicy,
-) -> Vec<(usize, Result<EnsuredImage, CandidateError>, u64)> {
+) -> Result<Vec<ImageBatchEntry>, CandidateError> {
+    let _fence = super::image_build::wait_for_image_fence(candidate, policy)?;
     let cache = ImageCache::default();
     let queue = std::sync::atomic::AtomicUsize::new(0);
     let finished = Mutex::new(Vec::with_capacity(jobs.len()));
@@ -644,7 +687,7 @@ pub fn ensure_batch(
             });
         }
     });
-    finished.into_inner().unwrap()
+    Ok(finished.into_inner().unwrap())
 }
 
 pub use super::image_tag_store::{present as present_tags, status as tag_status};
@@ -682,7 +725,14 @@ fn timed_acquire(
         });
         attrs.registry_requests = Some(count);
         attrs.image_index = index.map(|index| index as u64);
-        result
+        let image = result?;
+        if import
+            && policy.build_deadline.is_none()
+            && (reference.contains('@') || reference.starts_with("sha256:"))
+        {
+            image_tag_store::protect_service_image(candidate, &image.image_id)?;
+        }
+        Ok(image)
     })
 }
 
@@ -796,7 +846,7 @@ fn acquire_selection(
                 policy,
                 platform,
                 observer,
-                cache,
+                (cache, None),
                 Some(tag),
             )
         })?,
@@ -806,7 +856,7 @@ fn acquire_selection(
             policy,
             platform,
             observer,
-            cache,
+            (cache, None),
             tag.as_ref(),
         )?,
     };
@@ -824,13 +874,32 @@ fn acquire_selection(
     Ok(ensured)
 }
 
+/// Retain an immutable build input under an already-held idle provider lease.
+pub(super) fn retain_build_image(
+    candidate: &Candidate,
+    pin: &str,
+    policy: &ImagePolicy,
+    engine: &engine::Engine<'_>,
+) -> Result<EnsuredImage, CandidateError> {
+    let observer = engine::Observer::connect(candidate)?;
+    confirm_selection(
+        candidate,
+        pin,
+        policy,
+        PlatformPolicy::Native,
+        Some(&observer),
+        (&ImageCache::default(), Some(engine)),
+        None,
+    )
+}
+
 fn confirm_selection(
     candidate: &Candidate,
     reference: &str,
     policy: &ImagePolicy,
     platform: PlatformPolicy,
     observer: Option<&engine::Observer<'_>>,
-    cache: &ImageCache,
+    (cache, existing_engine): (&ImageCache, Option<&engine::Engine<'_>>),
     tag: Option<&image_tag_store::TagResolution>,
 ) -> Result<EnsuredImage, CandidateError> {
     let requested_platform = platform;
@@ -918,13 +987,13 @@ fn confirm_selection(
             policy,
             platform,
             |reference, platform| {
-                if offline {
+                if offline || existing_engine.is_some() {
                     return Err(no_archive());
                 }
                 registry_image::pinned_platform(reference, policy, platform)
             },
             |reference, path, platform, limit| {
-                if offline {
+                if offline || existing_engine.is_some() {
                     return Err(no_archive());
                 }
                 let mut acquired = registry_image::acquire_with_disk_admission(
@@ -944,7 +1013,7 @@ fn confirm_selection(
                         check_registry_config(receipt, *selected, config)?;
                         return Ok(config.clone());
                     }
-                    if offline {
+                    if offline || existing_engine.is_some() {
                         return Err(no_archive());
                     }
                     let proof = match acquired_proof.borrow_mut().take() {
@@ -985,7 +1054,14 @@ fn confirm_selection(
                     recorded_config: selection.as_ref().map(|(_, config)| config.as_str()),
                     require_present: offline,
                 };
-                image_load::load_cached(candidate, &archive, policy, observer, config).map(|_| ())
+                image_load::load_cached(
+                    candidate,
+                    &archive,
+                    policy,
+                    (observer, existing_engine),
+                    config,
+                )
+                .map(|_| ())
             },
         )?
     };
@@ -1052,7 +1128,8 @@ fn ensure_pinned_coordinated(
         .or_default()
         .clone();
     let _pin = pin.lock().unwrap();
-    let mut state = coordinator.enter(&root)?;
+    let lease = coordinator.enter(&root, policy)?;
+    let mut state = lease.lock(&root)?;
     let inventory = || measure(Step::ImageCacheInventory, None, |_| usage(candidate, &root));
     let mut occupied = inventory()?;
     // A cached entry is reused only for the platform the pinned image itself selects under
@@ -1150,7 +1227,7 @@ fn ensure_pinned_coordinated(
         }
         state::write(&dir.join("receipt.json"), &receipt)?;
         inspect_entry(candidate, dir, &reference, acquired.platform)?;
-        let state = coordinator.enter(&root)?;
+        let state = lease.lock(&root)?;
         let target = root.join(entry_key(&reference, acquired.platform));
         if target.try_exists().map_err(state::io)? {
             return Err(refused(
@@ -1165,9 +1242,15 @@ fn ensure_pinned_coordinated(
         drop(reservation);
         (target, receipt)
     };
+    drop(lease);
     // Keep the import lease and the loader’s own live recheck unchanged.
     let _import = coordinator.importer.lock().unwrap();
     load(candidate, &dir.join("image.tar"), &receipt, reused)?;
+    // The reference pin and cache lease still protect this receipt.
+    // Recency is advisory once the requested archive has been verified.
+    if reused && let Ok(file) = open_receipt(&dir.join("receipt.json")) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
     Ok(EnsuredImage {
         pinned_reference: reference,
         image_id: receipt.image_id,
@@ -1227,6 +1310,33 @@ mod tests {
             platform: platform.candidates()[0],
         })
     }
+    #[test]
+    fn ensure_waits_out_reclaim_without_taking_the_provider_lease() {
+        let f = Fixture::new();
+        let candidate = &f.1;
+        let exclusive = super::super::image_build::image_fence(candidate, libc::LOCK_EX).unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let result = ensure(candidate, "invalid reference", &ImagePolicy::default());
+                send.send(result.unwrap_err().code).unwrap();
+            });
+            assert!(matches!(
+                receive.recv_timeout(std::time::Duration::from_millis(150)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+            let provider = state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap();
+            drop(exclusive);
+            assert_eq!(
+                receive
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap(),
+                "registry_image"
+            );
+            drop(provider);
+        });
+    }
+
     #[test]
     fn disk_budget_waits_for_the_current_fetch_and_refuses_an_oversized_archive() {
         let cache = ImageCache::default();
@@ -1383,9 +1493,28 @@ mod tests {
         state::private_directory(&staged).unwrap();
         fs::write(staged.join(".hack-image-1-0.tmp"), b"fixture").unwrap();
         let coordinator = ImageCache::default();
-        let _cache = coordinator.enter(&root).unwrap();
+        let _cache = coordinator.enter(&root, &ImagePolicy::default()).unwrap();
         assert!(!staged.exists());
         assert_eq!(usage(&f.1, &root).unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn batch_releases_the_cache_lease_when_its_last_cache_worker_finishes() {
+        let f = Fixture::new();
+        let root = f.1.state_root.join("artifacts/images");
+        let cache = ImageCache::default();
+        let policy = ImagePolicy::default();
+        let first = cache.enter(&root, &policy).unwrap();
+        let second = cache.enter(&root, &policy).unwrap();
+        drop(first);
+        assert_eq!(
+            state::Lock::acquire(&root).err().unwrap().code,
+            "provider_busy"
+        );
+        drop(second);
+        // The batch can still be waiting on another tag at this point. That
+        // tag's owner is now free to enter the cache from another command.
+        assert!(state::Lock::acquire(&root).is_ok());
     }
 
     #[test]
@@ -1528,7 +1657,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_count_retires_oldest_unreferenced_archive_at_64() {
+    fn cache_count_retires_least_recently_used_unreferenced_archive_at_64() {
         let f = Fixture::new();
         let root = f.1.state_root.join("artifacts/images");
         let slot = |n| root.join(entry_key(&pin(n), ImagePlatform::LinuxArm64));
@@ -1558,12 +1687,14 @@ mod tests {
         state::private_directory(&archived).unwrap();
         let receipt = archived.join("state.json");
         fs::write(&receipt, pin(0)).unwrap();
+        assert!(cache(2).unwrap().archive_reused);
         let importing = coordinator.pins.lock().unwrap()[&pin(1)].clone();
         let active_import = importing.lock().unwrap();
         cache(99).unwrap();
         assert!(slot(0).exists());
         assert!(slot(1).exists());
-        assert!(!slot(2).exists());
+        assert!(slot(2).exists());
+        assert!(!slot(3).exists());
         drop(active_import);
         assert!(slot(99).exists());
         assert_eq!(usage(&f.1, &root).unwrap(), (64, 448));

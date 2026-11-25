@@ -1,4 +1,4 @@
-use gpui_kit::{AnyElement, Context, Div, div, prelude::*};
+use gpui_kit::{AnyElement, Context, Div, Window, div, prelude::*};
 use hack_desktop_core::resources::{ObservedContainer, ResourceGroup, inventory};
 use hack_desktop_ui::{
     components::{StyledExt as _, Ui, action_button, neutral_pill},
@@ -69,6 +69,30 @@ pub(crate) fn render(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> AnyEl
         .into_any_element()
 }
 
+impl HackApp {
+    pub(crate) fn open_resource_logs(
+        &mut self,
+        key: hack_desktop_core::viewmodel::InstanceKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_instance(key.clone(), cx);
+        if self.model.selected_key().as_ref() != Some(&key) {
+            return;
+        }
+        #[cfg(hack_terminal)]
+        {
+            self.set_tab(0, cx);
+            self.show_instance_terminal_logs(window, cx);
+        }
+        #[cfg(not(hack_terminal))]
+        {
+            let _ = window;
+            self.set_tab(1, cx);
+        }
+    }
+}
+
 fn group(index: usize, group: ResourceGroup, ui: &Ui, cx: &mut Context<HackApp>) -> Div {
     let title = group.key.branch.as_deref().map_or_else(
         || group.key.project.clone(),
@@ -106,11 +130,8 @@ fn group(index: usize, group: ResourceGroup, ui: &Ui, cx: &mut Context<HackApp>)
                 )
                 .children((!group.native).then(|| {
                     action_button(("resource-logs", index), Glyph::Logs, "Logs", true, ui).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.select_instance(logs_key.clone(), cx);
-                            if !cfg!(hack_terminal) {
-                                this.set_tab(1, cx);
-                            }
+                        cx.listener(move |this, _, window, cx| {
+                            this.open_resource_logs(logs_key.clone(), window, cx);
                         }),
                     )
                 })),

@@ -41,6 +41,7 @@ instance's hosts; the native backend refuses such a collision instead.
 The desktop preview's **Changes** tab shows the selected checkout and its Git
 branch, with a **Not committed** badge when there are tracked or untracked
 changes under `.hack/`. Use **Check again** to refresh after editing files.
+The desktop uses your Git exclusions and checks checkout ownership before reading status. External Git filters are disabled for this read.
 In the Hack desktop preview, select the project and open **Copies** to see
 its checkouts, branches, instance names, and reported runtime state. **Check
 again** refreshes the report. An incomplete read keeps any copies Hack could

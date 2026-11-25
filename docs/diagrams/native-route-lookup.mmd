@@ -1,0 +1,26 @@
+---
+title: Native HTTPS route lookup
+---
+stateDiagram-v2
+    direction TB
+    classDef ok stroke-width:1.6px
+    classDef wait stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> Committed
+    Committed --> Pending : claim, stage or retire
+    Pending --> Committed : rename to commit
+    Pending --> Retained : interrupted before rename
+    Retained --> Committed : validated recovery
+
+    [*] --> FirstSnapshot
+    FirstSnapshot --> PublisherObserved : verify live publisher
+    FirstSnapshot --> MissingClaim : no committed claim
+    FirstSnapshot --> Unverified : observation failed
+    PublisherObserved --> SecondSnapshot : reopen committed file
+    SecondSnapshot --> Allowed : same claim and live process
+    SecondSnapshot --> Unverified : changed or unverified
+
+    class Pending wait
+    class Allowed ok
+    class Unverified fail

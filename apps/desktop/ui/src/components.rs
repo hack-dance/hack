@@ -342,7 +342,7 @@ pub fn always_on_switch(checked: bool, disabled_reason: Option<&'static str>, ui
 /// underline. The caller adds the click handler.
 pub fn pill_tab(
     id: impl Into<ElementId>,
-    label: &'static str,
+    label: impl Into<SharedString>,
     sel: bool,
     ui: &Ui,
 ) -> Stateful<Div> {
@@ -363,14 +363,14 @@ pub fn pill_tab(
         })
         .when(sel, |d| d.bg(p.selection))
         .when(!sel, |d| d.hover(move |d| d.text_color(p.text_primary)))
-        .child(label)
+        .child(label.into())
 }
 
 /// Pill tabs, for renders that need no click handlers.
 pub fn pill_tabs(labels: &[&'static str], selected: usize, ui: &Ui) -> Div {
     let mut row = div().flex().items_center().gap(space::S2);
     for (i, label) in labels.iter().enumerate() {
-        row = row.child(pill_tab(("tab", i), label, i == selected, ui));
+        row = row.child(pill_tab(("tab", i), *label, i == selected, ui));
     }
     row
 }

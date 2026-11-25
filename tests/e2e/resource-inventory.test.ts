@@ -384,7 +384,7 @@ test.skipIf(process.platform !== "linux" || !Bun.which("docker"))(
           compose("detached"),
           checkout("never-mounted"),
         ],
-        { env: { ...process.env, HACK_HOME: hackHome } }
+        { env: { ...process.env, HACK_HOME: hackHome }, timeout: 10_000 }
       );
       expect(failedRecording.exitCode).toBe(9);
       reason(await cli([...selection, "--dry-run"]), "history_unknown");

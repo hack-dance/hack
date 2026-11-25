@@ -7,7 +7,9 @@ repository, so teammates and agents use the same definition.
 Use `hack resources list --json` or the desktop **Resources** pane to
 inspect observed containers and attachments. The report includes Docker's
 disk-size estimates, the native home's allocated bytes, and retained native
-volume observations where available. A detached row has no known checkout or runtime mapping for its Compose project.
+volume observations where available. Inspect a resource to see its project
+and branch, open available Compose logs, or go to **Doctor** for cleanup
+guidance and native pool status. A detached row has no known checkout or runtime mapping for its Compose project.
 
 Use `hack resources remove volume:<name> --dry-run --json` to review removal,
 then pass its token with `--confirm`. Interactive removal prompts before

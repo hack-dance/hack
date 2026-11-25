@@ -459,6 +459,22 @@ pub trait Source: Send + Sync {
         Err(RunError::NotFound.into())
     }
 
+    fn config_read(
+        &self,
+        _root: Option<&Path>,
+        _field: crate::config_form::Field,
+    ) -> Result<crate::config_form::Report, &'static str> {
+        Err("Configuration is unavailable")
+    }
+    fn config_write(
+        &self,
+        _report: &crate::config_form::Report,
+        _field: crate::config_form::Field,
+        _input: &str,
+    ) -> Result<crate::config_form::Report, &'static str> {
+        Err("Configuration is unavailable")
+    }
+
     /// Read names-only env metadata; diagnostics must never contain CLI output.
     fn env(&self, _root: &Path, _native: bool) -> crate::env::EnvView {
         crate::env::EnvView::Unreadable
@@ -1981,6 +1997,47 @@ impl Source for LiveSource {
                 RunError::Cli(error) => error.message,
                 _ => "Resource removal could not be confirmed. Refresh the inventory.".into(),
             })
+    }
+
+    fn config_read(
+        &self,
+        root: Option<&Path>,
+        field: crate::config_form::Field,
+    ) -> Result<crate::config_form::Report, &'static str> {
+        let root = root
+            .map(|path| trusted_root(path).map_err(|_| "Checkout unavailable"))
+            .transpose()?;
+        let runner = self.runner.fixed();
+        let mut report = crate::config_form::read(&runner, root, field)?;
+        if field.kind == crate::config_form::Kind::Overlay
+            && let Some(root) = report.root.as_deref()
+            && let crate::env::EnvView::Report(env) = self.env(root, false)
+        {
+            report.names = env
+                .overlays
+                .iter()
+                .map(|overlay| overlay.name.clone())
+                .collect();
+        }
+        Ok(report)
+    }
+
+    fn config_write(
+        &self,
+        report: &crate::config_form::Report,
+        field: crate::config_form::Field,
+        input: &str,
+    ) -> Result<crate::config_form::Report, &'static str> {
+        let runner = self.runner.fixed();
+        if runner.resolve_program().ok().as_ref() != Some(&report.executable) {
+            return Err("The selected CLI changed. Check again.");
+        }
+        if let Some(root) = &report.root
+            && trusted_root(root).ok().as_ref() != Some(root)
+        {
+            return Err("The checkout changed. Check again.");
+        }
+        crate::config_form::write(&runner, report, field, input)
     }
 
     fn open_logs(

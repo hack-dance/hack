@@ -51,6 +51,12 @@ pub enum Fixture {
     /// The selected project's base instance is stopped while two branch
     /// instances (`hack up --branch <name>`) run.
     Branches,
+    ConfigProject,
+    ConfigGlobal,
+    ConfigInvalid,
+    ConfigSaved,
+    ConfigError,
+    ConfigLoading,
     ResourcesUnavailable,
     ResourcesEmpty,
     ResourcesReady,
@@ -109,7 +115,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 71] = [
+    pub const ALL: [Self; 77] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -139,6 +145,12 @@ impl Fixture {
         Self::FailedStart,
         Self::NeedsAttention,
         Self::Branches,
+        Self::ConfigProject,
+        Self::ConfigGlobal,
+        Self::ConfigInvalid,
+        Self::ConfigSaved,
+        Self::ConfigError,
+        Self::ConfigLoading,
         Self::ResourcesUnavailable,
         Self::ResourcesEmpty,
         Self::ResourcesReady,
@@ -215,6 +227,12 @@ impl Fixture {
             Self::FailedStart => "failed-start",
             Self::NeedsAttention => "needs-attention",
             Self::Branches => "branches",
+            Self::ConfigProject => "config-project",
+            Self::ConfigGlobal => "config-global",
+            Self::ConfigInvalid => "config-invalid",
+            Self::ConfigSaved => "config-saved",
+            Self::ConfigError => "config-error",
+            Self::ConfigLoading => "config-loading",
             Self::ResourcesUnavailable => "resources-unavailable",
             Self::ResourcesEmpty => "resources-empty",
             Self::ResourcesReady => "resources-ready",

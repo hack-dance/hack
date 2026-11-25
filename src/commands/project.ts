@@ -9365,8 +9365,11 @@ async function runResolvedComposeUp({
     };
     const guarded = await launchWithEnv().finally(async () => {
       foregroundReceiptStop.abort();
-      settlePublication();
-      await foregroundReceipts;
+      try {
+        await settlePublication();
+      } finally {
+        await foregroundReceipts;
+      }
       if (!detach && composeDispatched) {
         await recordResourceReceipts();
       }

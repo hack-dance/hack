@@ -2355,7 +2355,7 @@ impl Source for LiveSource {
             Action::Start if native => {
                 validate_branch(service)?;
                 let mut args = with_branch(Action::Start.cli_args(), branch);
-                args.extend(["--", service]);
+                args.push(service);
                 return Ok(self
                     .runner_for(true)
                     .run_json_to_completion(&args, Some(&root))?);
@@ -5718,13 +5718,20 @@ echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop
         );
         assert!(result.is_ok(), "{result:?}");
         let args = argv(&b);
-        assert_eq!(args[0], "native");
-        assert_eq!(&args[1..4], ["up", "--branch", "test"]);
-        assert!(args.ends_with(&["--".to_owned(), "redis".to_owned()]));
-        assert!(
-            !args
-                .iter()
-                .any(|arg| arg == "--target" || arg.starts_with("--expect-compose-project"))
+        assert_eq!(
+            args,
+            [
+                "native",
+                "up",
+                "--branch",
+                "test",
+                "--detach",
+                "--json",
+                "--no-interactive",
+                "redis",
+                "--path",
+                project.to_str().unwrap(),
+            ]
         );
     }
 

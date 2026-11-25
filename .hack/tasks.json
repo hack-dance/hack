@@ -38,7 +38,11 @@
           },
           {
             "path": ".hack/toolchain/Dockerfile",
-            "sha256": "26743556cde8930e2105e860a9b6bd3f5d6d4e2a4f5b567df01d4dd3e8e0c745"
+            "sha256": "ba38416ba4b7acaa1674030406969f5dc81cd99d594e2c1b79933225348b6780"
+          },
+          {
+            "path": "scripts/mise-install-retry.sh",
+            "sha256": "d400f7d205b3adf5c8901c03eafab791230e659d108f69d8885364161458917e"
           },
           {
             "path": "mise.toml",
@@ -101,7 +105,11 @@
           },
           {
             "path": ".hack/toolchain/Dockerfile",
-            "sha256": "26743556cde8930e2105e860a9b6bd3f5d6d4e2a4f5b567df01d4dd3e8e0c745"
+            "sha256": "ba38416ba4b7acaa1674030406969f5dc81cd99d594e2c1b79933225348b6780"
+          },
+          {
+            "path": "scripts/mise-install-retry.sh",
+            "sha256": "d400f7d205b3adf5c8901c03eafab791230e659d108f69d8885364161458917e"
           },
           {
             "path": "mise.toml",
@@ -158,7 +166,11 @@
           },
           {
             "path": ".hack/toolchain/Dockerfile",
-            "sha256": "26743556cde8930e2105e860a9b6bd3f5d6d4e2a4f5b567df01d4dd3e8e0c745"
+            "sha256": "ba38416ba4b7acaa1674030406969f5dc81cd99d594e2c1b79933225348b6780"
+          },
+          {
+            "path": "scripts/mise-install-retry.sh",
+            "sha256": "d400f7d205b3adf5c8901c03eafab791230e659d108f69d8885364161458917e"
           },
           {
             "path": "mise.toml",

@@ -1357,6 +1357,20 @@ test("Linux pins are separate, so the macOS pins stay the reviewed pairs", () =>
           "9cd6943ccab29d18c7facd29051a1910b6a8e7e12f1ce5ed921a55e1e352bf44",
       },
     },
+    "5.0.0-next.26": {
+      "linux-x86_64": {
+        manager:
+          "03a03c78db05cfe0e60504e6cdbc27816398fdd310a984fa09058f037c966179",
+        archive:
+          "264a1143728f2616844a5b1c7502d54f76accfb12f1f7f401ce240ae1fffac66",
+      },
+      "linux-arm64": {
+        manager:
+          "3a4c3eca6e3c6df615342a3e4b39ac2dae2dd74d6b74e001595d87f7d244e4d9",
+        archive:
+          "b25ed73e6ef0e6a045b2d426bab31e613a2e78742298bbf88e3388809f6048f7",
+      },
+    },
   });
   for (const [version, pins] of Object.entries(PUBLISHED_RELEASES)) {
     expect(Object.keys(pins).sort()).toEqual(["archive", "manager"]);

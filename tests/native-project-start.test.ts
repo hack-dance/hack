@@ -75,7 +75,8 @@ import {
 import { NATIVE_EXITED_RUNTIME_NOTICE } from "../src/backends/native-runtime-preflight.ts";
 import { selectNativeServices } from "../src/backends/native-service-selection.ts";
 import {
-  NATIVE_FOREGROUND_POOL_END_BOUND_MS,
+  NATIVE_START_POOL_CHECK_MS,
+  NATIVE_START_POOL_GRACE_MS,
   watchNativeStartPool,
 } from "../src/backends/native-start-pool-watch.ts";
 import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
@@ -7716,6 +7717,18 @@ test.each([
 });
 
 /**
+ * How long a foreground start may outlive its lost VM (HACK-2096): one pool
+ * check, the in-progress grace, and margin. The production constants must fit.
+ */
+const FOREGROUND_POOL_END_BOUND_MS = 15_000;
+
+test("the foreground lost-VM bound covers one pool check and the grace", () => {
+  expect(NATIVE_START_POOL_CHECK_MS + NATIVE_START_POOL_GRACE_MS).toBeLessThan(
+    FOREGROUND_POOL_END_BOUND_MS
+  );
+});
+
+/**
  * HACK-2096: a foreground start whose provider VM is killed under it. Before,
  * only a detached owner watched its pool, so the foreground waited on a graph
  * owner in a lost VM and never exited. Now it names the lost VM and the one
@@ -7800,12 +7813,15 @@ test.each([
     providerGone = true;
     await Promise.race([
       exited.promise,
-      Bun.sleep(NATIVE_FOREGROUND_POOL_END_BOUND_MS),
+      Bun.sleep(FOREGROUND_POOL_END_BOUND_MS),
     ]);
     expect(exits).toHaveLength(1);
     const elapsed = performance.now() - killedAt;
-    expect(elapsed).toBeLessThan(NATIVE_FOREGROUND_POOL_END_BOUND_MS);
-    if (!readyFirst) {
+    expect(elapsed).toBeLessThan(FOREGROUND_POOL_END_BOUND_MS);
+    if (readyFirst) {
+      // Ready: nothing left to finish, so no grace (checks every 5 ms).
+      expect(elapsed).toBeLessThan(graceMs);
+    } else {
       // Still starting: the start keeps its grace to finish or unwind first.
       expect(elapsed).toBeGreaterThanOrEqual(graceMs - 5);
     }
@@ -7819,6 +7835,103 @@ test.each([
   }
   // The start settling afterwards never exits a second time.
   expect(exits).toHaveLength(1);
+});
+
+/**
+ * HACK-2096 review: once the graph is confirmed stopped, the pool counts as
+ * idle, and another project's up (or a runtime down) may stop it while this
+ * start still runs its lifecycle cleanup, down.after and the finalization
+ * acknowledgement. That is not a lost VM: the start finishes on its own, with
+ * no lost-VM message and no exit.
+ */
+test.each([
+  { readyFirst: true },
+  { readyFirst: false },
+])("a foreground start whose graph has stopped ignores a later pool stop (ready: $readyFirst)", async ({
+  readyFirst,
+}) => {
+  const { opts, events } = await fixture(false);
+  const boot = "87654321-4321-4321-4321-cba987654321";
+  const pid = 2345;
+  const graceMs = 40;
+  let providerGone = false;
+  let watched: string | undefined;
+  const warnings: string[] = [];
+  const exits: number[] = [];
+  const finishing = Promise.withResolvers<void>();
+  const finished = Promise.withResolvers<void>();
+  opts.dependencies.warn = (line) => void warnings.push(line);
+  opts.dependencies.watchPool = (options) => {
+    watched = options.bootId;
+    return watchNativeStartPool({
+      ...options,
+      checkMs: 5,
+      graceMs: () =>
+        typeof options.graceMs === "function" && options.graceMs() === 0
+          ? 0
+          : graceMs,
+      read: async () => ({
+        phase: "running",
+        token: "c".repeat(32),
+        guest_boot_id: boot,
+        process: { pid },
+      }),
+      gone: (candidate) => candidate === pid && providerGone,
+    });
+  };
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) =>
+    request.args[0] === "runtime" && request.args[1] === "up"
+      ? { phase: "running", process_alive: true, guest_boot_id: boot }
+      : await invoke(request);
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    if (readyFirst) {
+      return await serve(request);
+    }
+    // The owner fails before ready and stops its graph: never serving.
+    await serve({
+      ...request,
+      onStarted: async () => {},
+      onReady: async () => {},
+    });
+    return 1;
+  };
+  // Lifecycle cleanup runs after the graph is confirmed stopped and before
+  // down.after and the finalization acknowledgement: hold the start there.
+  const before = opts.before;
+  opts.before = async () => {
+    const hooks = await before();
+    return {
+      ...hooks,
+      cleanup: async () => {
+        finishing.resolve();
+        await finished.promise;
+        await hooks.cleanup();
+      },
+    };
+  };
+  const attempt = startNativeProject({
+    ...opts,
+    exitOnPoolEnd: () => {
+      exits.push(performance.now());
+    },
+  });
+  try {
+    await Promise.race([finishing.promise, attempt]);
+    expect(watched).toBe(boot);
+    // The pool stops under the finishing start (another project's up stops
+    // the idle pool): well past one check and the grace, nothing happens.
+    providerGone = true;
+    await Bun.sleep(graceMs * 4);
+    expect(exits).toEqual([]);
+    expect(warnings.join("\n")).not.toContain("native runtime VM");
+  } finally {
+    finished.resolve();
+    await attempt.catch(() => undefined);
+  }
+  expect(exits).toEqual([]);
+  expect(events).toContain("cleanup");
 });
 
 test("up keeps the owner-exited refusal on a running pool without recovery or runtime up", async () => {

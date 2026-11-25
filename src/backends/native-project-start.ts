@@ -3366,7 +3366,13 @@ async function extendNativeProjectGraph({
 async function startNativeProjectAttempt(
   opts: NativeProjectStartOptions,
   observeStartup: () => ReturnType<typeof beginNativeProjectStartupObservation>,
-  watchAdmittedBoot: ((bootId: string) => void) | undefined
+  watchAdmittedBoot: ((bootId: string) => void) | undefined,
+  /**
+   * Called once the graph is confirmed stopped (its receipt shows nothing
+   * running or reserved). From then on the start no longer needs its VM, and
+   * the pool may stop legitimately as idle (HACK-2096).
+   */
+  onGraphStopped?: () => void
 ): Promise<number> {
   const progress = progressReporter(opts.onProgress);
   const requestedProfiles = normalizeNativeProfiles(opts.profiles);
@@ -4551,6 +4557,9 @@ async function startNativeProjectAttempt(
                 processRefusals: nativeProcessRefusals,
               });
               graphCleanupConfirmed = settled.nothingReserved;
+              if (graphCleanupConfirmed) {
+                onGraphStopped?.();
+              }
               if (
                 graphCleanupConfirmed &&
                 controller.signal.aborted &&
@@ -4591,6 +4600,7 @@ async function startNativeProjectAttempt(
             });
             final = confirmed.final;
             graphCleanupConfirmed = true;
+            onGraphStopped?.();
             await retireRemovedMapping({
               final,
               mapping,
@@ -4779,6 +4789,11 @@ export async function startNativeProject(
   let stopPoolWatch: (() => void) | undefined;
   // Ready and not stopping: the start has nothing left to finish on its own.
   let serving = false;
+  // The graph is confirmed stopped: the start is finishing (down.after, the
+  // finalization acknowledgement) and no longer needs its VM. The pool now
+  // counts as idle, so another project's up or a runtime down may stop it
+  // legitimately; that must not end this start as a lost VM (HACK-2096).
+  let graphStopped = false;
   // A start whose pool boot has ended releases its marker and exits non-zero,
   // as a crash would, so the next up or down --recover need not wait for it
   // (HACK-2550). A ready one exits at once, a start still in progress after the
@@ -4796,7 +4811,7 @@ export async function startNativeProject(
             bootId,
             graceMs: () => (serving ? 0 : NATIVE_START_POOL_GRACE_MS),
             onEnded: async (end) => {
-              if (settled) {
+              if (settled || graphStopped) {
                 return;
               }
               if (!detached) {
@@ -4832,7 +4847,11 @@ export async function startNativeProject(
         finish = observation;
         return observation;
       },
-      watchAdmittedBoot
+      watchAdmittedBoot,
+      () => {
+        graphStopped = true;
+        stopPoolWatch?.();
+      }
     );
   } catch (error) {
     throw withStartupLockBlocker(error);

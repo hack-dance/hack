@@ -3192,14 +3192,25 @@ const contracts: readonly ModelContract[] = [
   },
   {
     // HACK-2096: a foreground start outlives its lost VM by at most the check
-    // and the grace. The negative control is the old unwatched foreground.
+    // and the grace, and never ends as a lost VM once its graph has stopped.
+    // The negative control is the old unwatched foreground; armed-finishing
+    // keeps the watch armed while the start finishes after its graph stopped.
     name: "foreground-pool-watch",
     module: "ForegroundPoolWatch",
-    states: 39,
+    states: 117,
     invariant: "BoundedExit",
-    fields: ['phase = "Starting"', "live = FALSE", "watching = FALSE", "t = 4"],
+    fields: ['phase = "Serving"', "live = FALSE", "watching = FALSE", "t = 4"],
     alternativeWitnesses: [
-      ['phase = "Serving"', "live = FALSE", "watching = FALSE", "t = 4"],
+      ['phase = "Starting"', "live = FALSE", "watching = FALSE", "t = 4"],
+      ['phase = "Stopping"', "live = FALSE", "watching = FALSE", "t = 4"],
+    ],
+    additionalControls: [
+      {
+        name: "armed-finishing",
+        negative: true,
+        invariant: "NoExitAfterGraphStopped",
+        fields: ['phase = "Exited"', "graphStopped = TRUE", "watching = TRUE"],
+      },
     ],
   },
   {

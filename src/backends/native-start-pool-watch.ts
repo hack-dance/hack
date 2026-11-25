@@ -51,9 +51,6 @@ export type NativeStartPoolEnd = {
   readonly providerPid?: number;
 };
 
-/** How long a foreground start may outlive its lost VM: one check, the grace, margin. */
-export const NATIVE_FOREGROUND_POOL_END_BOUND_MS = 15_000;
-
 /**
  * What a foreground start prints when its VM is lost (HACK-2096): which VM, that
  * this start exits non-zero with data kept, and the one command that retires the

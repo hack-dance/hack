@@ -743,10 +743,14 @@ regression exercises the stale boot refusal with an owned development VM.
 
 [`ForegroundPoolWatch.tla`](foreground-pool-watch/ForegroundPoolWatch.tla)
 checks whether a foreground start whose provider VM is lost (SIGKILL, a crash
-or a pool stop) exits within a bound (HACK-2096). Time is discrete ticks that
-pass only while the VM is lost under a running start; the pool check and the
+or a pool stop) exits within a bound, and that it never ends as a lost VM once
+its graph is confirmed stopped (HACK-2096). Time is discrete ticks that pass
+only while the VM is lost under an unsettled start; the pool check and the
 exit are urgent, so a tick cannot pass a due one. The grace is chosen when the
-loss is seen: 0 once ready, `Grace` while still starting.
+loss is seen: 0 once ready, `Grace` while starting or stopping. `Finishing` is
+the window after the graph stopped, while lifecycle cleanup, `down.after` and
+the finalization acknowledgement run: the pool then counts as idle, and another
+project's `hack up` (HACK-2535) or a `runtime down` may stop it legitimately.
 
 ![Foreground pool watch state chart](../../../docs/diagrams/foreground-pool-watch.png)
 [SVG](../../../docs/diagrams/foreground-pool-watch.svg) ·
@@ -754,19 +758,28 @@ loss is seen: 0 once ready, `Grace` while still starting.
 
 | Control | Result |
 | --- | --- |
-| `positive` | `BoundedExit`, `ExitReported` and `NoExitOnLiveVm` hold across 39 reachable states with `Check = 1`, `Grace = 2`. |
+| `positive` | `BoundedExit`, `NoExitAfterGraphStopped` and `ExitReported` hold across 117 reachable states with `Check = 1`, `Grace = 2`. |
 | `negative` | The old code: only a detached owner watched its pool. The foreground start outlives its lost VM past `Check + Grace` and violates `BoundedExit`. |
+| `armed-finishing` | The first HACK-2096 change: the watch stays armed after the graph stopped. A pool stop under the finishing start exits it as a lost VM and violates `NoExitAfterGraphStopped`. |
+
+`ExitReported` is a sanity invariant that holds by construction (`ExitOnLoss`
+sets the report and the code together); the evidence is `BoundedExit` and
+`NoExitAfterGraphStopped` with their negative controls.
 
 | Model action | Implementation boundary |
 | --- | --- |
 | `Admit` | `startNativeProjectAttempt` binds the watch to the successful `runtime up` reply's boot, for a foreground start as for a detached one. |
+| `Ready` | A `ready` or `started` progress event sets `serving`, so the grace becomes 0. |
+| `UserStop`, `SettleFailed` | A `stopping` progress event (the user's stop) clears `serving`; a startup failure never set it. The graph owner is still unwinding. |
+| `GraphStopped` | `startNativeProjectAttempt` sets `graphCleanupConfirmed` and calls `onGraphStopped`, which cancels the watch (`stopPoolWatch`) and makes a pending `onEnded` a no-op. |
+| `Finish` | Lifecycle cleanup, `down.after` and `acknowledgeFinalization` settle; the finalizer cancels any watch. |
 | `Observe` | `watchNativeStartPool` polls the pool record every second and sees the gone provider pid or the ended boot; the grace comes from `serving`. |
 | `ExitOnLoss` | The `onEnded` callback in `startNativeProject` prints `nativeForegroundPoolEndMessage` (lost VM, exit 1, `hack down --recover`), finishes the startup observation and exits 1. |
-| `SettleFailed`, `UserStop` | The start settles on its own; its finalizer cancels the watch, so it never exits a second time. |
 
-The bound in code is about 1 s once ready and about 11 s while starting
-(`NATIVE_FOREGROUND_POOL_END_BOUND_MS` allows 15 s). The model does not cover
-the Rust graph owner's parent-exit cleanup (see the detached model) or the
+The bound in code is about 1 s once ready and about 11 s while starting or
+stopping; the test bound of 15 s is asserted to exceed
+`NATIVE_START_POOL_CHECK_MS + NATIVE_START_POOL_GRACE_MS`. The model does not
+cover the Rust graph owner's parent-exit cleanup (see the detached model) or the
 later `hack down --recover`, which runs `runtime recover` first for an exited
 provider (HACK-2579).
 

@@ -2646,7 +2646,14 @@ code 1 and the run's data kept, and the one command to run next: `hack down
 --recover`, which retires the run with its data kept (running `runtime recover`
 first when the provider exited). `hack up` then starts it again. The start exits
 within about a second once it is ready, or about 11 seconds later while it is
-still starting; earlier versions waited on the lost VM and never exited.
+still starting or stopping; earlier versions waited on the lost VM and never
+exited. Once the run's graph has stopped, the pool counts as idle and may stop
+under the start while it still runs `down.after` and its cleanup; that is not a
+lost VM, and the start finishes on its own. A lost-VM exit ends the process as a
+crash would: the run's receipt, finalization and recovery evidence stay for
+`hack down --recover`, and so do the advisory env fingerprint record (which
+`hack exec` uses to report stale env; the next `hack up` writes a new one) and,
+for `hack restart`, the restart's own bookkeeping, as after a crash of the start.
 
 Each such recovery moves the run's earlier completed recovery record aside as history
 (`dead-owner-cleanup-retired-<digest>.json`; failed-start recoveries keep

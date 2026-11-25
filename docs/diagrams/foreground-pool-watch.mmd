@@ -6,19 +6,28 @@ stateDiagram-v2
   [*] --> Selecting
   Selecting --> Starting : Admit [runtime up]
   Starting --> Serving : Ready
-  Starting --> Lost : LoseVm
-  Serving --> Lost : LoseVm
-  Lost --> Armed : Observe [pid gone]
-  Armed --> Exited : ExitOnLoss [grace over]
-  Starting --> Settled : SettleFailed
-  Serving --> Settled : UserStop
-  Armed --> Settled : SettleFailed
+  Starting --> Stopping : SettleFailed, UserStop
+  Serving --> Stopping : UserStop
+  Stopping --> Finishing : GraphStopped / disarm
+  Finishing --> Settled : Finish
+  Starting --> Exited : ExitOnLoss [lost, grace]
+  Serving --> Exited : ExitOnLoss [lost]
+  Stopping --> Exited : ExitOnLoss [lost, grace]
   Exited --> [*]
   Settled --> [*]
 
-  note right of Armed
-    Grace 0 once ready,
-    10 s while starting.
+  note left of Starting
+    Observe: pid gone or boot
+    ended. Grace 10 s while
+    starting or stopping.
+  end note
+  note right of Serving
+    Grace 0 once ready.
+  end note
+  note right of Finishing
+    Watch cancelled: a pool
+    stop here is not a lost VM.
+    INV NoExitAfterGraphStopped
   end note
   note right of Exited
     INV BoundedExit
@@ -33,7 +42,7 @@ stateDiagram-v2
   classDef fail stroke-width:1.6px
   classDef idle stroke-width:1.6px
   class Selecting idle
-  class Starting,Armed wait
+  class Starting,Stopping,Finishing wait
   class Serving live
-  class Lost,Exited fail
+  class Exited fail
   class Settled ok

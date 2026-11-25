@@ -29,6 +29,8 @@ export FAKE_FIXTURE="$work/fixture" FAKE_LOG="$work/curl.log"
 #   norange.test serves half then stalls, and refuses to resume (exit 33)
 #   refuse.test  serves half then stalls, and answers a resume with an
 #                HTTP error (exit 22)
+#   slow.test    takes a second and then times out (exit 28), as a source
+#                that keeps hitting --max-time does
 #   flip.test    serves half then stalls, completes a resume with other
 #                bytes (the file changed), then serves the fixture fresh
 cat > "$work/bin/curl" <<'SHIM'
@@ -60,6 +62,7 @@ case "$url" in
   https://refuse.test/*)
     if [ "$resume" = resume ]; then exit 22; fi
     head -c "$half" "$FAKE_FIXTURE" > "$out"; exit 28 ;;
+  https://slow.test/*) sleep 1; exit 28 ;;
   https://flip.test/*)
     case "$n" in
       1) head -c "$half" "$FAKE_FIXTURE" > "$out"; exit 28 ;;
@@ -144,6 +147,30 @@ if (fetch f "$want" https://good.test/f) 2>/dev/null && kept \
   && max=$(cut -d' ' -f3 "$FAKE_LOG") && [[ "$max" -le 10 && "$max" -ge 9 ]]; then
   pass "an attempt's --max-time is capped at the time left in the budget"
 else fail "--max-time cap"; cat "$FAKE_LOG" >&2; fi
+
+# HACK-2681 review: a primary that keeps timing out must not spend the whole
+# budget before a mirror is tried. With 4 s of budget the primary's share is
+# half (2 s), so the mirror still gets a turn, and the primary's --max-time
+# never exceeds its share.
+start reserve
+saved_budget=$budget_seconds saved_attempts=$attempts
+budget_seconds=4
+attempts=10
+if (fetch f "$want" https://slow.test/f https://good.test/f) 2>"$work/err" && kept \
+  && grep -q 'after its 2s share; trying the next source' "$work/err" \
+  && [[ "$(grep -c '^https://slow.test/f' "$FAKE_LOG")" -lt "$attempts" ]] \
+  && [[ "$(grep '^https://slow.test/f' "$FAKE_LOG" | cut -d' ' -f3 | sort -n | tail -1)" -le 2 ]] \
+  && [[ "$(tail -1 "$FAKE_LOG" | cut -d' ' -f1)" == https://good.test/f ]]; then
+  pass "a primary that keeps timing out leaves budget for the next source"
+else fail "budget reserved for fallback sources"; cat "$FAKE_LOG" "$work/err" >&2; fi
+start reserve-last
+budget_seconds=4
+attempts=2
+if (fetch f "$want" https://good.test/f) 2>/dev/null && kept \
+  && [[ "$(cut -d' ' -f3 "$FAKE_LOG")" -ge 3 ]]; then
+  pass "the last source is not limited to a share; it may use the rest of the budget"
+else fail "last source share"; cat "$FAKE_LOG" >&2; fi
+budget_seconds=$saved_budget attempts=$saved_attempts
 
 start budget
 saved_budget=$budget_seconds

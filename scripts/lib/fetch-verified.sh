@@ -43,7 +43,11 @@ offline=${offline:-false}
 # bytes/s for speed_seconds, or after attempt_seconds, and the next attempt
 # resumes the partial file. A source gets `attempts` tries before the next
 # source, and all downloads in one run share a budget of budget_seconds, so
-# a run with every source slow still fails inside a CI job's timeout.
+# a run with every source slow still fails inside a CI job's timeout. A
+# source with others after it may use at most source_seconds, and at most
+# half of the budget left when it starts, so a slow primary can never spend
+# the whole budget before a mirror is tried; the last source may use all
+# that is left.
 # HACK_FETCH_SLOW_OK=1 is for a slow link: no time caps or budget,
 # and only a connection that sends nothing for 5 minutes is given up on.
 min_speed=51200
@@ -52,11 +56,13 @@ attempt_seconds=300
 attempts=3
 retry_delay=5
 budget_seconds=900
+source_seconds=300
 if [[ "${HACK_FETCH_SLOW_OK:-}" == 1 ]]; then
   min_speed=1
   speed_seconds=300
   attempt_seconds=0
   budget_seconds=0
+  source_seconds=0
 fi
 
 sha256_of() {
@@ -95,6 +101,7 @@ budget_left() {
 # ever moved to DIR/NAME.
 fetch() {
   local name=$1 want=$2 got url try left max status resumed
+  local remaining=$(($# - 2)) source_start source_cap share
   shift 2
   local part="$dir/$name.partial"
   if [[ -f "$dir/$name" ]]; then
@@ -111,6 +118,18 @@ fetch() {
     echo "$fetch_log: fetching $name from $(show_url "$url")" >&2
     rm -f -- "$part"
     try=1
+    remaining=$((remaining - 1))
+    # This source's time share; 0 means no cap beyond the budget.
+    source_start=$SECONDS
+    source_cap=0
+    if [[ "$remaining" -gt 0 ]]; then
+      source_cap=$source_seconds
+      left=$(budget_left)
+      if [[ "$left" -gt 0 && ( "$source_cap" -eq 0 || $((left / 2)) -lt "$source_cap" ) ]]; then
+        source_cap=$((left / 2))
+        if [[ "$source_cap" -lt 1 ]]; then source_cap=1; fi
+      fi
+    fi
     while :; do
       left=$(budget_left)
       if [[ "$left" -lt 0 ]]; then
@@ -120,6 +139,15 @@ fetch() {
       fi
       max=$attempt_seconds
       if [[ "$left" -gt 0 && ( "$max" -eq 0 || "$left" -lt "$max" ) ]]; then max=$left; fi
+      if [[ "$source_cap" -gt 0 ]]; then
+        share=$((source_cap - (SECONDS - source_start)))
+        if [[ "$share" -le 0 ]]; then
+          rm -f -- "$part"
+          echo "$fetch_log: giving up on $name from $(show_url "$url") after its ${source_cap}s share; trying the next source" >&2
+          break
+        fi
+        if [[ "$max" -eq 0 || "$share" -lt "$max" ]]; then max=$share; fi
+      fi
       resumed=false
       if [[ -s "$part" ]]; then resumed=true; fi
       status=0

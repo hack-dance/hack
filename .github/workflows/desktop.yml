@@ -9,6 +9,7 @@ on:
   pull_request:
     paths:
       - "apps/desktop/**"
+      - "scripts/lib/fetch-verified.sh"
       - ".github/workflows/desktop.yml"
       - "scripts/install-cargo-nextest.sh"
       - ".config/nextest.toml"
@@ -16,6 +17,7 @@ on:
     branches: [next]
     paths:
       - "apps/desktop/**"
+      - "scripts/lib/fetch-verified.sh"
       - ".github/workflows/desktop.yml"
       - "scripts/install-cargo-nextest.sh"
       - ".config/nextest.toml"

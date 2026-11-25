@@ -61,6 +61,12 @@ pub(super) const MAX_WILDCARDS: usize = 32;
 /// entries and a few seconds of CPU in a release build.
 pub(super) const WORK_BUDGET: u64 = 1_000_000_000;
 
+#[cfg(test)]
+thread_local! {
+    /// Line work in the last parse on this thread: one unit per byte plus one per visit.
+    pub(super) static PARSE_LINE_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn over_bounds() -> crate::CandidateError {
     crate::CandidateError::new(
         "native_build_ignore_bounds",
@@ -265,16 +271,19 @@ impl Rules {
 /// The compiled patterns, `Ok(None)` for syntax not reproduced here, or the bounds
 /// refusal as soon as a bound is crossed.
 fn parse_patterns(bytes: &[u8]) -> Result<Option<Vec<Pattern>>, crate::CandidateError> {
+    #[cfg(test)]
+    PARSE_LINE_WORK.set(0);
     // BuildKit matches every rule of the file whether or not Hack can compile it, so
     // the file-wide and per-pattern bounds apply to every line; a line Hack cannot
     // reproduce only selects the fallback (exclude nothing) and counting goes on.
     // Docker's scanner holds a line, its `\r` and its `\n` in one 64 KiB buffer and
     // fails on anything longer, comment or blank, before any trimming. Measured on
     // the file's own bytes so nothing longer reaches the build.
-    if bytes
-        .split(|byte| *byte == b'\n')
-        .any(|line| line.len() >= MAX_LINE_BYTES)
-    {
+    if bytes.split(|byte| *byte == b'\n').any(|line| {
+        #[cfg(test)]
+        PARSE_LINE_WORK.with(|work| work.set(work.get() + line.len() + 1));
+        line.len() >= MAX_LINE_BYTES
+    }) {
         return Err(over_bounds());
     }
     let text = String::from_utf8_lossy(bytes);
@@ -301,6 +310,8 @@ fn parse_patterns(bytes: &[u8]) -> Result<Option<Vec<Pattern>>, crate::Candidate
         }
     };
     for (index, raw) in text.split('\n').enumerate() {
+        #[cfg(test)]
+        PARSE_LINE_WORK.with(|work| work.set(work.get() + raw.len() + 1));
         let mut line = raw.strip_suffix('\r').unwrap_or(raw);
         if index == 0 {
             line = line.strip_prefix('\u{feff}').unwrap_or(line);

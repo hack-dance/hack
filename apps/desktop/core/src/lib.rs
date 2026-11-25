@@ -12,6 +12,7 @@
 //! history for the current session. Every action is one CLI command.
 
 pub mod cli_choice;
+pub mod config_form;
 pub mod daemon;
 pub mod doctor;
 mod doctor_acl;

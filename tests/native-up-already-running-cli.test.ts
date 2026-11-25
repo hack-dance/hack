@@ -5,6 +5,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -641,7 +642,7 @@ test("a partial-run refusal omits the restart command when the selection cannot 
   });
   // A path that looks like a pasted environment assignment is never printed.
   const assigned = join(f.root, "A=1");
-  expect(Bun.spawnSync(["ln", "-s", f.project, assigned]).exitCode).toBe(0);
+  await symlink(f.project, assigned);
   const result = await up(f, ["-d"], { scopeArgs: ["--path", "A=1"] });
   expect(result.code).toBe(1);
   expect(result.stderr).toEndWith(

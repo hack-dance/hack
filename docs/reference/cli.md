@@ -1291,6 +1291,83 @@ Qualifies a strict static legacy subset with exact existing data volumes. --dry-
 | `--version, -v` | Show version |
 
 
+## `hack data`
+
+Back up project volume data
+
+### Usage
+
+```bash
+hack data <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack data export` | Back up the project's Compose named volumes to verified tar files |
+| `hack data cleanup` | Remove a helper container a data command could not track |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack data export`
+
+Back up the project's Compose named volumes to verified tar files
+
+### Usage
+
+```bash
+hack data export [options]
+```
+
+Copies each declared, non-external named volume that Docker labels as this project's into <backup>/<key>.tar, with a manifest of sizes and digests. The project must be stopped; Hack never stops it for you. External and foreign volumes are skipped and reported. Compose backend only. Restore is not available yet.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
+| `--out <dir>` | Parent directory for the backup (default: $HACK_HOME/data-backups/<hack project>[--<branch>]) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack data cleanup`
+
+Remove a helper container a data command could not track
+
+### Usage
+
+```bash
+hack data cleanup [options]
+```
+
+Removes the containers labeled io.hack.data-backup.nonce=<nonce>, which a data command's refusal names when a helper create's outcome could not be reconciled. Reads the run's cleanup record under $HACK_HOME/data-cleanup/ for its env selection and engine, and refuses (E_DATA_CLEANUP_RECORD, no engine call) unless the project's managed env still resolves to the same engine. Removes by ID with removal confirmed; never removes a volume.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--nonce <nonce>` | The io.hack.data-backup.nonce label value a data command's refusal named |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
 ## `hack session`
 
 Manage persistent project workspaces with tmux-first onboarding

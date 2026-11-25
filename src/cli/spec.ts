@@ -6,6 +6,7 @@ import { commandsCommand } from "../commands/commands.ts";
 import { configCommand } from "../commands/config.ts";
 import { crashCaptureCommand } from "../commands/crash-capture.ts";
 import { daemonCommand } from "../commands/daemon.ts";
+import { dataCommand } from "../commands/data.ts";
 import { devCommand } from "../commands/dev.ts";
 import { dispatchCommand } from "../commands/dispatch.ts";
 import { doctorCommand } from "../commands/doctor.ts";
@@ -98,6 +99,7 @@ export const CLI_SPEC = defineCli({
     envCommand,
     hostCommand,
     configCommand,
+    dataCommand,
     mcpCommand,
     setupCommand,
     nativeCommand,

@@ -164,6 +164,11 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "After start or restart, a service is neither running nor a successful one-shot.",
     readFirst: "`hack ps --json`",
   },
+  E_PROJECT_RUNNING: {
+    meaning:
+      "The command needs the project stopped, and some of its containers (or containers using its volumes) are running; nothing was changed. `error.detail.running` names them. Hack never stops them for you.",
+    readFirst: "`hack ps --json`",
+  },
   E_RECOVERY_REQUIRED: {
     meaning:
       "The last native run of this instance has no confirmed shutdown (its owner exited before finishing it, or another start replaced it), so `up` started nothing. `hack down --recover` finishes that cleanup with data kept, starting the native runtime if it needs to.",
@@ -210,6 +215,11 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
     meaning:
       "A file Hack must write could not be written because the disk is full or the disk quota is exceeded.",
     readFirst: "`df -h <path from the message>`",
+  },
+  E_DATA_CLEANUP_RECORD: {
+    meaning:
+      "`hack data cleanup --nonce` found no usable cleanup record for that nonce under `$HACK_HOME/data-cleanup/`, or the record's project, instance, env selection, engine endpoint or Docker daemon ID no longer matches what this project's managed env reaches (or the ID cannot be read, or the record has none); nothing was listed or removed.",
+    readFirst: "`ls $HACK_HOME/data-cleanup/`",
   },
   E_PATH_CONFLICT: {
     meaning:

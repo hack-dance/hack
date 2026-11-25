@@ -51,6 +51,8 @@ export const HACK_ERROR_CODES = [
   "E_COMPOSE_OUTPUT_INVALID",
   "E_STARTUP_INCOMPLETE",
   "E_DOWN_INCOMPLETE",
+  // A command that needs the project stopped found its containers running.
+  "E_PROJECT_RUNNING",
   "E_RECOVERY_REQUIRED",
   "E_PLAN_REFUSED",
   "E_PLAN_INCOMPLETE",
@@ -65,6 +67,7 @@ export const HACK_ERROR_CODES = [
   "E_PERMISSION",
   "E_NO_SPACE",
   "E_PATH_CONFLICT",
+  "E_DATA_CLEANUP_RECORD",
   "E_PROJECT_EXISTS",
   "E_LOCKED",
   "E_INTERACTIVE_REQUIRED",

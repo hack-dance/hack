@@ -12007,6 +12007,68 @@ export async function discoverLegacyMigrationOverlays(opts: {
   }).catch(() => [] as string[]);
 }
 
+/**
+ * Read-only: every overlay a legacy (dotenv) project's `hack up` could have
+ * selected, the same inputs its startup reads: `.hack/.env.<name>` files,
+ * the configured default overlay, and overlays that only the encrypted file
+ * secret store holds values for (contract keys stored in the backend).
+ * `complete` is false when those inputs cannot all be listed (an unreadable
+ * project directory or contract, a secret store that cannot be listed, such
+ * as the keychain, or store entries no overlay name can carry): a caller
+ * that must know the selection then cannot rule an overlay out. Names only;
+ * never values.
+ */
+export async function listLegacyStartupOverlays(opts: {
+  readonly projectDir: string;
+  readonly projectName: string;
+}): Promise<{ readonly names: readonly string[]; readonly complete: boolean }> {
+  let discovered: readonly string[];
+  try {
+    discovered = await discoverLegacyOverlayNames({
+      projectDir: opts.projectDir,
+      includeSymlinks: false,
+    });
+  } catch {
+    return { names: [], complete: false };
+  }
+  const contract = await readHackEnvContract({ projectDir: opts.projectDir });
+  if (!contract.exists) {
+    return { names: discovered, complete: true };
+  }
+  if (contract.parseError !== undefined) {
+    return { names: discovered, complete: false };
+  }
+  const { storePlaintextInBackend } = await readHackEnvRuntimeConfig({
+    projectDir: opts.projectDir,
+  });
+  const storeBacked = contract.contract.vars.some(
+    (entry) => entry.source === "keychain" || storePlaintextInBackend
+  );
+  if (!storeBacked) {
+    return { names: discovered, complete: true };
+  }
+  try {
+    const listing = await listFileSecretStoreEntries({
+      projectName: opts.projectName,
+      projectDir: opts.projectDir,
+    });
+    if (listing.kind !== "listed") {
+      return { names: discovered, complete: false };
+    }
+    return {
+      names: withStoreOnlyLegacyOverlays({
+        discovered,
+        contract: contract.contract,
+        storePlaintextInBackend,
+        listing,
+      }),
+      complete: true,
+    };
+  } catch {
+    return { names: discovered, complete: false };
+  }
+}
+
 export async function previewLegacyMigrationOverlayNames(opts: {
   readonly projectDir: string;
   readonly projectName: string;

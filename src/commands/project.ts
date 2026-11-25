@@ -513,6 +513,8 @@ import {
   finishImplicitLegacyEnvMigration,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   hasUnmigratedLegacyDotenv,
+  listLegacyStartupOverlays,
+  listProjectEnvOverlays,
   ProjectEnvKeyMissingError,
   projectEnvConfigExists,
   resolveProjectEnvConfig,
@@ -2280,6 +2282,34 @@ export async function resolveModernComposeEnvOverrides(opts: {
   };
 }
 
+/**
+ * The managed Compose process env `hack up` gives this project (engine
+ * selection such as DOCKER_HOST/DOCKER_CONTEXT, interpolation values), read
+ * without writing or clearing the generated env override. For commands that
+ * talk to the project's engine outside a lifecycle action (`pull`, `data`).
+ */
+export async function resolveComposeProcessEnv(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly envName?: string | null;
+}): Promise<Readonly<Record<string, string>>> {
+  const composeProject = await resolveComposeProjectName({
+    project: opts.project,
+    cfg: await readProjectConfig(opts.project),
+  });
+  const allServiceNames = await readComposeServiceNames(
+    opts.project.composeFile
+  );
+  const overrides = await resolveComposeEnvOverrides({
+    project: opts.project,
+    projectName: sanitizeProjectSlug(composeProject),
+    targetServices: allServiceNames,
+    allServiceNames,
+    envName: opts.envName,
+    persist: false,
+  });
+  return overrides.env;
+}
+
 export async function resolveLifecycleEnvForProject(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly projectName: string;
@@ -3855,6 +3885,238 @@ export async function mergeLifecycleCommandEnv(
     }
   }
   return await appendHackHostTrustEnvironment({ ...base, ...override });
+}
+
+/**
+ * The Compose file stack `hack up` passes: the base file or the branch
+ * override pair, Hack's internal override, the dependency-cache override,
+ * the local-directories override, the runtime host metadata override, then
+ * the env override files. `hack data` resolves its model with the same
+ * function, so a backup sees exactly the volumes a start would use.
+ */
+async function stackComposeRuntimeFiles(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly branch: string | null;
+  readonly devHost: string;
+  readonly aliasHost: string | null;
+  readonly composeProject: string;
+  readonly internalOverride: string | null;
+  readonly dependencyCacheOverride: string | null | undefined;
+  readonly envComposeFiles: readonly string[];
+  readonly notify?: (message: string) => void;
+}): Promise<readonly string[]> {
+  const composeFiles = opts.branch
+    ? await resolveBranchComposeFiles({
+        project: opts.project,
+        branch: opts.branch,
+        devHost: opts.devHost,
+        aliasHost: opts.aliasHost,
+        onDropped: opts.notify,
+      })
+    : [opts.project.composeFile];
+  const withRuntimeOverrides = await withProjectLocalDirectories({
+    project: opts.project,
+    composeFiles: [
+      ...composeFiles,
+      ...(opts.internalOverride ? [opts.internalOverride] : []),
+      ...(opts.dependencyCacheOverride ? [opts.dependencyCacheOverride] : []),
+    ],
+    notify: opts.notify,
+  });
+  const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
+    project: opts.project,
+    composeFiles: withRuntimeOverrides,
+    branch: opts.branch,
+    devHost: opts.devHost,
+    aliasHost: opts.aliasHost,
+    composeProject: opts.composeProject,
+  });
+  return [
+    ...withRuntimeOverrides,
+    ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
+    ...opts.envComposeFiles,
+  ];
+}
+
+/** The resolved Compose invocation of an instance, as `hack up` builds it. */
+export type ComposeRuntimeModel = {
+  readonly composeFiles: readonly string[];
+  readonly composeProject: string | null;
+  readonly cwd: string;
+  readonly env: Readonly<Record<string, string>>;
+  /**
+   * The env selection the model was resolved with: an overlay name, `null`
+   * for base layers only, or `undefined` for the configured default (no
+   * `--env` and no recorded selection). Passing it back resolves the same
+   * env.
+   */
+  readonly envSelection: string | null | undefined;
+};
+
+/**
+ * Resolve an instance's Compose invocation the way `hack up` does (same
+ * files, project name, project directory and managed env; an omitted env
+ * selection is the one the instance was started with; without that record a
+ * project with env overlays refuses), without starting
+ * anything: the env override is resolved but not rewritten (`persist:
+ * false`) and Hack's internal override is the one the last start stored.
+ * For commands that read the instance's model, such as `hack data`.
+ */
+export async function resolveComposeRuntimeModel(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly branch: string | null;
+  readonly envName?: string | null;
+}): Promise<ComposeRuntimeModel> {
+  const cfg = await readProjectConfig(opts.project);
+  // Without --env and without any runtime-state record for the project, no
+  // lifecycle key can hold a selection: refuse an ambiguous env first,
+  // before the target resolution below reads the execution env (which can
+  // ask the secret store) or Docker.
+  if (
+    opts.envName === undefined &&
+    (await readProjectRuntimeState({ projectDir: opts.project.projectDir }))
+      .length === 0
+  ) {
+    await refuseUnrecordedEnvWithOverlays({
+      project: opts.project,
+      projectName: sanitizeProjectSlug(
+        await resolveComposeProjectName({ project: opts.project, cfg })
+      ),
+    });
+  }
+  // The Compose project, its base and the lifecycle key exactly as `hack
+  // down` (and `hack files`) resolve them: the base `up` launched with (a
+  // saved launch or pin, else the name Compose resolves, which for an
+  // unnamed file is the directory's), the instance's lifecycle key with the
+  // legacy-key fallback, the env project name the launch recorded, and the
+  // env selection recorded under that key.
+  const target = await resolveComposeCommandTarget({
+    project: opts.project,
+    cfg,
+    branch: opts.branch,
+    options: {
+      env: opts.envName === undefined ? undefined : (opts.envName ?? "base"),
+    },
+    readOnly: true,
+  });
+  const baseProjectName = target.base;
+  const projectName = target.lifecycle.projectName;
+  const composeProjectName = target.composeProjectName;
+  const devHost = await resolveRuntimeDevHost({
+    project: opts.project,
+    branch: opts.branch,
+  });
+  const aliasHost = resolveBranchAliasHost({ devHost, cfg });
+  const allServiceNames = await readComposeServiceNames(
+    opts.project.composeFile
+  );
+  // Omitted --env: the selection the instance was started with, as `hack
+  // down` resolves it. A successful `hack down` removes that record, so
+  // without it the configured default is only unambiguous when the project
+  // has no overlays; otherwise refuse before any Docker effect.
+  const envName = opts.envName === undefined ? target.envName : opts.envName;
+  if (envName === undefined) {
+    await refuseUnrecordedEnvWithOverlays({
+      project: opts.project,
+      projectName,
+    });
+  }
+  const envOverrides = await resolveComposeEnvOverrides({
+    project: opts.project,
+    projectName,
+    targetServices: allServiceNames,
+    allServiceNames,
+    envName,
+    persist: false,
+  });
+  // The internal override holds routing and trust settings, not volumes; a
+  // read-only command passes the one the last start stored, as is.
+  const storedInternal = internalOverrideStorePath({
+    hackHome: resolveGlobalHackDir(),
+    projectDir: opts.project.projectDir,
+    branch: opts.branch,
+  });
+  const internalOverride = (await pathExists(storedInternal))
+    ? storedInternal
+    : null;
+  const dependencyCache = await resolveDependencyCacheOverride({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    projectName,
+    composeFile: opts.project.composeFile,
+  });
+  return {
+    composeFiles: await stackComposeRuntimeFiles({
+      project: opts.project,
+      branch: opts.branch,
+      devHost,
+      aliasHost,
+      composeProject: composeProjectName ?? baseProjectName,
+      internalOverride,
+      dependencyCacheOverride: dependencyCache.overridePath,
+      envComposeFiles: envOverrides.composeFiles,
+      notify: (message) => logger.warn({ message }),
+    }),
+    composeProject: composeProjectName,
+    cwd: dirname(opts.project.composeFile),
+    env: envOverrides.env,
+    envSelection: envName,
+  };
+}
+
+/**
+ * A data command without `--env` and without a recorded selection: the
+ * configured default is only the env `hack up` used when no other overlay
+ * could have been selected. Startup selects from the env layers
+ * (`hack.env.<name>.yaml`, machine-local and inherited layers, the
+ * configured default) and, for a legacy dotenv project, from
+ * `.hack/.env.<name>` files and overlays only the secret store holds; all of
+ * them are listed here. With any overlay, refuse with E_USAGE, naming them
+ * (names only), before any Docker effect. A legacy project whose overlays
+ * cannot all be listed (a keychain store, say) refuses too.
+ */
+async function refuseUnrecordedEnvWithOverlays(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly projectName: string;
+}): Promise<void> {
+  const layered = await listProjectEnvOverlays({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+  });
+  const legacy = await listLegacyStartupOverlays({
+    projectDir: opts.project.projectDir,
+    projectName: opts.projectName,
+  });
+  const names = [
+    ...new Set([...layered.map((overlay) => overlay.name), ...legacy.names]),
+  ].sort((left, right) => left.localeCompare(right));
+  if (names.length > 0) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message: unrecordedEnvRefusalMessage(names),
+    });
+  }
+  // The legacy inputs matter only when startup takes the legacy path.
+  const layeredConfig = await projectEnvConfigExists({
+    projectDir: opts.project.projectDir,
+  });
+  if (!(legacy.complete || layeredConfig)) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message: UNLISTABLE_LEGACY_ENV_REFUSAL,
+    });
+  }
+}
+
+/** The refusal when a legacy project's possible overlays cannot be listed. */
+export const UNLISTABLE_LEGACY_ENV_REFUSAL =
+  "This project's legacy env (.hack/.env files and its secret store) could select an overlay Hack cannot list, and the environment `hack up` used is no longer recorded. Pass --env <name> (or --env base for base layers only).";
+
+/** The refusal line for {@link refuseUnrecordedEnvWithOverlays}. */
+export function unrecordedEnvRefusalMessage(
+  overlayNames: readonly string[]
+): string {
+  return `This project has environment overlays (${overlayNames.join(", ")}); the environment \`hack up\` used is no longer recorded. Pass --env <name> (or --env base for base layers only).`;
 }
 
 async function resolveBranchComposeFiles(opts: {
@@ -7775,15 +8037,7 @@ async function handlePull({
   }
   const cfg = await readProjectConfig(project);
   const composeProject = await resolveComposeProjectName({ project, cfg });
-  const allServiceNames = await readComposeServiceNames(project.composeFile);
-  const envOverrides = await resolveComposeEnvOverrides({
-    project,
-    projectName: sanitizeProjectSlug(composeProject),
-    targetServices: allServiceNames,
-    allServiceNames,
-    envName,
-    persist: false,
-  });
+  const composeEnv = await resolveComposeProcessEnv({ project, envName });
   const exitCode = await runShell(
     [
       ...buildComposeArgs({
@@ -7796,7 +8050,7 @@ async function handlePull({
     ],
     {
       cwd: dirname(project.composeFile),
-      env: envOverrides.env,
+      env: composeEnv,
       forwardSignals: true,
       stdout: json ? "stderr" : "inherit",
     }
@@ -9088,19 +9342,6 @@ async function runResolvedComposeUp({
       aliasHost,
       addresses: "fresh",
     });
-    const composeFiles =
-      branch && devHost
-        ? await resolveBranchComposeFiles({
-            project,
-            branch,
-            devHost,
-            aliasHost,
-            onDropped: (notice) => logger.warn({ message: notice }),
-          })
-        : [project.composeFile];
-    const composeFilesWithInternal = internalOverride
-      ? [...composeFiles, internalOverride]
-      : composeFiles;
     const dependencyCache =
       scopedDependencyCache ??
       (await resolveDependencyCacheOverride({
@@ -9110,25 +9351,20 @@ async function runResolvedComposeUp({
         composeFile: project.composeFile,
       }));
     reportDependencyCacheFallback(dependencyCache);
-    const composeFilesWithRuntimeOverrides = await withProjectLocalDirectories({
+    // The env override files are added per launch below (detached starts
+    // write them as a reference override), so the shared stack stops at the
+    // runtime host metadata override here.
+    const composeFilesWithMetadata = await stackComposeRuntimeFiles({
       project,
-      composeFiles: dependencyCache.overridePath
-        ? [...composeFilesWithInternal, dependencyCache.overridePath]
-        : composeFilesWithInternal,
-      notify: (message) => logger.warn({ message }),
-    });
-    const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
-      project,
-      composeFiles: composeFilesWithRuntimeOverrides,
       branch,
       devHost,
       aliasHost,
       composeProject: composeProjectName ?? baseProjectName,
+      internalOverride,
+      dependencyCacheOverride: dependencyCache.overridePath,
+      envComposeFiles: [],
+      notify: (message) => logger.warn({ message }),
     });
-    const composeFilesWithMetadata = [
-      ...composeFilesWithRuntimeOverrides,
-      ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
-    ];
     if (!progress) {
       reportComposeStartupBudget({ budgets, detach });
     }

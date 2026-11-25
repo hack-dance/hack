@@ -1940,6 +1940,7 @@ test("macOS prerelease installs Zig even when its cache is unavailable", async (
         steps: Array<{
           uses?: string;
           if?: string;
+          run?: string;
           "continue-on-error"?: boolean;
           with?: Record<string, unknown>;
         }>;
@@ -1950,17 +1951,21 @@ test("macOS prerelease installs Zig even when its cache is unavailable", async (
   const cacheIndex = steps.findIndex((step) =>
     step.uses?.startsWith("actions/cache@")
   );
-  const installIndex = steps.findIndex(
-    (step) =>
-      step.uses?.startsWith("jdx/mise-action@") &&
-      step.with?.install_args === "zig"
+  const miseIndex = steps.findIndex((step) =>
+    step.uses?.startsWith("jdx/mise-action@")
+  );
+  const zigIndex = steps.findIndex((step) =>
+    step.run?.includes("mise install zig")
   );
   expect(cacheIndex).toBeGreaterThanOrEqual(0);
-  expect(installIndex).toBeGreaterThan(cacheIndex);
+  expect(miseIndex).toBeGreaterThan(cacheIndex);
+  expect(zigIndex).toBeGreaterThan(miseIndex);
   expect(steps[cacheIndex]?.["continue-on-error"]).toBe(true);
   expect(steps[cacheIndex]?.with?.["fail-on-cache-miss"]).toBeUndefined();
-  expect(steps[installIndex]?.if).toBeUndefined();
-  expect(steps[installIndex]?.["continue-on-error"]).toBeUndefined();
+  expect(steps[miseIndex]?.with?.install).toBe(false);
+  expect(steps[zigIndex]?.run).toContain("if ! mise where zig");
+  expect(steps[zigIndex]?.if).toBeUndefined();
+  expect(steps[zigIndex]?.["continue-on-error"]).toBeUndefined();
 });
 
 test("CI admits next branch pushes while excluding release tags", async () => {

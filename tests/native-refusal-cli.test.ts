@@ -1487,7 +1487,8 @@ test.each(["fetch", "graph", "hook", "build"] as const)(
       [process.execPath, entrypoint, "--path", f.project, "up"],
       {
         cwd: f.project,
-        env: f.env({ ...SHARED, HACK_NATIVE_BUILDS: "1" }),
+        // No HACK_NATIVE_BUILDS: builds are on by default (HACK-2532).
+        env: f.env(SHARED),
         detached: true,
         stdout: "pipe",
         stderr: "pipe",

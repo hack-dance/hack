@@ -89,6 +89,7 @@ import {
   resolveGlobalCaddyIp,
 } from "../lib/caddy-hosts.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
+import { inspectComposePlugin } from "../lib/compose-engine-preflight.ts";
 import {
   adoptedComposeEnvOverrideNextStep,
   composeEnvAtRestRepairs,
@@ -238,6 +239,7 @@ import {
 } from "../lib/mac-ca-trust.ts";
 import { MACHINE_SCHEMAS } from "../lib/machine-output.ts";
 import {
+  proxyStartBindFailure,
   removeUnstartedProxyContainers,
   resolveManagedProxyBind,
   writeManagedProxyCompose,
@@ -977,9 +979,9 @@ async function runDoctorAudit(
     )
   );
   results.push(
-    await runCheck(s, "docker compose", () =>
-      checkTool({ name: "docker compose", cmd: "docker" })
-    )
+    await runCheck(s, "docker compose", () => checkComposePlugin(), {
+      timeoutMs: COMPOSE_PLUGIN_CHECK_TIMEOUT_MS,
+    })
   );
   results.push(
     await runCheck(s, "brew", () =>
@@ -2487,6 +2489,48 @@ async function checkMutagenBinary(): Promise<CheckResult> {
   };
 }
 
+/** The doctor `docker compose` check's deadline. */
+const COMPOSE_PLUGIN_CHECK_TIMEOUT_MS = 10_000;
+/** Its `docker compose version` run, which must end before that deadline. */
+const COMPOSE_PLUGIN_RUN_TIMEOUT_MS = 8000;
+
+/**
+ * `docker compose version`, not just `docker` on PATH: a Docker CLI without
+ * the Compose v2 plugin passed this check before, while `hack global
+ * install` and `hack up` failed (HACK-2673).
+ */
+async function checkComposePlugin(): Promise<CheckResult> {
+  if (!(await findExecutableInPath("docker"))) {
+    return {
+      name: "docker compose",
+      status: "error",
+      message: "docker not found in PATH",
+    };
+  }
+  const inspection = await inspectComposePlugin({
+    deps: {
+      // Below the check's own deadline, so a hung plugin ends as the coded
+      // hung-command result rather than the generic check timeout.
+      run: async (argv, timeoutMs) =>
+        await exec(argv, {
+          stdin: "ignore",
+          timeoutMs: Math.min(timeoutMs, COMPOSE_PLUGIN_RUN_TIMEOUT_MS),
+        }),
+    },
+  });
+  return inspection.ok
+    ? {
+        name: "docker compose",
+        status: "ok",
+        message: inspection.version || "docker compose version succeeded",
+      }
+    : {
+        name: "docker compose",
+        status: "error",
+        message: inspection.error.message,
+      };
+}
+
 async function checkDockerRunning(): Promise<CheckResult> {
   const res = await exec(["docker", "info"], { stdin: "ignore" });
   return {
@@ -3709,7 +3753,7 @@ async function checkComposeBackendFeatures(opts: {
           requestedEnvName: undefined,
         })
       : undefined;
-  // The same build classification native up applies under HACK_NATIVE_BUILDS.
+  // The same build classification native up applies (on unless HACK_NATIVE_BUILDS=0).
   const buildsEnabled = nativeBuildsEnabled();
   const reading = await readComposeBackendReading(ctx.composeFile, {
     adaptationCandidates,
@@ -5913,6 +5957,13 @@ async function maybeStartGlobalCaddyCompose(opts: {
         bindAddress: readProxyBindFromCompose(
           (await readTextFile(opts.paths.caddyCompose)) ?? ""
         ),
+        // Compose's own error was captured: blame the ports only when it, or
+        // a proxy container's recorded start error, names one Docker could
+        // not publish (HACK-2673).
+        bindFailure: proxyStartBindFailure({
+          cleanup,
+          composeOutput: `${started.stderr}\n${started.stdout}`,
+        }),
       }),
       "runtime repair"
     );

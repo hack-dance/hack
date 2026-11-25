@@ -1764,6 +1764,36 @@ The reachability control reaches
 `Restore` after both IDs match and compute is absent. See the
 [source mapping and state chart](../../../docs/reference/v5-model-coverage.md#cleanup-identity-after-an-unacknowledged-create-hack-2628).
 
+## Down after a lost foreground
+
+`native-down-lost-frontend/DownLostFrontend.tla` (HACK-2097) starts after a
+foreground `up` was lost while its graph owner runs a ready graph, and after the
+down's first selection saw that owner running. The owner may stop on its own in
+two steps (`BeginStop` writes `cleanup-intent`, `FinishStop` the retained
+receipt), then retire its publication in two (`BeginRetire`, read as
+`uncertain`; `FinishRetire`, absent). It may die at any point of its run or its
+stop (`Die`), or lose its publication without a stop (`Vanish`, a torn
+retirement). The down asks the owner to stop (`Stop`, `graph cleanup`, answered
+only before the owner began its own stop), selects again when that stop went
+unanswered (`ReselectOwner`), polling at most `MaxPolls` times while the owner is
+running or `uncertain`, and then refuses with the rerun step (`exiting`) or
+dispatches: an absent owner to `ConfirmStop` (`verify(inspect, stopped)` and
+frontend finalization recovery), an exited one with a ready receipt to
+`Recover` (`graph recover-live-owner`), with a retained receipt to `Retire`
+(`graph retire-unadmitted-owner`), and at `cleanup-intent` to the named refusal
+(`midstop`, the explicit dead-owner cleanup). `Rerun` is the user following the
+`exiting` refusal once the owner has exited. The positive configuration
+explores 57 states and checks `TypeOK`, `DoneIsStopped`, `NoDeadEnd`,
+`NoLiveRecovery` and `Recovers` under weak fairness of the down's steps, the
+rerun and the owner finishing a stop it began; `Die` and `Vanish` are never
+forced. `negative` (`Reselect = FALSE`, the code before) and `no-settle`
+(`Settle = FALSE`, the reselect without the wait) must violate `NoDeadEnd` with
+an unnamed refusal, before and after the reselect. `unconfirmed-absent`
+(`Confirm = FALSE`) must violate `DoneIsStopped` with a ready graph. The first
+selection's own dispatch, owner internals, the runtime's proofs and the real VM
+are outside the model; see `native-publisher-stop` and
+`native-frontend-recovery`.
+
 ## Foreground port publisher shutdown
 
 `native-publisher-stop/PublisherStop.tla` bounds one graph and publisher, one

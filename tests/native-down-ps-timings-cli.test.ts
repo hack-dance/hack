@@ -171,12 +171,20 @@ async function readRecords(file: string): Promise<TimingRecord[]> {
   return records as TimingRecord[];
 }
 
-/** One trace: a CLI root and every runtime record parented to that root. */
+/**
+ * One trace: a CLI root and every runtime record parented to that root.
+ * Native runtime requests go through `startupTimingSpawn`, whose descriptor
+ * names `command.total` as the parent, so there is no intermediate
+ * `runtime.request` span (that span belongs to `timedNativeSpawn`).
+ */
 function expectJoined(records: readonly TimingRecord[]) {
   const roots = records.filter((record) => record.step === "command.total");
   expect(roots).toHaveLength(1);
   const root = roots[0] as TimingRecord;
   expect(root).toMatchObject({ parent: null, proc: "cli", outcome: "ok" });
+  expect(records.filter((record) => record.step === "runtime.request")).toEqual(
+    []
+  );
   const runtime = records.filter((record) => record.proc === "runtime");
   expect(runtime.length).toBeGreaterThan(0);
   for (const record of records) {

@@ -2287,10 +2287,12 @@ function reportNativeStartupIncomplete(opts: {
       code: "E_STARTUP_INCOMPLETE",
       message:
         "Native Compose execution is incomplete; inspect saved state and use explicit owned stop recovery before retrying.",
+      // The engine effect is unknown: no workload may be running, so the
+      // blocker names what is certainly retained, the pending start.
       startBlocker: {
         thing: "project",
-        problem: "startup incomplete · services retained",
-        needs: "this start needs the retained services stopped first",
+        problem: "startup incomplete · pending start retained",
+        needs: "this start needs the pending start stopped first",
         command,
       },
     });

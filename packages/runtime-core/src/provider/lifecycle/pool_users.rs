@@ -133,13 +133,17 @@ pub(super) fn pool_idle(
 /// Receipt phases whose containers may be running or about to run in the current
 /// boot: Compose graph runs (`run/graphs`) and native-authored graph runs
 /// (`run/native-graphs`, kebab-case `journal::Phase`). `failed-retained` is
-/// included: a failed start keeps the services that did start, uncleaned.
+/// included: a failed start keeps the services that did start, uncleaned. So is
+/// `restarting` (every Compose start phase, `graph::START_PHASES`): `graph restart`
+/// saves it before it starts any container, and a restart whose process died part way
+/// keeps it with some containers running.
 const LIVE_PHASES: [(&str, &[&str]); 2] = [
     (
         "run/graphs",
         &[
             "preparing",
             "restoring",
+            "restarting",
             "started-observed",
             "ready-observed",
             "failed-retained",
@@ -252,7 +256,7 @@ pub(super) const POOL_IN_USE: &str = "project_share_pool_in_use";
 
 /// Refuse unless nothing uses the running pool live, so stopping it loses nothing but
 /// a boot (HACK-2535): no graph run whose receipt is live (`live_graph_runs`: running,
-/// starting, restoring, stopping, or a failed start that kept its services), no
+/// starting, restoring, restarting, stopping, or a failed start that kept its services), no
 /// pending dead-owner recovery, and no interactive exec session. Retained and removed
 /// runs hold no containers and do not count. Anything unreadable refuses. An active
 /// image build is checked by `runtime down` itself, under the same lease.
@@ -348,6 +352,7 @@ mod tests {
         // A starting run, named.
         for phase in [
             "preparing",
+            "restarting",
             "ready-observed",
             "failed-retained",
             "cleanup-intent",
@@ -382,9 +387,12 @@ mod tests {
             .unwrap();
         }
         assert!(refuse_live_runs(&home.0).is_ok());
-        // A running Compose run and a stopping native-authored run refuse, both named.
+        // A running Compose run, a Compose restart interrupted part way (its process
+        // died after some containers restarted, so the receipt kept `restarting`) and a
+        // stopping native-authored run refuse, all named.
         for (directory, run, phase) in [
             ("run/graphs", "d", "ready-observed"),
+            ("run/graphs", "9", "restarting"),
             ("run/native-graphs", "e", "stop-intent"),
         ] {
             let dir = home.dir(&format!("{directory}/{}", run.repeat(32)));
@@ -401,7 +409,7 @@ mod tests {
         let json = serde_json::to_value(&refused).unwrap();
         assert_eq!(
             json["live_runs"],
-            serde_json::json!(["d".repeat(32), "e".repeat(32)])
+            serde_json::json!(["9".repeat(32), "d".repeat(32), "e".repeat(32)])
         );
         // An unreadable receipt refuses without naming anything.
         home.dir(&format!("run/graphs/{}", "f".repeat(32)));
@@ -416,6 +424,17 @@ mod tests {
     }
 
     #[test]
+    fn every_compose_start_phase_is_live() {
+        // A start in progress (fresh, restore or restart) may have running containers;
+        // one whose process died keeps its phase, so the guard must still see it.
+        let (directory, compose) = LIVE_PHASES[0];
+        assert_eq!(directory, "run/graphs");
+        for phase in crate::provider::graph::START_PHASES {
+            assert!(compose.contains(&phase), "{phase} is not live");
+        }
+    }
+
+    #[test]
     fn runtime_down_names_only_runs_whose_receipt_is_live() {
         let home = Home::new();
         assert_eq!(live_graph_runs(&home.0), Some(vec![]));
@@ -423,6 +442,7 @@ mod tests {
             ("a", "ready-observed"),
             ("b", "stopped-data-retained"),
             ("c", "restoring"),
+            ("4", "restarting"),
             ("d", "removed"),
             ("6", "failed-retained"),
             ("5", "started-observed"),
@@ -437,6 +457,7 @@ mod tests {
         assert_eq!(
             live_graph_runs(&home.0),
             Some(vec![
+                "4".repeat(32),
                 "5".repeat(32),
                 "6".repeat(32),
                 "a".repeat(32),
@@ -460,6 +481,7 @@ mod tests {
         assert_eq!(
             live_graph_runs(&home.0),
             Some(vec![
+                "4".repeat(32),
                 "5".repeat(32),
                 "6".repeat(32),
                 "7".repeat(32),

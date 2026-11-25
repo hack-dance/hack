@@ -157,7 +157,10 @@ test("native inventory attributes unregistered Compose branches and authored pro
       JSON.stringify({
         run: removedRun,
         phase: "removed",
-        resources: { db: { phase: "removed" } },
+        resources: {
+          db: { phase: "absent" },
+          cache: { phase: "released", cache: {} },
+        },
       })
     );
     expect((await nativeInventory(root, readers)).issues).toEqual([]);

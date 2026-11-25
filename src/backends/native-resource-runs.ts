@@ -119,7 +119,12 @@ async function readOwner(
     receipt.phase === "removed" &&
     isRecord(receipt.resources) &&
     Object.values(receipt.resources).every(
-      (resource) => isRecord(resource) && resource.phase === "removed"
+      (resource) =>
+        isRecord(resource) &&
+        (store === "authored"
+          ? resource.phase === "removed"
+          : resource.phase === "absent" ||
+            (resource.phase === "released" && isRecord(resource.cache)))
     )
   ) {
     const pending = await lstat(

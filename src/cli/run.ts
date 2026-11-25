@@ -288,11 +288,7 @@ export async function handleRunCliError(opts: {
   }
 
   if (error instanceof HackCliError) {
-    if (opts.handlerPath?.[0] === "up") {
-      writeUpRefusal(error, opts.startSelector);
-    } else {
-      logger.error({ message: `${error.code}: ${error.message}` });
-    }
+    writeCodedRefusal(error, opts.handlerPath, opts.startSelector);
     if (error.detail !== undefined) {
       // Loaded only for a detailed error, off the ordinary CLI start path.
       const { nativeComposeEffectRefusalSummary } = await import(
@@ -325,6 +321,26 @@ export async function handleRunCliError(opts: {
 }
 
 const REFUSAL_LINE_BREAK = /\r\n|[\r\n]/;
+
+/**
+ * Text form of a coded refusal. `up` gets the start blocker or its code-based
+ * guidance. `restart` reaches the same native start refusals (HACK-2541), so it
+ * renders an explicit blocker too, but never the code-based guidance, which
+ * would print `hack up` as the next step.
+ */
+function writeCodedRefusal(
+  error: HackCliError,
+  handlerPath: readonly string[] | undefined,
+  selection: Parameters<typeof selectedProjectBlocker>[1]
+): void {
+  if (handlerPath?.[0] === "up") {
+    writeUpRefusal(error, selection);
+  } else if (handlerPath?.[0] === "restart" && error.startBlocker) {
+    writeStartBlocker(error.startBlocker);
+  } else {
+    logger.error({ message: `${error.code}: ${error.message}` });
+  }
+}
 
 function writeUpRefusal(
   error: HackCliError,

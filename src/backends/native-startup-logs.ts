@@ -12,6 +12,11 @@ export interface NativeStartupLogTail {
   readonly stdout: string;
   readonly stderr: string;
   readonly truncated: boolean;
+  /**
+   * The process's exit status when the runtime observed its container exited
+   * before cleanup; absent for a dead or otherwise failed container. Value-free.
+   */
+  readonly exitCode?: number;
 }
 
 const SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
@@ -48,13 +53,14 @@ export function readNativeStartupLogs(
   for (const tail of value.services) {
     if (
       !isRecord(tail) ||
-      Object.keys(tail).length !== 4 ||
+      Object.keys(tail).length !== (tail.exit_code === undefined ? 4 : 5) ||
       typeof tail.service !== "string" ||
       !SERVICE.test(tail.service) ||
       names.has(tail.service) ||
       !boundedStream(tail.stdout) ||
       !boundedStream(tail.stderr) ||
-      typeof tail.truncated !== "boolean"
+      typeof tail.truncated !== "boolean" ||
+      !(tail.exit_code === undefined || exitStatus(tail.exit_code))
     ) {
       return;
     }
@@ -64,9 +70,15 @@ export function readNativeStartupLogs(
       stdout: tail.stdout,
       stderr: tail.stderr,
       truncated: tail.truncated,
+      ...(exitStatus(tail.exit_code) ? { exitCode: tail.exit_code } : {}),
     });
   }
   return result;
+}
+
+/** An engine exit status: a safe integer; the runtime reports Docker's `ExitCode`. */
+function exitStatus(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value);
 }
 
 function boundedStream(value: unknown): value is string {

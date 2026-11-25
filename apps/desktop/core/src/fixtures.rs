@@ -60,6 +60,8 @@ pub enum Fixture {
     ResourcesUnavailable,
     ResourcesEmpty,
     ResourcesReady,
+    ResourcesInventory,
+    ResourcesConfirm,
     GroupedSidebar,
     CatalogNative,
     CatalogNativeSaved,
@@ -112,7 +114,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 74] = [
+    pub const ALL: [Self; 76] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -151,6 +153,8 @@ impl Fixture {
         Self::ResourcesUnavailable,
         Self::ResourcesEmpty,
         Self::ResourcesReady,
+        Self::ResourcesInventory,
+        Self::ResourcesConfirm,
         Self::GroupedSidebar,
         Self::CatalogNative,
         Self::CatalogNativeSaved,
@@ -230,6 +234,8 @@ impl Fixture {
             Self::ResourcesUnavailable => "resources-unavailable",
             Self::ResourcesEmpty => "resources-empty",
             Self::ResourcesReady => "resources-ready",
+            Self::ResourcesInventory => "resources-inventory",
+            Self::ResourcesConfirm => "resources-confirm",
             Self::GroupedSidebar => "grouped-sidebar",
             Self::CatalogNative => "catalog-native",
             Self::CatalogNativeSaved => "catalog-native-saved",

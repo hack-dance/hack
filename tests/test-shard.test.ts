@@ -1330,6 +1330,7 @@ describe("hosted test CI fan-in", () => {
       "linux-process-lifetime",
       "config-compiler",
       "guest-protocol",
+      "resource-e2e",
     ]);
     expect(fanIn?.if).toBe("${{ always() }}");
     const gate = fanIn?.steps.find(
@@ -1353,6 +1354,10 @@ describe("hosted test CI fan-in", () => {
     );
     expect(gate?.env?.LIFETIME_ENABLED).toBe(
       "${{ needs.changes.outputs.docker_suite }}"
+    );
+    expect(gate?.env?.RESOURCE_RESULT).toBe("${{ needs.resource-e2e.result }}");
+    expect(gate?.env?.RESOURCE_ENABLED).toBe(
+      "${{ needs.changes.outputs.resource_e2e }}"
     );
     expect(gate?.run).toContain('if [ "$SHARD_RESULT" != "success" ]; then');
     expect(gate?.run).toContain("exit 1");
@@ -1398,6 +1403,8 @@ describe("hosted test CI fan-in", () => {
           COMPILER_RESULT: "skipped",
           LIFETIME_ENABLED: "false",
           LIFETIME_RESULT: "skipped",
+          RESOURCE_ENABLED: "false",
+          RESOURCE_RESULT: "skipped",
         },
         stdout: "ignore",
         timeout: 5000,
@@ -1418,7 +1425,7 @@ describe("hosted test CI fan-in", () => {
       ["false", "success", 1],
       ["", "skipped", 1],
     ] as const) {
-      for (const job of ["GUEST", "LIFETIME", "COMPILER"]) {
+      for (const job of ["GUEST", "LIFETIME", "COMPILER", "RESOURCE"]) {
         const run = Bun.spawnSync(["bash", "-e", "-u", "-c", gate.run], {
           env: {
             PR_DRAFT: "false",
@@ -1431,6 +1438,8 @@ describe("hosted test CI fan-in", () => {
             GUEST_RESULT: "skipped",
             LIFETIME_ENABLED: "false",
             LIFETIME_RESULT: "skipped",
+            RESOURCE_ENABLED: "false",
+            RESOURCE_RESULT: "skipped",
             COMPILER_ENABLED: "false",
             COMPILER_RESULT: "skipped",
             [`${job}_ENABLED`]: enabled,

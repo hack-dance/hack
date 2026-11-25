@@ -96,6 +96,11 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                                     app.simulate_daemon_unavailable(false);
                                 }
                                 app.show_resources(cx);
+                                if matches!(f.name(), "resources-inventory" | "resources-confirm") {
+                                    app.show_resource_inventory_fixture(
+                                        f.name() == "resources-confirm",
+                                    );
+                                }
                             }
                             if f.name().starts_with("catalog-") {
                                 app.show_catalog_fixture(f.name(), window, cx);

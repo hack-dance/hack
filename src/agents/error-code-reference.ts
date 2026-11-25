@@ -38,7 +38,8 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "The error's first line names the supported platform; use the Compose backend instead.",
   },
   E_DOCKER_UNAVAILABLE: {
-    meaning: "The container runtime CLI or engine cannot be reached.",
+    meaning:
+      "The container runtime CLI or engine cannot be reached, or the Docker Compose v2 plugin is missing.",
     readFirst: "`hack doctor --json`",
   },
   E_GLOBAL_INFRA_DOWN: {

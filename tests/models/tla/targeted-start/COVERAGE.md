@@ -50,3 +50,19 @@ The shared-source regression checks that the cold contract rejects the
 expanded plan and that the combined contract admits the same plan after a
 source edit. The VM CLI fixture also checks exec on the running graph and
 reads both named-volume markers after a retaining down and plain up.
+
+The `Rollback` action is atomic in the model. In `extend::rollback` it
+disarms the added containers and then stops the added and resumed
+containers in one batch (`rollback_stops`), so one engine stop bound covers
+the stops that the CLI's cancellation wait counts. The CLI's first Ctrl-C
+notice says that a second Ctrl-C stops waiting with an unknown outcome
+(`ForceCancel`). When a confirmed data removal finds no active append
+(`graph_append_not_active`: it lost the race to `Commit`, the append failed
+or was canceled and took `Rollback`, or `RollbackRefused` left it
+`Degraded`), the refusal says only that the add is no longer in progress and
+that the project must be stopped before data removal; it does not claim
+which of those outcomes happened. When the owner cannot use the CLI's
+full-file review, its reply carries `combined_review: "owner_fallback"` and
+the CLI prints a notice; the receipt format is unchanged. The model abstracts these messages,
+the stop batching and the CLI's private combined Compose file, which the next
+append removes once its creating process has exited.

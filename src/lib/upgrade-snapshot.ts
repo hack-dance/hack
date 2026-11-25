@@ -76,6 +76,23 @@ import { isRecord } from "./guards.ts";
  * cross no filesystem, a target on another filesystem than the snapshot is
  * refused untouched. Not atomic across targets.
  *
+ * Interruption: each displaced name starts with a key of its target path. A
+ * restore killed between displacement and publication leaves the path empty;
+ * a rerun finds that target's newest displaced file and, when it holds
+ * exactly the recorded after state, finishes the restore without
+ * `overwrite`. Any other newest displaced file is reported (`keptAs`) and
+ * the path is left empty. Once the path holds the snapshot's state (a
+ * restore that completes, or a rerun that finds it already restored), every
+ * keyed displaced file of that target is renamed without its key: the file
+ * stays in `displaced/` and is reported, but no later rerun adopts it, so a
+ * user who deletes a restored file is refused, not overridden. A kill
+ * between publication and that rename leaves the path holding the
+ * snapshot's state, and the rerun's already-restored check drops the keys.
+ * Displaced names without the key (from versions before HACK-2188, or
+ * consumed) are never adopted; such an interrupted restore still needs
+ * `overwrite`. A killed restore can leave a staged copy in the private
+ * `staging/` directory; it is never published by a later run.
+ *
  * One writer per snapshot: `recordUpgradeSnapshotAfter` rewrites the
  * manifest (read, modify, atomic rename, best-effort directory fsync), so two
  * concurrent recorders on the same snapshot can lose each other's after
@@ -92,6 +109,8 @@ const MANIFEST_NAME = "manifest.json";
 const BLOBS_DIR = "blobs";
 /** Displaced files, moved in as themselves (same inode), not copies. */
 const DISPLACED_DIR = "displaced";
+/** Hex digits of the target-path digest that prefix each displaced name. */
+const DISPLACED_KEY_LENGTH = 16;
 /** The snapshot's copies staged for publication. */
 const STAGING_DIR = "staging";
 const SHA256_HEX = /^[0-9a-f]{64}$/;
@@ -371,6 +390,8 @@ const MESSAGES = {
     "A link, directory or other entry was found at this path during the restore and is kept at keptAs; nothing was restored here. Move it back by hand if it belongs there.",
   strandedAt:
     "The current file could not be kept in the snapshot, and another file appeared at this path meanwhile; the current file is at keptAs. Nothing was deleted.",
+  interruptedAside:
+    "An earlier restore was interrupted after it moved the file at this path into the snapshot (kept at keptAs), and that file is not what the upgrade step recorded; the path was left empty. Check the kept file, then move it back by hand or rerun with overwrite to restore the snapshot's copy.",
 } as const;
 
 /**
@@ -751,13 +772,28 @@ type RestoreOutcome = Omit<UpgradeRestoreEntry, "path" | "label">;
 /**
  * What restoring `entry` would start from: the target's current bytes, or
  * the outcome when there is nothing to do or it must not be touched.
+ *
+ * Resume after an interrupted restore (HACK-2188): a restore killed between
+ * displacement and publication leaves the path empty and the file that was
+ * there in `displaced/`. An empty path whose newest displaced file for this
+ * target holds exactly the recorded after state is that interruption, so the
+ * restore continues without `overwrite` (publication still refuses an
+ * occupied name). Any other newest displaced file is reported, not adopted.
+ * A completed restore drops the key from its target's displaced files
+ * (`settleDisplaced`), so only an unfinished restore is resumed.
  */
 async function restoreStart(input: {
+  readonly snapshot: UpgradeSnapshot;
   readonly entry: UpgradeSnapshotEntry;
   readonly overwrite: boolean;
 }): Promise<
   | { readonly kind: "done"; readonly outcome: RestoreOutcome }
-  | { readonly kind: "go"; readonly current: TargetRead & { kind: "ok" } }
+  | {
+      readonly kind: "go";
+      readonly current: TargetRead & { kind: "ok" };
+      /** Where an interrupted restore of this target kept its file. */
+      readonly resumedKeptAs?: string;
+    }
 > {
   const { entry } = input;
   const current = await readTargetBytes(entry.path);
@@ -773,7 +809,31 @@ async function restoreStart(input: {
   }
   const stepOutput =
     entry.after !== null && sameState(current.state, entry.after);
-  if (!(stepOutput || input.overwrite)) {
+  if (stepOutput) {
+    return { kind: "go", current };
+  }
+  const interrupted =
+    current.state.kind === "absent"
+      ? await newestDisplaced({ snapshot: input.snapshot, path: entry.path })
+      : null;
+  if (interrupted !== null) {
+    const resumable =
+      entry.after !== null &&
+      interrupted.state !== null &&
+      sameState(interrupted.state, entry.after);
+    if (resumable || input.overwrite) {
+      return { kind: "go", current, resumedKeptAs: interrupted.path };
+    }
+    return {
+      kind: "done",
+      outcome: {
+        status: "conflict",
+        message: MESSAGES.interruptedAside,
+        keptAs: interrupted.path,
+      },
+    };
+  }
+  if (!input.overwrite) {
     return {
       kind: "done",
       outcome: {
@@ -783,6 +843,151 @@ async function restoreStart(input: {
     };
   }
   return { kind: "go", current };
+}
+
+/**
+ * The name a displaced file of `path` gets: a key of the target path first,
+ * so a later restore finds what an interrupted one moved aside, then a
+ * sortable time, a random suffix and the target's own name.
+ */
+function displacedName(path: string): string {
+  return `${displacedKey(path)}-${unkeyedDisplacedName(path)}`;
+}
+
+/** A displaced name without the key: no rerun adopts such a file. */
+function unkeyedDisplacedName(path: string): string {
+  const stamp = new Date().toISOString().replace(ISO_SEPARATORS, "");
+  return `${stamp}-${randomBytes(4).toString("hex")}-${basename(path)}`;
+}
+
+function displacedKey(path: string): string {
+  return sha256(Buffer.from(path)).slice(0, DISPLACED_KEY_LENGTH);
+}
+
+/**
+ * The files in the snapshot's `displaced/` directory that a restore of
+ * `path` moved there and that a later restore may still adopt (named with
+ * the target's key), oldest first. None when the directory is missing,
+ * unreadable or not private.
+ */
+async function keyedDisplaced(input: {
+  readonly snapshot: UpgradeSnapshot;
+  readonly path: string;
+}): Promise<{ readonly dir: string; readonly names: readonly string[] }> {
+  const dir = join(input.snapshot.dir, DISPLACED_DIR);
+  const none = { dir, names: [] };
+  if ((await lstatOrNull(dir)) === null) {
+    return none;
+  }
+  if ((await privateDirectoryProblem(dir)) !== null) {
+    return none;
+  }
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return none;
+  }
+  const prefix = `${displacedKey(input.path)}-`;
+  const suffix = `-${basename(input.path)}`;
+  return {
+    dir,
+    names: names
+      .filter((name) => name.startsWith(prefix) && name.endsWith(suffix))
+      .sort(),
+  };
+}
+
+/**
+ * The newest keyed displaced file of `path`, with its state (null when it
+ * is not a regular file that can be read). Null when there is none.
+ */
+async function newestDisplaced(input: {
+  readonly snapshot: UpgradeSnapshot;
+  readonly path: string;
+}): Promise<{
+  readonly path: string;
+  readonly state: UpgradeSnapshotState | null;
+} | null> {
+  const { dir, names } = await keyedDisplaced(input);
+  const newest = names.at(-1);
+  if (newest === undefined) {
+    return null;
+  }
+  const path = join(dir, newest);
+  const read = await readTargetBytes(path);
+  return {
+    path,
+    state: read.kind === "ok" && read.state.kind === "file" ? read.state : null,
+  };
+}
+
+/** Outcomes after which the path holds the snapshot's state. */
+const SETTLED_STATUSES: ReadonlySet<UpgradeRestoreStatus> = new Set([
+  "restored",
+  "moved-aside",
+  "already-restored",
+]);
+
+/**
+ * After an outcome that leaves the path holding the snapshot's state, drops
+ * the key from every displaced file of that target (see the module
+ * contract), so a rerun after the user deletes the restored file refuses it
+ * rather than adopting an old step output. The reported `keptAs` follows
+ * its file; an already-restored target with no `keptAs` reports the newest
+ * file it consumed (what a killed restore displaced and never reported).
+ * Any other outcome is returned unchanged.
+ */
+async function settleDisplaced(input: {
+  readonly snapshot: UpgradeSnapshot;
+  readonly path: string;
+  readonly outcome: RestoreOutcome;
+}): Promise<RestoreOutcome> {
+  const { outcome } = input;
+  if (!SETTLED_STATUSES.has(outcome.status)) {
+    return outcome;
+  }
+  const moved = await consumeDisplaced(input);
+  if (outcome.keptAs !== undefined) {
+    return { ...outcome, keptAs: moved.get(outcome.keptAs) ?? outcome.keptAs };
+  }
+  const newest = [...moved.values()].at(-1);
+  return newest === undefined ? outcome : { ...outcome, keptAs: newest };
+}
+
+/**
+ * Renames every keyed displaced file of `path` without its key, keeping its
+ * time, suffix and name (a fresh time and suffix when that name is taken).
+ * A hard link then an unlink, so an occupied name is never replaced; a kill
+ * between them leaves the file under both names, and a rerun drops the
+ * keyed one. A file whose rename fails stays keyed. Returns each renamed
+ * file's old and new path, oldest first.
+ */
+async function consumeDisplaced(input: {
+  readonly snapshot: UpgradeSnapshot;
+  readonly path: string;
+}): Promise<ReadonlyMap<string, string>> {
+  const { dir, names } = await keyedDisplaced(input);
+  const keyLength = `${displacedKey(input.path)}-`.length;
+  const moved = new Map<string, string>();
+  for (const name of names) {
+    const from = join(dir, name);
+    for (const unkeyed of [
+      name.slice(keyLength),
+      unkeyedDisplacedName(input.path),
+    ]) {
+      const to = join(dir, unkeyed);
+      try {
+        await link(from, to);
+      } catch {
+        continue;
+      }
+      await unlink(from).catch(() => undefined);
+      moved.set(from, to);
+      break;
+    }
+  }
+  return moved;
 }
 
 async function restoreEntry(input: {
@@ -795,9 +1000,13 @@ async function restoreEntry(input: {
   const { snapshot, entry } = input;
   const start = await restoreStart(input);
   if (start.kind === "done") {
-    return start.outcome;
+    return await settleDisplaced({
+      snapshot,
+      path: entry.path,
+      outcome: start.outcome,
+    });
   }
-  const { current } = start;
+  const { current, resumedKeptAs } = start;
   const work = await restoreWorkDirs({ snapshot, path: entry.path });
   if (work.kind === "refused") {
     return work.outcome;
@@ -835,19 +1044,20 @@ async function restoreEntry(input: {
       return displaced.outcome;
     }
     await input.afterDisplace?.(entry.path);
+    // A resumed restore displaced nothing now; report the earlier copy.
+    const keptAs = displaced.keptAs ?? resumedKeptAs;
     if (staged === null) {
-      return await absentRestored({
-        path: entry.path,
-        keptAs: displaced.keptAs,
-      });
+      const outcome = await absentRestored({ path: entry.path, keptAs });
+      return await settleDisplaced({ snapshot, path: entry.path, outcome });
     }
     const toPublish = staged;
     staged = null;
-    return await publishOrPutBack({
+    const outcome = await publishOrPutBack({
       staged: toPublish,
       path: entry.path,
-      keptAs: displaced.keptAs,
+      keptAs,
     });
+    return await settleDisplaced({ snapshot, path: entry.path, outcome });
   } finally {
     if (staged !== null) {
       await unlink(staged).catch(() => undefined);
@@ -944,10 +1154,7 @@ async function displaceTarget(input: {
   | { readonly kind: "displaced"; readonly keptAs?: string }
   | { readonly kind: "stopped"; readonly outcome: RestoreOutcome }
 > {
-  const kept = join(
-    input.displacedDir,
-    `${new Date().toISOString().replace(ISO_SEPARATORS, "")}-${randomBytes(4).toString("hex")}-${basename(input.path)}`
-  );
+  const kept = join(input.displacedDir, displacedName(input.path));
   try {
     await rename(input.path, kept);
   } catch (error: unknown) {

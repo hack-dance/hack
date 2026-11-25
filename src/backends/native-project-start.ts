@@ -15,6 +15,7 @@ import {
   type NativeAppendRollback,
   nativeAppendRollback,
 } from "../lib/native-append-cancellation.ts";
+import { nativeAppendNotices } from "../lib/native-append-notices.ts";
 import {
   isNativeDetachedOwnerProcess,
   nativeDetachedUpAppendCancelled,
@@ -33,7 +34,11 @@ import {
   type NativeProcessRefusal,
   requireWrappableNativeProcesses,
 } from "../lib/native-process-wrappers.ts";
-import { nativeRuntimeTempDirectory } from "../lib/native-runtime-temp.ts";
+import {
+  nativeCombinedTempDirectory,
+  nativeRuntimeTempDirectory,
+  sweepAbandonedNativeCombinedDirectories,
+} from "../lib/native-runtime-temp.ts";
 import {
   type NativeExitedService,
   NativeServiceExitedError,
@@ -3319,9 +3324,9 @@ async function extendNativeProjectGraph({
   try {
     const combinedArgs: string[] = [];
     if (combined) {
-      combinedDirectory = await nativeRuntimeTempDirectory(
-        "hack-native-combined-"
-      );
+      // A CLI killed mid-append leaves its directory; remove abandoned ones.
+      await sweepAbandonedNativeCombinedDirectories();
+      combinedDirectory = await nativeCombinedTempDirectory();
       const path = join(combinedDirectory, "compose.json");
       await writeFile(path, combined.normalizedComposeJson, {
         mode: 0o600,
@@ -3392,10 +3397,11 @@ async function extendNativeProjectGraph({
     const readiness = response.receipt.readiness;
     const started = nativeExtensionServiceSet(response.started, services);
     const changed = nativeExtensionServiceSet(response.changed, services);
-    const warnings = changed.map(
-      (name) =>
-        `Service ${name} is running with its previous configuration. Use hack restart to apply the change on native; Compose supports hack restart ${name}.`
-    );
+    const warnings = nativeAppendNotices({
+      changed,
+      response,
+      combinedOffered: Boolean(combined),
+    });
     if (!opts.onReady) {
       warnings.forEach(deps.warn);
     }

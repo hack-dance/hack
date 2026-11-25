@@ -233,7 +233,7 @@ fn build_loopback_identity() {
     };
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let object = out.join("loopback-identity.o");
-    let status = Command::new("cc")
+    let status = Command::new(target_tool("CC", "cc"))
         .args([
             "-std=c11",
             "-O2",
@@ -250,7 +250,7 @@ fn build_loopback_identity() {
         .status()
         .expect("compile native loopback identity inspection");
     assert!(status.success(), "loopback identity compile failed");
-    let status = Command::new("ar")
+    let status = Command::new(target_tool("AR", "ar"))
         .arg("crs")
         .arg(out.join("libhack_loopback_identity.a"))
         .arg(object)
@@ -259,4 +259,16 @@ fn build_loopback_identity() {
     assert!(status.success(), "loopback identity archive failed");
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=hack_loopback_identity");
+}
+
+/// The C tool for the target being built: cc-rs's `CC_<target>` / `AR_<target>`
+/// convention (for example `CC_aarch64_apple_darwin`), else the host default. On a
+/// Mac neither variable is normally set; a non-Mac host cross-checking macOS sets
+/// them (`scripts/check-runtime-core-cross.sh`), because the host `cc` cannot
+/// compile Mach-O objects.
+fn target_tool(kind: &str, default: &str) -> std::ffi::OsString {
+    let target = env::var("TARGET").expect("Cargo sets TARGET");
+    let key = format!("{kind}_{}", target.replace('-', "_"));
+    println!("cargo:rerun-if-env-changed={key}");
+    env::var_os(&key).unwrap_or_else(|| default.into())
 }

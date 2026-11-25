@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+# Archiver for cross-target C objects (for example Mach-O on a Linux host),
+# which the host binutils may not index.
+exec zig ar "$@"

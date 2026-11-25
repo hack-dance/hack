@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+# C compiler for Apple Silicon macOS build scripts on a non-Mac host. Drop
+# cc-rs's Rust- and clang-spelled targets; the fixed Zig target below owns
+# this wrapper. Retain every other argument, including any different target,
+# unchanged and in order.
+for argument do
+  shift
+  case "$argument" in
+    --target=aarch64-apple-darwin|--target=arm64-apple-macosx|--target=arm64-apple-macosx[0-9]*) ;;
+    *) set -- "$@" "$argument" ;;
+  esac
+done
+exec zig cc -target aarch64-macos "$@"

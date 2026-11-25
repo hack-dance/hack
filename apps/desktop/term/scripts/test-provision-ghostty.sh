@@ -19,26 +19,32 @@ printf 'the pinned bytes\n' > "$work/fixture"
 want=$(sha256_of "$work/fixture")
 export FAKE_FIXTURE="$work/fixture" FAKE_LOG="$work/curl.log"
 
-# The fake curl: reads -o FILE, --continue-at and the URL (the last
-# argument), logs "URL resume|fresh", and acts on the host:
+# The fake curl: reads -o FILE, --continue-at, --max-time and the URL (the
+# last argument), logs "URL resume|fresh MAX_TIME", and acts on the host:
 #   dead.test    fails as a stalled transfer would (exit 28), writing nothing
 #   bad.test     serves other bytes
 #   good.test    serves the fixture
 #   stall.test   serves half the fixture then stalls; a resumed request
 #                gets the rest
 #   norange.test serves half then stalls, and refuses to resume (exit 33)
+#   refuse.test  serves half then stalls, and answers a resume with an
+#                HTTP error (exit 22)
+#   flip.test    serves half then stalls, completes a resume with other
+#                bytes (the file changed), then serves the fixture fresh
 cat > "$work/bin/curl" <<'SHIM'
 #!/usr/bin/env bash
-out="" resume=fresh url=""
+out="" resume=fresh url="" max=none
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out=$2; shift 2 ;;
     --continue-at) resume=resume; shift 2 ;;
-    --speed-limit|--speed-time|--max-time|--connect-timeout|--proto|--proto-redir) shift 2 ;;
+    --max-time) max=$2; shift 2 ;;
+    --speed-limit|--speed-time|--connect-timeout|--proto|--proto-redir) shift 2 ;;
     *) url=$1; shift ;;
   esac
 done
-echo "$url $resume" >> "$FAKE_LOG"
+echo "$url $resume $max" >> "$FAKE_LOG"
+n=$(wc -l < "$FAKE_LOG" | tr -d ' ')
 size=$(wc -c < "$FAKE_FIXTURE" | tr -d ' ')
 half=$((size / 2))
 case "$url" in
@@ -51,6 +57,15 @@ case "$url" in
   https://norange.test/*)
     if [ "$resume" = resume ]; then exit 33; fi
     head -c "$half" "$FAKE_FIXTURE" > "$out"; exit 28 ;;
+  https://refuse.test/*)
+    if [ "$resume" = resume ]; then exit 22; fi
+    head -c "$half" "$FAKE_FIXTURE" > "$out"; exit 28 ;;
+  https://flip.test/*)
+    case "$n" in
+      1) head -c "$half" "$FAKE_FIXTURE" > "$out"; exit 28 ;;
+      2) printf 'changed upstream\n' >> "$out" ;;
+      *) cat "$FAKE_FIXTURE" > "$out" ;;
+    esac ;;
   *) echo "fake curl: unexpected URL $url" >&2; exit 6 ;;
 esac
 SHIM
@@ -99,7 +114,7 @@ else fail "fetch left a file behind with no good source"; fi
 
 start stall
 if (fetch f "$want" https://stall.test/f) 2>/dev/null && kept \
-  && [[ "$(cat "$FAKE_LOG")" == "https://stall.test/f fresh
+  && [[ "$(cut -d' ' -f1-2 "$FAKE_LOG")" == "https://stall.test/f fresh
 https://stall.test/f resume" ]]; then
   pass "a stalled download resumes the partial file on the next attempt"
 else fail "stalled download resume"; fi
@@ -109,6 +124,26 @@ if (fetch f "$want" https://norange.test/f https://good.test/f) 2>/dev/null && k
   && [[ "$(calls)" -eq $((attempts + 1)) ]]; then
   pass "a source that cannot resume is restarted, then the next source is used"
 else fail "source that cannot resume"; fi
+
+start refuse
+if (fetch f "$want" https://refuse.test/f https://good.test/f) 2>/dev/null && kept \
+  && [[ "$(cut -d' ' -f2 "$FAKE_LOG" | tr '\n' ' ')" == "fresh resume fresh fresh " ]]; then
+  pass "a refused resume (HTTP error) drops the partial file and starts over"
+else fail "refused resume"; cat "$FAKE_LOG" >&2; fi
+
+start flip
+if (fetch f "$want" https://flip.test/f) 2>"$work/err" && kept \
+  && grep -q 'sha256 mismatch for f from https://flip.test/f' "$work/err" \
+  && [[ "$(cut -d' ' -f2 "$FAKE_LOG" | tr '\n' ' ')" == "fresh resume fresh " ]]; then
+  pass "a resumed file with the wrong sha256 is downloaded again fresh from the same source"
+else fail "resumed file that does not verify"; cat "$FAKE_LOG" >&2; fi
+
+start cap
+SECONDS=$((budget_seconds - 10))
+if (fetch f "$want" https://good.test/f) 2>/dev/null && kept \
+  && max=$(cut -d' ' -f3 "$FAKE_LOG") && [[ "$max" -le 10 && "$max" -ge 9 ]]; then
+  pass "an attempt's --max-time is capped at the time left in the budget"
+else fail "--max-time cap"; cat "$FAKE_LOG" >&2; fi
 
 start budget
 saved_budget=$budget_seconds

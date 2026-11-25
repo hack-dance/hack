@@ -15,6 +15,7 @@
 #   eval "$(bash term/scripts/provision-ghostty.sh)"              # shell
 #   bash term/scripts/provision-ghostty.sh --emit github >> "$GITHUB_ENV"
 #   bash term/scripts/provision-ghostty.sh --dir DIR --offline    # verify only
+#   HACK_DESKTOP_FETCH_SLOW_OK=1 bash term/scripts/provision-ghostty.sh # slow link
 #
 # Checksums: libghostty-vt files from
 # https://release.files.ghostty.org/libghostty-vt/1.0.1/SHA256SUMS (they match
@@ -73,18 +74,21 @@ zig_mirrors=(
 zig_source_tag=hack-desktop-provision-ghostty
 
 # Download limits. Each attempt gives up when it moves under min_speed
-# bytes/s for 30 s, or after 300 s, and the next attempt resumes the
-# partial file. A source gets `attempts` tries before the next source, and
-# all downloads in one run share a budget of budget_seconds, so a run with
-# every source slow still fails inside the CI job's timeout. Set
-# HACK_DESKTOP_FETCH_SLOW_OK=1 on a slow link: no speed floor, no time caps.
+# bytes/s for speed_seconds, or after attempt_seconds, and the next attempt
+# resumes the partial file. A source gets `attempts` tries before the next
+# source, and all downloads in one run share a budget of budget_seconds, so
+# a run with every source slow still fails inside the CI job's timeout.
+# HACK_DESKTOP_FETCH_SLOW_OK=1 is for a slow link: no time caps or budget,
+# and only a connection that sends nothing for 5 minutes is given up on.
 min_speed=51200
+speed_seconds=30
 attempt_seconds=300
 attempts=3
 retry_delay=5
 budget_seconds=900
 if [[ "${HACK_DESKTOP_FETCH_SLOW_OK:-}" == 1 ]]; then
-  min_speed=0
+  min_speed=1
+  speed_seconds=300
   attempt_seconds=0
   budget_seconds=0
 fi
@@ -108,7 +112,7 @@ curl_once() {
   local -a args
   args=(--fail --location --silent --show-error --proto '=https' --proto-redir '=https'
     --connect-timeout 15)
-  if [[ "$min_speed" -gt 0 ]]; then args+=(--speed-limit "$min_speed" --speed-time 30); fi
+  args+=(--speed-limit "$min_speed" --speed-time "$speed_seconds")
   if [[ "$3" -gt 0 ]]; then args+=(--max-time "$3"); fi
   if [[ -s "$1" ]]; then args+=(--continue-at -); fi
   curl "${args[@]}" -o "$1" "$2"
@@ -217,7 +221,7 @@ main() {
       --dir) dir=${2:?--dir needs a directory}; shift 2 ;;
       --emit) emit=${2:?--emit needs shell or github}; shift 2 ;;
       --offline) offline=true; shift ;;
-      -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+      -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
       *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
   done

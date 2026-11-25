@@ -49,3 +49,24 @@ test("a runtime that is not running names the next commands without claiming wha
   expect(hint).not.toContain("containers are running");
   expect(hint).not.toContain("confirm that the native runtime is stopped");
 });
+
+test("a refused same-boot recovery names a working sequence, not a fresh home (HACK-2097)", () => {
+  const hint = nativeRecoveryGuidance("graph_live_owner_recovery");
+  expect(hint).toContain("Data and evidence are kept");
+  expect(hint).toContain("run hack down --recover again");
+  expect(hint).toContain(
+    "native-candidate.md#explicit-cleanup-after-a-dead-foreground-owner"
+  );
+  expect(hint).toContain("keeps the data in this home");
+  // Not every exited owner had an unsettled start, and the explicit cleanup
+  // does not admit a restore or restart in progress.
+  expect(hint).not.toContain("never settled");
+  expect(hint).toContain("cannot be recovered in this boot");
+  expect(hint).toContain("an owner that died during its own stop");
+  expect(hint).toContain(
+    "An owner that died while restoring or restarting a retained run has no supported retirement"
+  );
+  // The old answer abandoned the run: a second checkout in a fresh home.
+  expect(hint).not.toContain("separate project checkout");
+  expect(hint).not.toContain("fresh native home");
+});

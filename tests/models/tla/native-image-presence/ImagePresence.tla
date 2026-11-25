@@ -1,8 +1,10 @@
 -------------------------- MODULE ImagePresence --------------------------
-CONSTANT TrustReceipt, TrustExpired
+EXTENDS Naturals
+CONSTANT TrustReceipt, TrustExpired, EarlyDigest
+\* reads counts full archive passes that hash content before an upload or success.
 VARIABLES phase, source, receipt, guest, archive, verified, uploaded, observed,
-          mode, recorded, online, chose
-imageVars == <<phase, source, receipt, guest, archive, verified, uploaded, observed>>
+          mode, recorded, online, chose, reads
+imageVars == <<phase, source, receipt, guest, archive, verified, uploaded, observed, reads>>
 tagVars == <<mode, recorded, online, chose>>
 vars == <<imageVars, tagVars>>
 
@@ -15,6 +17,7 @@ Init ==
     /\ verified = FALSE
     /\ uploaded = FALSE
     /\ observed = FALSE
+    /\ reads = 0
     /\ mode \in {"digest", "normal", "refresh", "offline"}
     /\ recorded \in {"none", "fresh", "expired"}
     /\ online \in BOOLEAN
@@ -24,12 +27,13 @@ Evict ==
     /\ phase \in {"begin", "ready"}
     /\ guest = "present"
     /\ guest' = "absent"
-    /\ UNCHANGED <<phase, source, receipt, archive, verified, uploaded, observed, tagVars>>
+    /\ UNCHANGED <<phase, source, receipt, archive, verified, uploaded, observed, reads, tagVars>>
 
 Begin ==
     /\ phase = "begin"
     /\ phase' = IF source = "explicit" THEN "verify"
                 ELSE IF mode = "digest" THEN "readback" ELSE "tag"
+    /\ reads' = IF source = "explicit" THEN 1 ELSE 0
     /\ UNCHANGED <<source, receipt, guest, archive, verified, uploaded, observed, tagVars>>
 
 Expire ==
@@ -50,7 +54,7 @@ ResolveTag ==
                  ELSE IF mode # "offline" /\ online THEN "registry"
                  ELSE IF mode # "refresh" /\ recorded # "none" THEN "offline" ELSE "none"
     /\ phase' = IF chose' = "none" THEN "refused" ELSE "readback"
-    /\ UNCHANGED <<source, receipt, guest, archive, verified, uploaded, observed, mode, recorded, online>>
+    /\ UNCHANGED <<source, receipt, guest, archive, verified, uploaded, observed, reads, mode, recorded, online>>
 
 Readback ==
     /\ phase = "readback"
@@ -63,12 +67,14 @@ Readback ==
                    [] OTHER -> "verify"
     /\ observed' = (receipt \notin {"foreign", "wrong-pin"} /\
                      (receipt = "complete" \/ chose # "none") /\ guest = "present")
+    /\ reads' = IF EarlyDigest /\ phase' = "verify" THEN reads + 1 ELSE reads
     /\ UNCHANGED <<source, receipt, guest, archive, verified, uploaded, tagVars>>
 
 Verify ==
     /\ phase = "verify"
     /\ phase' = IF archive = "clean" THEN "verified" ELSE "refused"
     /\ verified' = (archive = "clean")
+    /\ reads' = reads + 1
     /\ UNCHANGED <<source, receipt, guest, archive, uploaded, observed, tagVars>>
 
 Reconcile ==
@@ -78,7 +84,7 @@ Reconcile ==
                    [] guest = "present" -> "ready"
                    [] OTHER -> "upload"
     /\ observed' = (receipt \notin {"foreign", "wrong-pin"} /\ guest = "present")
-    /\ UNCHANGED <<source, receipt, guest, archive, verified, uploaded, tagVars>>
+    /\ UNCHANGED <<source, receipt, guest, archive, verified, uploaded, reads, tagVars>>
 
 Upload ==
     /\ phase = "upload"
@@ -86,12 +92,12 @@ Upload ==
     /\ guest' = "present"
     /\ uploaded' = TRUE
     /\ observed' = TRUE
-    /\ UNCHANGED <<source, receipt, archive, verified, tagVars>>
+    /\ UNCHANGED <<source, receipt, archive, verified, reads, tagVars>>
 
 Create ==
     /\ phase = "ready"
     /\ phase' = IF guest = "present" THEN "created" ELSE "create_refused"
-    /\ UNCHANGED <<source, receipt, guest, archive, verified, uploaded, observed, tagVars>>
+    /\ UNCHANGED <<source, receipt, guest, archive, verified, uploaded, observed, reads, tagVars>>
 
 Done == /\ phase \in {"created", "refused", "create_refused"} /\ UNCHANGED vars
 
@@ -113,4 +119,7 @@ TagSafe ==
 NeverEvictionRefusal == phase # "create_refused"
 
 NeverSkipsRead == ~(phase = "ready" /\ ~verified)
+
+\* A cached archive is hashed by exactly one pass, validation, before upload or success.
+CachedSingleRead == source = "cached" => reads <= 1
 =============================================================================

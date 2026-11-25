@@ -283,6 +283,13 @@ import {
   HackCliError,
   okResult,
 } from "../lib/cli-result.ts";
+import {
+  type ComposeClientCapture,
+  openComposeClientCapture,
+  writeComposeClientFailure,
+  writeComposeClientQuestions,
+  writeComposeClientWarnings,
+} from "../lib/compose-client-output.ts";
 import { runningComposeDirectAccess } from "../lib/compose-direct-access.ts";
 import {
   buildComposeDownFailure,
@@ -349,8 +356,10 @@ import {
   shouldResolveComposeProjectName,
 } from "../lib/compose-project-name.ts";
 import {
+  composeEnvPlainValues,
   composeEnvValuesToRedact,
   composePsTextFallbackAllowed,
+  composeQuoteRedactValues,
   parseComposePsJson,
   readComposePs,
   readComposePsResult,
@@ -2220,6 +2229,8 @@ export async function resolveModernComposeEnvOverrides(opts: {
     Record<string, Readonly<Record<string, string>>>
   >;
   readonly effectiveEnvName: string | null;
+  /** See composeEnvPlainValues; absent means every added value is redacted. */
+  readonly plainValues?: readonly string[];
 } | null> {
   const modern = await resolveProjectEnvConfig({
     projectRoot: opts.project.projectRoot,
@@ -2277,6 +2288,17 @@ export async function resolveModernComposeEnvOverrides(opts: {
     : modern.globalEnv;
   // Fail closed before any write or spawn when Compose could not start.
   assertComposeSpawnEnvFits({ env: composeEnv });
+  const plainValues = composeEnvPlainValues({
+    scopes: [
+      { env: modern.globalEnv, metadata: modern.effectiveMetadata.global },
+      ...Object.entries(modern.serviceEnv).map(([service, env]) => ({
+        env,
+        metadata: Object.hasOwn(modern.effectiveMetadata, service)
+          ? modern.effectiveMetadata[service]
+          : undefined,
+      })),
+    ],
+  });
   if (override === null) {
     if (opts.persist !== false) {
       await clearComposeEnvOverride({
@@ -2289,6 +2311,7 @@ export async function resolveModernComposeEnvOverrides(opts: {
       lifecycleEnv,
       preflightEnvByService,
       effectiveEnvName: modern.selection.effectiveEnv,
+      plainValues,
     };
   }
 
@@ -2304,6 +2327,7 @@ export async function resolveModernComposeEnvOverrides(opts: {
     lifecycleEnv,
     preflightEnvByService,
     effectiveEnvName: modern.selection.effectiveEnv,
+    plainValues,
   };
 }
 
@@ -2396,6 +2420,8 @@ async function resolveComposeEnvOverrides(opts: {
     Record<string, Readonly<Record<string, string>>>
   >;
   readonly effectiveEnvName: string | null;
+  /** See composeEnvPlainValues; absent means every added value is redacted. */
+  readonly plainValues?: readonly string[];
 }> {
   await maybePromptLegacyProjectEnvMigration({
     project: opts.project,
@@ -9184,6 +9210,7 @@ async function runResolvedComposeUp({
     });
   lifecycleSignalCleanup?.dispose();
   let signalCleanup = installOperationSignalCleanup();
+  let clientOutput: ComposeClientCapture | undefined;
   try {
     // After `up.before` hooks, which may start the engine, open the tunnel
     // DOCKER_HOST needs or create a shared network, and before any pull: name
@@ -9270,6 +9297,13 @@ async function runResolvedComposeUp({
     if (!progress) {
       reportComposeStartupBudget({ budgets, detach });
     }
+    // Human detached starts print Hack's rows instead of the client's lines.
+    clientOutput = progress ? openComposeClientCapture() : undefined;
+    // The quoted lines keep values the env layers mark non-secret.
+    const quoteRedactValues = composeQuoteRedactValues({
+      redactValues: preflightRedactValues,
+      plainValues: envOverrides.plainValues,
+    });
     const upPhase = trackComposeStartupPhase();
     const launch = async (localFiles: readonly string[]) => {
       const composeFilesWithEnv = remoteStartup
@@ -9334,11 +9368,15 @@ async function runResolvedComposeUp({
                 ? resolveAutostartTrustedTlsBinds
                 : undefined,
             beforeCreate: async () => {
-              await verifyOwnership();
-              await scopedMutation?.stage();
-              await publishRuntimeSelection();
-              await recordLaunchCheckout();
-              await engine.verify();
+              const prepare = async () => {
+                await verifyOwnership();
+                await scopedMutation?.stage();
+                await publishRuntimeSelection();
+                await recordLaunchCheckout();
+                await engine.verify();
+              };
+              // Its warnings must not land on the transient `images` wait.
+              await (progress ? progress.quiet(prepare) : prepare());
             },
             onCreateDispatched: () => {
               composeDispatched = true;
@@ -9387,13 +9425,18 @@ async function runResolvedComposeUp({
             startupTimeoutMs,
             imageTimeoutMs: budgets.imageTimeoutMs,
             startupCeilingMs: budgets.startupCeilingMs,
-            onStartupPhase: upPhase.onStartupPhase,
+            onStartupPhase: (phase) => {
+              upPhase.onStartupPhase(phase);
+              progress?.phase(phase);
+            },
             onStartupProgress: upPhase.onStartupProgress,
             onStartupStalled: upPhase.onStartupStalled,
+            onStartupNotice: progress?.notice,
             composeFiles: composeFilesWithEnv,
             composeProject: composeProjectName,
             profiles,
             detach,
+            clientOutput,
             cwd: dirname(project.composeFile),
             env: envOverrides.env,
             routeStdoutToStderr: json,
@@ -9429,6 +9472,7 @@ async function runResolvedComposeUp({
       });
     };
     const guarded = await launchWithEnv().finally(async () => {
+      progress?.settle();
       foregroundReceiptStop.abort();
       try {
         await settlePublication();
@@ -9517,8 +9561,25 @@ async function runResolvedComposeUp({
           exitCode: upCode,
         });
       }
+      if (clientOutput && upCode !== 130 && upCode !== 143) {
+        // Enough of the client's own words to diagnose the failure.
+        writeComposeClientFailure({
+          capture: clientOutput,
+          phase: upPhase.phase(),
+          redactValues: quoteRedactValues,
+        });
+      }
       logger.error({ message: failure.message });
       return upCode;
+    }
+    if (clientOutput) {
+      writeComposeClientWarnings(
+        clientOutput.warnings({ redactValues: quoteRedactValues })
+      );
+      // Compose went on with its default answer to each of these.
+      writeComposeClientQuestions(
+        clientOutput.questions({ redactValues: quoteRedactValues })
+      );
     }
 
     const containersStartedAt = performance.now();
@@ -9742,6 +9803,8 @@ async function runResolvedComposeUp({
     } finally {
       foregroundTermination.guard?.dispose();
       signalCleanup.dispose();
+      // Every Compose phase that fed the capture has settled by now.
+      clientOutput?.close();
     }
   }
 }

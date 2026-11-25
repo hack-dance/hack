@@ -104,13 +104,14 @@ function nativeBuildFieldList(): string {
   return `${NATIVE_BUILD_FIELDS.slice(0, -1).join(", ")} and ${NATIVE_BUILD_FIELDS.at(-1)}`;
 }
 
-/** The `unsupported_build` phrase while `HACK_NATIVE_BUILDS=1` is set. */
+/** The `unsupported_build` phrase while native builds are on (the default). */
 const NATIVE_BUILDS_PHRASE = `a Compose build field other than ${nativeBuildFieldList()}, or image together with build`;
 
 /** Options shared by the classifier, its readers and its messages. */
 export type ComposeBackendFeatureOptions = {
   /**
-   * Whether native builds are enabled (`HACK_NATIVE_BUILDS=1`). Then a build
+   * Whether native builds are on (the default; `HACK_NATIVE_BUILDS=0` turns
+   * them off). Then a build
    * is a Compose-backend feature only when it declares a field native builds
    * do not implement, or `image` together with `build`; native build
    * admission reviews the rest, including `args` and the managed-secret check.
@@ -187,7 +188,7 @@ function isUnsupportedBuild(
 /**
  * A basic build is one the import preview's build mapper accepts for a service
  * that names no image. It does not keep the project on the Compose backend,
- * but without `HACK_NATIVE_BUILDS=1` native image-project `up` refuses it
+ * but with `HACK_NATIVE_BUILDS=0` native image-project `up` refuses it
  * (`NATIVE_BUILDS_DISABLED_REFUSAL`).
  */
 function isBasicBuild(service: Record<string, unknown>): boolean {
@@ -653,7 +654,7 @@ export function basicBuildNextStep(
           "--path",
           projectRoot,
         ]);
-  return `Set HACK_NATIVE_BUILDS=1 to build it in the native runtime, or preview the authored native conversion with \`${preview}\``;
+  return `Unset HACK_NATIVE_BUILDS (it is 0) to build it in the native runtime, or preview the authored native conversion with \`${preview}\``;
 }
 
 /**

@@ -101,6 +101,39 @@ async function readOwner(
 ) {
   const file = ownerFile(directories, run);
   await privateDirectory(join(directories.at(-1) ?? "", run));
+  // The provider receipt binds the run to a checkout/branch namespace hash.
+  const state = await readReplaceablePrivateFile({
+    ...file,
+    path: join(directories.at(-1) ?? "", run, "state.json"),
+    maxBytes: 1024 * 1024,
+  });
+  const receipt: unknown = state ? JSON.parse(state.text) : null;
+  const provenance =
+    isRecord(receipt) && isRecord(receipt.review)
+      ? receipt.review.provenance
+      : receipt;
+  if (
+    isRecord(provenance) &&
+    provenance.run === run &&
+    isRecord(receipt) &&
+    receipt.phase === "removed" &&
+    isRecord(receipt.resources) &&
+    Object.values(receipt.resources).every(
+      (resource) => isRecord(resource) && resource.phase === "removed"
+    )
+  ) {
+    const pending = await lstat(
+      join(directories.at(-1) ?? "", run, "state.pending")
+    ).catch((error: unknown) => {
+      if (isRecord(error) && error.code === "ENOENT") {
+        return null;
+      }
+      throw error;
+    });
+    if (!pending) {
+      return null;
+    }
+  }
   const owner = await readReplaceablePrivateFile({ ...file, maxBytes: 16_384 });
   const value: unknown =
     owner && (owner.mode & 0o077) === 0 ? JSON.parse(owner.text) : null;
@@ -127,17 +160,6 @@ async function readOwner(
     throw refused();
   }
 
-  // The provider receipt binds the run to a checkout/branch namespace hash.
-  const state = await readReplaceablePrivateFile({
-    ...file,
-    path: join(directories.at(-1) ?? "", run, "state.json"),
-    maxBytes: 1024 * 1024,
-  });
-  const receipt: unknown = state ? JSON.parse(state.text) : null;
-  const provenance =
-    isRecord(receipt) && isRecord(receipt.review)
-      ? receipt.review.provenance
-      : receipt;
   const hash = new Bun.CryptoHasher("sha256");
   if (value.branch !== null) {
     hash.update("hack-native-branch-namespace-v1\0");
@@ -170,7 +192,7 @@ async function readOwner(
 }
 
 async function scanStore(nativeHome: string, store: Store) {
-  const runs: Awaited<ReturnType<typeof readOwner>>[] = [];
+  const runs: NonNullable<Awaited<ReturnType<typeof readOwner>>>[] = [];
   let missing = 0;
   let incomplete = false;
   let directories: string[];
@@ -196,7 +218,15 @@ async function scanStore(nativeHome: string, store: Store) {
         continue;
       }
       try {
-        runs.push(await readOwner(directories, store, entry.name, nativeHome));
+        const owner = await readOwner(
+          directories,
+          store,
+          entry.name,
+          nativeHome
+        );
+        if (owner) {
+          runs.push(owner);
+        }
       } catch {
         missing += 1;
       }

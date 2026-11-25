@@ -149,6 +149,23 @@ test("native inventory attributes unregistered Compose branches and authored pro
         }),
       ])
     );
+    const removedRun = "f".repeat(32);
+    const removedDir = join(home, ".hack-local", "run", "graphs", removedRun);
+    await mkdir(removedDir, { mode: 0o700 });
+    await Bun.write(
+      join(removedDir, "state.json"),
+      JSON.stringify({
+        run: removedRun,
+        phase: "removed",
+        resources: { db: { phase: "removed" } },
+      })
+    );
+    expect((await nativeInventory(root, readers)).issues).toEqual([]);
+    await Bun.write(join(removedDir, "state.pending"), "fixture");
+    expect((await nativeInventory(root, readers)).issues).toEqual([
+      expect.stringContaining("unverifiable checkout receipt"),
+    ]);
+    await rm(join(removedDir, "state.pending"));
     volumeRun = UNKNOWN;
     await mkdir(join(home, ".hack-local", "run", "graphs", UNKNOWN), {
       mode: 0o700,

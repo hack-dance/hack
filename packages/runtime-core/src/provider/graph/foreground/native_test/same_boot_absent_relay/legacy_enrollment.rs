@@ -272,7 +272,7 @@ fn exercise(previous_boot: bool, publisher_exit: &str) {
             "stop-legacy-boot",
             binary,
             &candidate,
-            &["runtime", "down", "--json"],
+            &["runtime", "down", "--force", "--json"],
             deadline,
         );
         super::super::dependency_rebind::checked_cli(

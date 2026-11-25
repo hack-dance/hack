@@ -410,10 +410,12 @@ fn a_reading_is_kept_only_after_a_successful_stop_and_never_changes_its_result()
 #[test]
 fn down_reads_the_memory_peak_before_the_stop_and_keeps_it_only_after() {
     let source = include_str!("../lifecycle.rs");
-    let down = source.find("pub fn down(candidate: &Candidate)").unwrap();
+    let down = source
+        .find("pub fn down(candidate: &Candidate, on_live: LiveRuns)")
+        .unwrap();
     let wrapper = &source[down..down + source[down..].find("\n}\n").unwrap()];
     assert!(wrapper.contains("crate::timings::Step::VmStop"));
-    assert!(wrapper.contains("down_observed(candidate, None)"));
+    assert!(wrapper.contains("down_observed(candidate, None, on_live)"));
     let down = source
         .find("fn down_observed(\n    candidate: &Candidate,")
         .unwrap();
@@ -434,6 +436,16 @@ fn down_reads_the_memory_peak_before_the_stop_and_keeps_it_only_after() {
     assert!(build < first && first < defined && first < second);
     assert!(read < second && second < released && released < stop);
     assert_eq!(body.matches("release(&owner)?;").count(), 3);
+    // HACK-2477: a plain down refuses live runs of a running pool under the lease, after
+    // the build check and before the stop sample, any release or the guest stop.
+    let refuse = body
+        .find("if !stopped && on_live == LiveRuns::Refuse {\n        pool_users::refuse_live_runs(&candidate.state_root)?;")
+        .unwrap();
+    let sample = body
+        .find("admission::opening::StopSample::beside(")
+        .unwrap();
+    assert!(build < refuse && refuse < sample && refuse < defined && refuse < live);
+    assert_eq!(body.matches("refuse_live_runs(").count(), 1);
     // The record is written from one place, after every stop path in `down`.
     assert!(body[keep..].find("stop_silent_guest").is_none());
     assert_eq!(source.matches("guest_memory_peak::record(").count(), 1);

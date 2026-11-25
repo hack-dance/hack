@@ -301,7 +301,12 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
     let prior_process = crate::provider::identity::observe(owner.child.id() as i32).unwrap();
     owner.child.kill().unwrap();
     owner.wait(deadline);
-    assert_eq!(lifecycle::down(&candidate).unwrap().phase, "stopped");
+    assert_eq!(
+        lifecycle::down(&candidate, lifecycle::LiveRuns::Interrupt)
+            .unwrap()
+            .phase,
+        "stopped"
+    );
     let new_boot = lifecycle::up(&candidate).unwrap().guest_boot_id.unwrap();
     assert_ne!(new_boot, old_boot);
     let mut sibling_owner = Process::start(

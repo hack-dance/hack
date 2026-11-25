@@ -741,7 +741,7 @@ regression exercises the stale boot refusal with an owned development VM.
 
 ## Native pool stop under a live run
 
-`native-pool-stop/PoolStop.tla` checks HACK-2456: a VM pool that stops (`runtime down`)
+`native-pool-stop/PoolStop.tla` checks HACK-2456: a VM pool that stops (`runtime down --force`)
 or dies (VM or provider crash, host reboot) while a project's graph is ready. It
 models:
 
@@ -751,10 +751,17 @@ models:
 
 The user commands are the ones the CLI names: `hack up`, `hack down` /
 `hack down --recover` and `hack native recover`. Faults are bounded to three:
-`runtime down`, a crash, an owner crash, and a boot by something else (another
-project's `hack up`, or `runtime up` by hand). A live owner notices when its guest
-is gone (the pool stopped, or a later boot replaced it) and exits without retiring its
-publication.
+`runtime down` (plain or `--force`), a crash, an owner crash, and a boot by something
+else (another project's `hack up`, or `runtime up` by hand). A live owner notices when
+its guest is gone (the pool stopped, or a later boot replaced it) and exits without
+retiring its publication.
+
+Since HACK-2477 a plain `runtime down` refuses while the run is live (a ready receipt,
+whatever its owner or boot) and changes nothing (`RuntimeDownRefused`). Only
+`runtime down --force` (`RuntimeDownForce`) stops the pool under a live run, exactly as
+every `runtime down` did before. The refusal is checked under the provider lease, which
+graph starts take before they write a live receipt, so the check and the stop are one
+step. `NoDownOverLiveRun` says a plain down never stopped the pool under a live run.
 
 `NoDeadEnd` says that from every reachable state some named command can act, or
 the owner is still noticing its guest is gone. `Recovers` (`[]<>Settled` under weak
@@ -764,7 +771,7 @@ publication left. `BootBoundUnreached` shows the boot bound (8) never limits a c
 
 | Control | Switches | Result |
 | --- | --- | --- |
-| `positive` | stopped-pool recovery and recovery from any earlier boot; something else may boot the pool; a fault may strike between a recovery's boot and its graph recovery | 210 states; `NoDeadEnd`, `BootBoundUnreached` and `Recovers` hold |
+| `positive` | stopped-pool recovery and recovery from any earlier boot; something else may boot the pool; a fault may strike between a recovery's boot and its graph recovery | 210 states; `NoDeadEnd`, `BootBoundUnreached`, `NoDownOverLiveRun` and `Recovers` hold |
 | `negative` | `next` before HACK-2456 | `NoDeadEnd` fails in an `OwnerCrash` or `OwnerNotices` state: stopped pool, ready run, dead owner, publication left |
 | `by-hand` | `next`, counting an unnamed `runtime up` | fails in a `RuntimeUp` state with `boot = 3`, `runBoot = 1` |
 | `strict` | stopped-pool recovery with the old predecessor-only rule, while something else boots the pool | fails in `RecoverStopped` (or `RuntimeUp`) with `boot = 3`, `runBoot = 1` |
@@ -772,10 +779,11 @@ publication left. `BootBoundUnreached` shows the boot bound (8) never limits a c
 | `https` | recovery from any earlier boot with every fault, for a project with HTTPS routes (`Https`) | 608 states; all hold, including `NoArchiveOverListener` |
 | `https-no-retire` | `https` controls: the shared HTTPS owner keeps running after its boot ended | fails in `RecoverRunning` (or `RecoverStopped`): pool running, `https = "live"` bound to the old boot, `fin = TRUE` |
 | `https-archive` | the previous-boot archive cannot prove the owner quiescent | fails with `https = "records"`, `fin = TRUE`, pool running |
-| `https-stopped` | `hack down --recover` does not start a stopped pool for a pending finalization | `NoDeadEnd` fails with a stopped pool, a retained run, pending finalization, retired HTTPS records, a free port and no publication. The final step is `TimeWaitEnds`, `ListenerExits`, `RuntimeDown` or `PoolRecover`. |
+| `https-stopped` | `hack down --recover` does not start a stopped pool for a pending finalization | `NoDeadEnd` fails with a stopped pool, a retained run, pending finalization, retired HTTPS records, a free port and no publication. The final step is `TimeWaitEnds`, `ListenerExits`, `RuntimeDown`, `RuntimeDownForce` or `PoolRecover`. |
 | `https-finish-bound` | `https`, but a completed recovery's archive may run only in the boot the recovery ran in (`FinishAnyBoot = FALSE`) | fails once that boot ends with the archive still owed: `https = "records"`, `fin = TRUE`, pool running |
 | `reuse-no-check` | `https`, with the archive's port claim binding with address reuse but of the wildcard alone, without the exact claim of every local address (`ListenerCheck = FALSE`) | `NoArchiveOverListener` fails: the archive runs while another process listens on the port |
 | `idle-restart` | `positive`, plus another project's `up` that stops the running pool to add its share when the pool is idle (`IdleRestart`, HACK-2535) | passes: `NoDeadEnd`, `Recovers` and `NoRestartOverLiveRun` (a run that became live before the stop is never stopped by it) |
+| `down-no-refusal` | `positive`, but a plain `runtime down` stops the pool under a live run (`DownRefuses = FALSE`, `next` before HACK-2477) | `NoDownOverLiveRun` fails in a `RuntimeDown` state: pool stopped, run ready, `downOverLive = TRUE` |
 | `idle-restart-one-check` | `idle-restart` without the second idle check right before the guest stops (`SecondCheck = FALSE`) | `NoRestartOverLiveRun` fails: a start that took no lease and turned live between the first check and the stop is stopped. In the code every start takes the lease the stop holds, so this shows what the second check guards on its own, not a race the code has |
 
 `Recovers` also fails on `next` (TLC exit 13: the behavior stutters in the dead end).
@@ -796,7 +804,8 @@ and absent-publication cleanup after a host reboot.
 
 | Model action | Implementation boundary |
 | --- | --- |
-| `RuntimeDown` | `provider/lifecycle.rs::down`, which reports `interrupted_runs` (`lifecycle/pool_users.rs::live_graph_runs`) |
+| `RuntimeDown`, `RuntimeDownRefused` | `runtime down`: `provider/lifecycle.rs::down` with `LiveRuns::Refuse`, which calls `lifecycle/pool_users.rs::refuse_live_runs` (over `live_graph_runs`) under the provider lease, before the stop sample, any release or the guest stop, unless the pool is already stopped |
+| `RuntimeDownForce` | `runtime down --force`: `provider/lifecycle.rs::down` with `LiveRuns::Interrupt`, which reports `interrupted_runs` (`lifecycle/pool_users.rs::live_graph_runs`) |
 | `RecoverStopped` | `inspectOrStartStoppedPool` / `StoppedPoolStarted` in `native-project-down.ts`; `selectNativeStartupRecoveringStoppedPool` in `native-project-start.ts` |
 | `RecoverRunning` | `resumeSelectedOwner` → `recover-cleanup` → `retire-recovered-publisher`; `CanRecover` without `Strict` is `graph/dead_owner_cleanup.rs` `recovery_selection` / `execute` with `graph/boot_match.rs` over `provider/boot_history.rs` |
 | `Start` / `Stop` | ordinary `hack up` (fresh or retained) and `hack down` |

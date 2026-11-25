@@ -224,7 +224,12 @@ fn selected_source_device_rebind_restores_same_run_and_two_ordinary_generations(
     let old_owner = Owner::load(&candidate).unwrap();
     owner.child.kill().unwrap();
     owner.wait(deadline);
-    assert_eq!(lifecycle::down(&candidate).unwrap().phase, "stopped");
+    assert_eq!(
+        lifecycle::down(&candidate, lifecycle::LiveRuns::Interrupt)
+            .unwrap()
+            .phase,
+        "stopped"
+    );
     lifecycle::up(&candidate).unwrap();
     let current = Owner::load(&candidate).unwrap();
     assert_eq!(current.project_share.as_ref(), Some(&share));

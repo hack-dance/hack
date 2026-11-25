@@ -348,7 +348,7 @@ fn exact_partial_stop_recovers_only_on_immediate_successor_boot() {
         .unwrap()
         .guest_boot_id
         .unwrap();
-    lifecycle::down(&candidate).unwrap();
+    lifecycle::down(&candidate, lifecycle::LiveRuns::Interrupt).unwrap();
     lifecycle::up(&candidate).unwrap();
     let successor = state::Owner::load(&candidate).unwrap();
     assert_eq!(
@@ -416,7 +416,12 @@ fn exact_partial_stop_recovers_only_on_immediate_successor_boot() {
     assert_eq!(removed["phase"], "removed");
     let sibling_removed = graph::cleanup(&candidate, &sibling_run, true).unwrap();
     assert_eq!(sibling_removed.phase, "removed");
-    assert_eq!(lifecycle::down(&candidate).unwrap().phase, "stopped");
+    assert_eq!(
+        lifecycle::down(&candidate, lifecycle::LiveRuns::Interrupt)
+            .unwrap()
+            .phase,
+        "stopped"
+    );
     assert!(started.elapsed() < Duration::from_secs(270));
     fs::remove_file(socket).unwrap();
     fs::remove_file(armed).unwrap();

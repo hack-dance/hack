@@ -159,12 +159,13 @@ const LIVE_PHASES: [(&str, &[&str]); 2] = [
 /// Graph runs, Compose and native-authored, whose receipt says they are live,
 /// sorted (HACK-2456).
 ///
-/// `runtime down` names these when it stops a running pool under them: their
-/// containers stop with the guest, and `hack up` (or `hack down --recover`) in each
-/// project starts the pool again and recovers the run with its data kept. This is a
-/// report, not a refusal, and like the rest of this module it reads without a lock:
-/// `None` when an inventory or a receipt cannot be read, so the caller says it could
-/// not tell instead of naming nothing.
+/// `runtime down` refuses while there are any and names them (HACK-2477,
+/// [`refuse_live_runs`]); `runtime down --force` stops the pool under them and reports
+/// them: their containers stop with the guest, and `hack up` (or `hack down
+/// --recover`) in each project starts the pool again and recovers the run with its data
+/// kept. Like the rest of this module it reads without a lock: `None` when an inventory
+/// or a receipt cannot be read, so the caller says it could not tell instead of naming
+/// nothing.
 pub(super) fn live_graph_runs(state_root: &Path) -> Option<Vec<String>> {
     let mut live = Vec::new();
     for (directory, phases) in LIVE_PHASES {
@@ -201,6 +202,29 @@ pub(super) fn live_graph_runs(state_root: &Path) -> Option<Vec<String>> {
     live.sort();
     Some(live)
 }
+/// The refusal code of `runtime down` while graph runs are live (HACK-2477).
+pub(super) const DOWN_LIVE_RUNS: &str = "runtime_down_live_runs";
+/// The refusal code of `runtime down` when the receipts cannot be read (HACK-2477).
+pub(super) const DOWN_RUNS_UNREAD: &str = "runtime_down_runs_unreadable";
+
+/// Refuse a plain `runtime down` of a running pool while any graph run is live
+/// ([`live_graph_runs`]), naming the runs, or when the receipts cannot be read
+/// (HACK-2477). Stopping the pool under them was the easy way into the stuck state
+/// HACK-2456 recovers from; `--force` stops it anyway and reports them. The caller holds
+/// the provider lease, and graph starts take that lease before they write a live
+/// receipt, so no run turns live between this check and the stop.
+pub(super) fn refuse_live_runs(state_root: &Path) -> Result<(), CandidateError> {
+    const LIVE: &str = "Native project runs are running in this pool (listed in live_runs), so runtime down stopped nothing. Run hack down in each project first, or runtime down --force to stop the pool under them; hack up then recovers each run with its data kept.";
+    const UNREAD: &str = "The native pool's project runs could not be read, so runtime down stopped nothing. Inspect runtime status, or run runtime down --force to stop the pool anyway; hack up then recovers each run with its data kept.";
+    match live_graph_runs(state_root) {
+        None => Err(CandidateError::new(DOWN_RUNS_UNREAD, UNREAD)),
+        Some(runs) if !runs.is_empty() => {
+            Err(CandidateError::new(DOWN_LIVE_RUNS, LIVE).with_live_runs(runs))
+        }
+        Some(_) => Ok(()),
+    }
+}
+
 /// The recovery intent a graph run directory may hold (`graph::dead_owner_cleanup`),
 /// and its staging file. A completed intent stays as history: it records
 /// `complete_sha256` and is not a pending operation.
@@ -340,6 +364,57 @@ mod tests {
         home.dir(&format!("run/graphs/{}", "e".repeat(32)));
         refused(&home, "could not be read");
     }
+    #[test]
+    fn runtime_down_refuses_live_or_unreadable_runs_and_names_them() {
+        let home = Home::new();
+        assert!(refuse_live_runs(&home.0).is_ok());
+        // Retained, removed and stopped runs hold no containers: down may stop the pool.
+        for (directory, run, phase) in [
+            ("run/graphs", "a", "stopped-data-retained"),
+            ("run/graphs", "b", "removed"),
+            ("run/native-graphs", "c", "stopped"),
+        ] {
+            let dir = home.dir(&format!("{directory}/{}", run.repeat(32)));
+            state::write(
+                &dir.join("state.json"),
+                &serde_json::json!({ "phase": phase }),
+            )
+            .unwrap();
+        }
+        assert!(refuse_live_runs(&home.0).is_ok());
+        // A running Compose run and a stopping native-authored run refuse, both named.
+        for (directory, run, phase) in [
+            ("run/graphs", "d", "ready-observed"),
+            ("run/native-graphs", "e", "stop-intent"),
+        ] {
+            let dir = home.dir(&format!("{directory}/{}", run.repeat(32)));
+            state::write(
+                &dir.join("state.json"),
+                &serde_json::json!({ "phase": phase }),
+            )
+            .unwrap();
+        }
+        let refused = refuse_live_runs(&home.0).unwrap_err();
+        assert_eq!(refused.code, DOWN_LIVE_RUNS);
+        assert!(refused.message_fixed);
+        assert!(refused.message.contains("--force"));
+        let json = serde_json::to_value(&refused).unwrap();
+        assert_eq!(
+            json["live_runs"],
+            serde_json::json!(["d".repeat(32), "e".repeat(32)])
+        );
+        // An unreadable receipt refuses without naming anything.
+        home.dir(&format!("run/graphs/{}", "f".repeat(32)));
+        let refused = refuse_live_runs(&home.0).unwrap_err();
+        assert_eq!(refused.code, DOWN_RUNS_UNREAD);
+        assert!(
+            serde_json::to_value(&refused)
+                .unwrap()
+                .get("live_runs")
+                .is_none()
+        );
+    }
+
     #[test]
     fn runtime_down_names_only_runs_whose_receipt_is_live() {
         let home = Home::new();

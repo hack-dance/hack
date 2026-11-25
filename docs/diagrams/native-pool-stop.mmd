@@ -11,16 +11,24 @@ stateDiagram-v2
     none --> ready : hack up
     retained --> ready : hack up
     ready --> retained : hack down
-    ready --> orphaned : runtime down, owner dies
+    ready --> ready : runtime down refused
+    ready --> orphaned : forced down, owner dies
     ready --> crashed : VM or provider dies
     crashed --> orphaned : hack native recover
-    orphaned --> recover : hack up, down --recover
+    orphaned --> recover : hack up, hack down
     state recover <<choice>>
     recover --> retained : [boot known, no HTTPS lease]
     recover --> finalizing : [boot known, HTTPS lease]
     recover --> stranded : [boot not known]
     finalizing --> retained : lease released or archived
 
+    note right of ready
+        runtime down refuses a live
+        run and names it; only
+        runtime down --force stops
+        the pool under it.
+        INV NoDownOverLiveRun.
+    end note
     note left of orphaned
         Receipt still ready-observed,
         owner dead, publication left.

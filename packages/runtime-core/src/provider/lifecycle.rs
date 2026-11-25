@@ -101,9 +101,9 @@ pub struct RuntimeStatus {
     /// provider (`socket_repairs`); absent when there were none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repaired_sockets: Option<socket_repairs::RepairedSockets>,
-    /// Only from `runtime down` of a running pool: graph runs, Compose and
-    /// native-authored, whose receipts were live when it stopped the pool under them
-    /// (HACK-2456). Their containers
+    /// Only from `runtime down --force` of a running pool (a plain `runtime down`
+    /// refuses instead, HACK-2477): graph runs, Compose and native-authored, whose
+    /// receipts were live when it stopped the pool under them (HACK-2456). Their containers
     /// stopped with the guest; `hack up` in each project starts the pool and recovers
     /// the run with its data kept. An empty list when there were none, absent otherwise
     /// or when the inventory could not be read (`interrupted_runs_unknown`).
@@ -2791,9 +2791,21 @@ fn provider_stopped(phase: &str, process_alive: Option<bool>) -> bool {
     STOPPED_PHASES.contains(&phase) && process_alive != Some(true)
 }
 
-pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
+/// What `runtime down` does when graph runs are live in the running pool (HACK-2477).
+/// Every caller names it: there is no default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveRuns {
+    /// Stop nothing and refuse, naming the live runs (`runtime down`): stopping the pool
+    /// under a project was the easy way into the stuck state of HACK-2456.
+    Refuse,
+    /// Stop the pool anyway and report the runs in `interrupted_runs` (`runtime down
+    /// --force`, and callers that stop the pool under a run on purpose, such as tests).
+    Interrupt,
+}
+
+pub fn down(candidate: &Candidate, on_live: LiveRuns) -> Result<RuntimeStatus, CandidateError> {
     crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
-        down_observed(candidate, None)
+        down_observed(candidate, None, on_live)
     })
 }
 
@@ -2806,9 +2818,11 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
 /// without the lease; it costs one read of the receipts.
 pub(super) fn stop_idle_pool(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
+        // `require_idle` refuses any live run itself, at both of its checks.
         down_observed(
             candidate,
             Some(&|| pool_users::require_idle(&candidate.state_root)),
+            LiveRuns::Interrupt,
         )
     })
 }
@@ -2818,9 +2832,15 @@ pub(super) fn stop_idle_pool(candidate: &Candidate) -> Result<RuntimeStatus, Can
 /// hostname authority and every publisher) then follow that second check, so a refusal
 /// at either check has changed nothing. Plain `down` releases them before it verifies
 /// the live guest, as before.
+///
+/// With [`LiveRuns::Refuse`] a running pool with a live graph run (or receipts that
+/// cannot be read) is refused under the lease, after the build check and before any
+/// effect: no sample, no release, no stop (HACK-2477). A stopped pool is not refused:
+/// nothing of it runs, and its down only releases the host side, as before.
 fn down_observed(
     candidate: &Candidate,
     idle: Option<&dyn Fn() -> Result<(), CandidateError>>,
+    on_live: LiveRuns,
 ) -> Result<RuntimeStatus, CandidateError> {
     // Status is read-only and idempotent down on an uninitialized pool creates nothing.
     let initial = status(candidate)?;
@@ -2835,6 +2855,9 @@ fn down_observed(
     }
     let mut owner = Owner::load(candidate)?;
     let stopped = provider_stopped(&owner.phase, initial.process_alive);
+    if !stopped && on_live == LiveRuns::Refuse {
+        pool_users::refuse_live_runs(&candidate.state_root)?;
+    }
     // When there is a pool to stop, one host sample is taken beside the stop, on its own
     // thread, so a start that follows soon need not wait out its admission window
     // (`admission::opening`). It is taken on the unowned basis, which claims nothing about
@@ -2868,9 +2891,9 @@ fn down_observed(
         release(&owner)?;
     }
     verify_live(candidate, &owner)?;
-    // Stopping a running pool stops every graph's containers with the guest. This is
-    // reported, not refused: a crash or host reboot ends the same way, and `hack up`
-    // recovers each run (HACK-2456).
+    // Stopping a running pool stops every graph's containers with the guest. Only a
+    // forced down gets here with live runs (HACK-2477); it reports them, as a crash or
+    // host reboot ends the same way, and `hack up` recovers each run (HACK-2456).
     let live = pool_users::live_graph_runs(&candidate.state_root);
     let peak = read_memory_peak(&candidate.state_root, &owner, |script, args, deadline| {
         agent::exec_until(
@@ -4613,7 +4636,10 @@ printf 'status=%s%s\n' "$status" "$left"
         assert_eq!(owner.token, after.token);
         assert_eq!(owner.storage, after.storage);
         assert_eq!(owner.overlay, after.overlay);
-        assert_eq!(down(&candidate).unwrap().phase, "stopped");
+        assert_eq!(
+            down(&candidate, LiveRuns::Interrupt).unwrap().phase,
+            "stopped"
+        );
         println!(
             "{}",
             json!({"provider_exit_recovered": true, "live_recovery_rejected": true,

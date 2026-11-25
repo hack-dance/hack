@@ -71,16 +71,25 @@
 \*   IdleRestart - the restart exists (FALSE in every older control).
 \*   SecondCheck - the stop checks idleness again right before the guest stops;
 \*                 FALSE is the broken control `idle-restart-one-check`.
+\*
+\* `runtime down` typed by hand (HACK-2477) refuses while a run is live and stops
+\* nothing; `runtime down --force` stops the pool under it, as every `runtime down`
+\* did before.
+\* downOverLive - a plain (unforced) `runtime down` stopped the pool under a live run.
+\*   DownRefuses - plain `runtime down` refuses a live run (TRUE is this change);
+\*                 FALSE is the broken control `down-no-refusal`.
 EXTENDS Naturals
 CONSTANTS Fixed, Strict, ByHand, OtherBoots, RecoveryFaults, MaxBoot, MaxFaults,
           Https, OwnerRetires, ArchiveWorks, FinalizeStopped, FinishAnyBoot,
-          ReuseBind, ListenerCheck, IdleRestart, SecondCheck
+          ReuseBind, ListenerCheck, IdleRestart, SecondCheck, DownRefuses
 
 VARIABLES pool, boot, run, runBoot, owner, pub, faults, recovering, https,
-          httpsBoot, fin, finBoot, port, overListener, restart, stoppedLive
+          httpsBoot, fin, finBoot, port, overListener, restart, stoppedLive,
+          downOverLive
 vars == <<pool, boot, run, runBoot, owner, pub, faults, recovering, https,
-          httpsBoot, fin, finBoot, port, overListener, restart, stoppedLive>>
-R == <<restart, stoppedLive>>
+          httpsBoot, fin, finBoot, port, overListener, restart, stoppedLive,
+          downOverLive>>
+R == <<restart, stoppedLive, downOverLive>>
 P == <<port, overListener, R>>
 H == <<https, httpsBoot, fin, finBoot, P>>
 
@@ -94,13 +103,14 @@ TypeOK ==
     /\ fin \in BOOLEAN /\ finBoot \in 0..MaxBoot
     /\ port \in {"free", "timewait", "listener"} /\ overListener \in BOOLEAN
     /\ restart \in {"none", "checked"} /\ stoppedLive \in BOOLEAN
+    /\ downOverLive \in BOOLEAN
 
 Init ==
     /\ pool = "stopped" /\ boot = 0 /\ run = "none" /\ runBoot = 0
     /\ owner = "none" /\ pub = FALSE /\ faults = 0 /\ recovering = FALSE
     /\ https = "none" /\ httpsBoot = 0 /\ fin = FALSE /\ finBoot = 0
     /\ port = "free" /\ overListener = FALSE
-    /\ restart = "none" /\ stoppedLive = FALSE
+    /\ restart = "none" /\ stoppedLive = FALSE /\ downOverLive = FALSE
 
 CanBoot == boot < MaxBoot
 \* Recovery of a dead owner's ready run in the current boot `b`.
@@ -110,9 +120,26 @@ CanRecover(b) ==
 
 \* --- Faults and environment (bounded) -------------------------------------
 Fault == faults < MaxFaults /\ (RecoveryFaults \/ ~recovering)
-\* `runtime down` while the run is live: the pool stops; the guest's containers
-\* go with it. It does not retire the foreground owner's publication.
+\* A run is live while its receipt is ready, whatever its owner or boot
+\* (`pool_users::live_graph_runs`); a retained run holds no containers.
+LiveRun == run = "ready"
+\* `runtime down` typed by hand (HACK-2477). It checks the live runs under the
+\* provider lease, which graph starts take before they write a live receipt, so the
+\* check and the stop are one step. With no live run it stops the pool.
 RuntimeDown ==
+    /\ Fault /\ pool = "running" /\ (DownRefuses => ~LiveRun)
+    /\ pool' = "stopped" /\ faults' = faults + 1
+    /\ downOverLive' = (downOverLive \/ LiveRun)
+    /\ UNCHANGED <<boot, run, runBoot, owner, pub, recovering>>
+    /\ UNCHANGED <<https, httpsBoot, fin, finBoot, port, overListener, restart, stoppedLive>>
+\* With a live run it refuses (`runtime_down_live_runs`, naming the run): nothing changes.
+RuntimeDownRefused ==
+    /\ DownRefuses /\ pool = "running" /\ LiveRun
+    /\ UNCHANGED vars
+\* `runtime down --force` while the run is live: the pool stops; the guest's
+\* containers go with it, and its JSON lists the run (`interrupted_runs`). It does not
+\* retire the foreground owner's publication.
+RuntimeDownForce ==
     /\ Fault /\ pool = "running"
     /\ pool' = "stopped" /\ faults' = faults + 1
     /\ UNCHANGED <<boot, run, runBoot, owner, pub, recovering>> /\ UNCHANGED H
@@ -254,7 +281,7 @@ Idle == run /= "ready" /\ ~fin /\ ~recovering
 RestartCheck ==
     /\ IdleRestart /\ Fault /\ restart = "none" /\ pool = "running" /\ Idle
     /\ restart' = "checked" /\ faults' = faults + 1
-    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, recovering, stoppedLive>>
+    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, recovering, stoppedLive, downOverLive>>
     /\ UNCHANGED <<https, httpsBoot, fin, finBoot, port, overListener>>
 \* The stop: the guest and every container in it stop; the share is added and the
 \* other project's start boots the pool later (RuntimeUp).
@@ -262,13 +289,13 @@ RestartStop ==
     /\ restart = "checked" /\ pool = "running" /\ (SecondCheck => Idle)
     /\ pool' = "stopped" /\ restart' = "none"
     /\ stoppedLive' = (stoppedLive \/ run = "ready")
-    /\ UNCHANGED <<boot, run, runBoot, owner, pub, faults, recovering>>
+    /\ UNCHANGED <<boot, run, runBoot, owner, pub, faults, recovering, downOverLive>>
     /\ UNCHANGED <<https, httpsBoot, fin, finBoot, port, overListener>>
 \* The second check refuses, or the pool changed meanwhile: nothing is stopped.
 RestartRefused ==
     /\ restart = "checked" /\ (~Idle \/ pool /= "running")
     /\ restart' = "none"
-    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, faults, recovering, stoppedLive>>
+    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, faults, recovering, stoppedLive, downOverLive>>
     /\ UNCHANGED <<https, httpsBoot, fin, finBoot, port, overListener>>
 Restart == RestartCheck \/ RestartStop \/ RestartRefused
 
@@ -278,7 +305,8 @@ Up == Start \/ RecoverStopped
 Down == Stop \/ RecoverRunning \/ RecoverStopped \/ Finalize \/ FinishCompleted
 User == Up \/ Down \/ PoolRecover \/ (ByHand /\ RuntimeUp)
 
-Next == RuntimeDown \/ Crash \/ OwnerCrash \/ OwnerNotices \/ OwnerRetire \/ RuntimeUp
+PoolDown == RuntimeDown \/ RuntimeDownRefused \/ RuntimeDownForce
+Next == PoolDown \/ Crash \/ OwnerCrash \/ OwnerNotices \/ OwnerRetire \/ RuntimeUp
         \/ TimeWaitEnds \/ Listen \/ ListenerExits \/ User \/ Restart
 Spec == Init /\ [][Next]_vars
 \* User commands keep being tried; the owner notices its guest is gone.
@@ -301,6 +329,8 @@ NoDeadEnd == Settled \/ ENABLED User \/ ENABLED OwnerNotices \/ ENABLED OwnerRet
 NoArchiveOverListener == ~overListener
 \* HACK-2535: a run that became live before the idle restart's stop is never stopped by it.
 NoRestartOverLiveRun == ~stoppedLive
+\* HACK-2477: only `runtime down --force` stops the pool under a live run.
+NoDownOverLiveRun == ~downOverLive
 \* The boot bound is a model limit, not a dead end: it must never be what stops a command.
 BootBoundUnreached == CanBoot
 \* Under fair user commands, with faults bounded, the project settles again and again.

@@ -649,6 +649,11 @@ start time, user and executable, without guest quiescence, and record `recovered
 guest that answers keeps the normal clean stop, and `recover` still refuses it. Both refuse with
 `provider_busy` while a native image build holds its fence; finishing or canceling that build
 (Ctrl-C its `hack up`) releases the fence, also when a build process was killed.
+`runtime down` of a running pool also refuses, before any effect, while a graph run's receipt
+is live (`runtime_down_live_runs`, with the run ids in `live_runs`) or the receipts cannot be
+read (`runtime_down_runs_unreadable`). `runtime down --force` stops the pool under such runs
+and reports them in `interrupted_runs` (HACK-2477). In code, `provider::down` takes
+`LiveRuns::Refuse` or `LiveRuns::Interrupt` explicitly.
 
 SmolVM seeds a machine's disks during its first start (`machine create` makes none) from expanded
 `*-template.ext4` files that it creates from the verified compressed templates and then reuses.

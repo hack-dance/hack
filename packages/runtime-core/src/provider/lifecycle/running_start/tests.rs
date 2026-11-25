@@ -484,6 +484,43 @@ mod live {
         );
     }
 
+    /// HACK-2477: a plain `runtime down` of a running pool with a live project run stops
+    /// nothing and names the run. This fixture's live provider (a sleeping process) is the
+    /// only one without a VM, so the refusal is checked here; the forced stop and `hack up`
+    /// recovering after it are real-VM checks.
+    #[test]
+    fn runtime_down_refuses_a_live_run_and_stops_nothing() {
+        let mut live = running("down-live");
+        let candidate = &live.home.candidate;
+        let run = "a".repeat(32);
+        let receipt = candidate.state_root.join("run/graphs").join(&run);
+        state::private_directory(&receipt).unwrap();
+        state::write(
+            &receipt.join("state.json"),
+            &json!({ "phase": "ready-observed" }),
+        )
+        .unwrap();
+        let owner = fs::read(root(candidate).join("owner.json")).unwrap();
+        let refused = down(candidate, LiveRuns::Refuse).unwrap_err();
+        assert_eq!(refused.code, "runtime_down_live_runs");
+        assert_eq!(refused.refusals.as_ref().unwrap().live_runs, vec![run]);
+        // Nothing changed: the receipt and the provider are as they were.
+        assert_eq!(fs::read(root(candidate).join("owner.json")).unwrap(), owner);
+        assert!(live.child.try_wait().unwrap().is_none());
+        assert_eq!(status(candidate).unwrap().process_alive, Some(true));
+        // A receipt that cannot be read refuses as well, naming nothing.
+        state::private_directory(
+            &candidate
+                .state_root
+                .join(format!("run/graphs/{}", "b".repeat(32))),
+        )
+        .unwrap();
+        let refused = down(candidate, LiveRuns::Refuse).unwrap_err();
+        assert_eq!(refused.code, "runtime_down_runs_unreadable");
+        assert!(refused.refusals.is_none());
+        assert!(live.child.try_wait().unwrap().is_none());
+    }
+
     fn no_request() -> StartRequest<'static> {
         StartRequest {
             bridges: super::super::super::super::bridge::Request::Exact(None),

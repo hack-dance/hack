@@ -174,7 +174,9 @@ fn previous_boot_recovered_publisher_allows_data_removal_without_touching_siblin
     selected_owner.child.kill().unwrap();
     selected_owner.wait(deadline);
     assert_eq!(
-        crate::provider::lifecycle::down(&candidate).unwrap().phase,
+        crate::provider::lifecycle::down(&candidate, crate::provider::LiveRuns::Interrupt)
+            .unwrap()
+            .phase,
         "stopped"
     );
     let restarted = crate::provider::lifecycle::up(&candidate).unwrap();

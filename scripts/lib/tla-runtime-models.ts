@@ -3142,6 +3142,15 @@ const contracts: readonly ModelContract[] = [
         invariant: "NoRestartOverLiveRun",
         fields: ["stoppedLive = TRUE", 'pool = "stopped"', 'run = "ready"'],
       },
+      // HACK-2477: a plain `runtime down` refuses while a run is live; only
+      // `--force` stops the pool under it. Without the refusal the plain down
+      // stops the pool under a ready run.
+      {
+        name: "down-no-refusal",
+        negative: true,
+        invariant: "NoDownOverLiveRun",
+        fields: ["downOverLive = TRUE", 'pool = "stopped"', 'run = "ready"'],
+      },
     ],
   },
   {

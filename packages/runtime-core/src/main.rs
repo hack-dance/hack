@@ -6,6 +6,7 @@ mod prepared_base_cli;
 mod runtime_setup_cli;
 mod runtime_up_cli;
 mod source_watch_retry;
+use hack_runtime_core::provider::{LiveRuns, RuntimeStatus};
 use hack_runtime_core::{CANDIDATE_VERSION, Candidate, CandidateError};
 use serde::Serialize;
 use std::path::Path;
@@ -135,6 +136,7 @@ Usage:
   hack-local runtime up --profile development --internet --json
   hack-local runtime network extend --allow-host <hostname> [--allow-host <hostname>] --json
   hack-local runtime up|status|down|recover [--json]
+  hack-local runtime down --force [--json]
   hack-local runtime temp-aliases [--fix [--include-unverified-volumes]] --json
   hack-local runtime repair-provider-tree [--json]
   hack-local runtime host-filesystem-recovery [--json]
@@ -1498,33 +1500,63 @@ fn run() -> Result<(), CandidateError> {
             let result = match *action {
                 "up" => hack_runtime_core::provider::up(&candidate),
                 "status" => hack_runtime_core::provider::status(&candidate),
-                "down" => hack_runtime_core::provider::down(&candidate),
+                "down" => runtime_down(&candidate, LiveRuns::Refuse),
                 "recover" => hack_runtime_core::provider::recover(&candidate),
                 _ => return Err(CandidateError::new("unsupported_command", HELP)),
             }?;
-            // Typed by hand: say what stopped with the pool and what brings it back (HACK-2456).
-            if let Some(runs) = result
-                .interrupted_runs
-                .as_ref()
-                .filter(|runs| !runs.is_empty())
-            {
-                eprintln!(
-                    "Stopped the native runtime while {} project run(s) were running; their containers stopped with it and their data is kept. Run hack up in each project to start the runtime again and recover its run.",
-                    runs.len()
-                );
-            } else if result.interrupted_runs_unknown {
-                eprintln!(
-                    "Stopped the native runtime. Its graph runs could not be read, so any that were running are not listed; hack up in a project recovers its run."
-                );
-            }
+            report_interrupted_runs(&result);
             if *action == "up" {
                 sweep_running_pool(&result.phase, result.process_alive);
             }
             print_json(&result)?;
         }
+        ["runtime", "down", "--force"]
+        | ["runtime", "down", "--force", "--json"]
+        | ["runtime", "down", "--json", "--force"] => {
+            let candidate = discover_candidate(&requested)?;
+            let result = runtime_down(&candidate, LiveRuns::Interrupt)?;
+            report_interrupted_runs(&result);
+            print_json(&result)?;
+        }
         _ => return Err(CandidateError::new("unsupported_command", HELP)),
     }
     Ok(())
+}
+
+/// `runtime down [--force]`. Typed by hand, a refusal also says on stderr which runs
+/// keep the pool in use and how to stop it anyway (HACK-2477); the structured error
+/// follows as usual.
+fn runtime_down(candidate: &Candidate, live: LiveRuns) -> Result<RuntimeStatus, CandidateError> {
+    hack_runtime_core::provider::down(candidate, live).inspect_err(|error| {
+        if error.code == "runtime_down_live_runs" {
+            let runs = error
+                .refusals
+                .as_ref()
+                .map(|refusals| refusals.live_runs.join(", "))
+                .unwrap_or_default();
+            eprintln!(
+                "Did not stop the native runtime: project runs are running in it ({runs}). Run hack down in each project first, or runtime down --force to stop it under them."
+            );
+        }
+    })
+}
+
+/// Typed by hand: say what stopped with the pool and what brings it back (HACK-2456).
+fn report_interrupted_runs(result: &RuntimeStatus) {
+    if let Some(runs) = result
+        .interrupted_runs
+        .as_ref()
+        .filter(|runs| !runs.is_empty())
+    {
+        eprintln!(
+            "Stopped the native runtime while {} project run(s) were running; their containers stopped with it and their data is kept. Run hack up in each project to start the runtime again and recover its run.",
+            runs.len()
+        );
+    } else if result.interrupted_runs_unknown {
+        eprintln!(
+            "Stopped the native runtime. Its graph runs could not be read, so any that were running are not listed; hack up in a project recovers its run."
+        );
+    }
 }
 
 fn sweep_running_pool(phase: &str, process_alive: Option<bool>) {

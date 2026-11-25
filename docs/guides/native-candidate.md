@@ -966,12 +966,22 @@ data, and requires inspection before retry. No guest is started by alias recover
 Interrupted starts without a recorded process or both identified disks remain
 outside this repair path.
 
-`runtime down` stops the pool even while projects run in it, because a crash or a
-host reboot ends the same way. Their containers stop with the guest and their data is
-kept. Its JSON then lists the graph runs (Compose and native-authored) whose receipts were live, including a failed start that kept its started services, in
-`interrupted_runs`, or sets `interrupted_runs_unknown` when they could not be read,
-and it writes one line on stderr saying how many it stopped. `hack up` in each of those
-projects starts the pool again and recovers its run.
+`runtime down` refuses to stop a running pool while projects run in it. A graph run
+(Compose or native-authored) is running when its receipt is live: running, starting,
+restoring, stopping, or a failed start that kept its started services. The refusal
+stops and releases nothing, exits non-zero with code `runtime_down_live_runs`, lists the
+run ids in `live_runs`, and writes one line on stderr naming them. When the receipts
+cannot be read it refuses with `runtime_down_runs_unreadable` instead. Run `hack down` in
+each project first. A stopped pool is never refused, and nor are retained runs, which
+hold no containers.
+
+`runtime down --force` stops the pool anyway, as a crash or a host reboot would. The
+projects' containers stop with the guest and their data is kept. Its JSON lists the
+runs that were live in `interrupted_runs`, or sets `interrupted_runs_unknown` when they
+could not be read. It also writes one line on stderr saying how many it stopped.
+`hack up` in each of those projects starts the pool again and recovers its run. Hack's
+own scripts pass `--force` only where they stop a pool on purpose, such as test
+disposal and the host watchdog.
 
 How a run moves across a pool stop. It is checked as the TLA+ model
 `tests/models/tla/native-pool-stop`. A run left from a boot older than the previous
@@ -1000,16 +1010,24 @@ stateDiagram-v2
     none --> ready : hack up
     retained --> ready : hack up
     ready --> retained : hack down
-    ready --> orphaned : runtime down, owner dies
+    ready --> ready : runtime down refused
+    ready --> orphaned : forced down, owner dies
     ready --> crashed : VM or provider dies
     crashed --> orphaned : hack native recover
-    orphaned --> recover : hack up, down --recover
+    orphaned --> recover : hack up, hack down
     state recover <<choice>>
     recover --> retained : [boot known, no HTTPS lease]
     recover --> finalizing : [boot known, HTTPS lease]
     recover --> stranded : [boot not known]
     finalizing --> retained : lease released or archived
 
+    note right of ready
+        runtime down refuses a live
+        run and names it; only
+        runtime down --force stops
+        the pool under it.
+        INV NoDownOverLiveRun.
+    end note
     note left of orphaned
         Receipt still ready-observed,
         owner dead, publication left.

@@ -164,7 +164,7 @@ fn exercise(previous_boot: bool) {
             "stop-prior-boot",
             &binary,
             &candidate,
-            &["runtime", "down", "--json"],
+            &["runtime", "down", "--force", "--json"],
             deadline,
         );
         checked_cli(

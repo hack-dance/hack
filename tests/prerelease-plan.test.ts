@@ -218,6 +218,29 @@ function gateApi(overrides: Record<string, unknown> = {}) {
 }
 
 describe("prerelease decision boundary", () => {
+  test("a full dispatch qualifies with the opt-in Compose upgrade trial skipped", async () => {
+    const dispatch = { ...ciRun, event: "workflow_dispatch" };
+    const result = await verifyPrereleaseCi({
+      api: gateApi({
+        [runListPath]: { workflow_runs: [dispatch] },
+        "actions/runs/77": dispatch,
+        [attemptPath]: {
+          jobs: [
+            ...jobs,
+            {
+              name: "compose-upgrade-trial",
+              head_sha: sha,
+              status: "completed",
+              conclusion: "skipped",
+            },
+          ],
+        },
+      }),
+      sourceRevision: sha,
+    });
+    expect(result.run.id).toBe(dispatch.id);
+  });
+
   test("newer non-successful scoped evidence blocks an older green full run", async () => {
     for (const state of [
       { status: "completed", conclusion: "failure" },
@@ -659,7 +682,7 @@ describe("prerelease decision boundary", () => {
     }
   });
 
-  test("requires actual exact-head CI without skipped jobs", () => {
+  test("requires successful exact-head CI and every required job", () => {
     requireExactHeadCi({ run: ciRun, jobs, sourceRevision: sha });
     // The stable release gate points the same check at main (HACK-1424).
     requireExactHeadCi({
@@ -711,16 +734,52 @@ describe("prerelease decision boundary", () => {
         sourceRevision: sha,
       })
     ).toThrow("Exact-head CI job did not succeed: docker-e2e shard 3/4");
+  });
+
+  test.each([
+    { name: "additional", status: "completed", conclusion: "skipped" },
+    {
+      name: "compose-upgrade-trial",
+      status: "completed",
+      conclusion: "failure",
+    },
+    {
+      name: "compose-upgrade-trial",
+      status: "completed",
+      conclusion: "cancelled",
+    },
+    {
+      name: "compose-upgrade-trial",
+      status: "in_progress",
+      conclusion: "skipped",
+    },
+  ])("rejects $name with $status/$conclusion", (job) => {
     expect(() =>
       requireExactHeadCi({
         run: ciRun,
-        jobs: [
-          ...jobs,
-          { name: "additional", status: "completed", conclusion: "skipped" },
-        ],
+        jobs: [...jobs, { ...job, head_sha: sha }],
         sourceRevision: sha,
       })
-    ).toThrow();
+    ).toThrow("Every job in the exact-head CI run must succeed without skips");
+  });
+
+  test("stable CI still rejects a skipped Compose upgrade trial", () => {
+    expect(() =>
+      requireExactHeadCi({
+        run: { ...ciRun, head_branch: "main" },
+        jobs: [
+          ...jobs,
+          {
+            name: "compose-upgrade-trial",
+            head_sha: sha,
+            status: "completed",
+            conclusion: "skipped",
+          },
+        ],
+        sourceRevision: sha,
+        branch: "main",
+      })
+    ).toThrow("Every job in the exact-head CI run must succeed without skips");
   });
 
   test("combined publish gate refuses moved head, missing protection/CI, wrong app, existing assets and no approval", async () => {

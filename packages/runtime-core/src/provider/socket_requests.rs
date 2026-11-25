@@ -44,8 +44,8 @@ pub(super) fn fresh_project_capacity(
 ) -> Result<(Option<BridgeIntent>, Option<DependencySocketIntent>), CandidateError> {
     // Leave room for the maximum eight project mounts in the provider's
     // boot command line. Actual project requirements take precedence.
-    const DEFAULT_BRIDGES: u8 = 2;
-    const DEFAULT_DEPENDENCIES: u8 = 1;
+    const DEFAULT_BRIDGES: u8 = 16;
+    const DEFAULT_DEPENDENCIES: u8 = 8;
 
     let mut bridges = bridge.initial();
     let mut dependencies = dependency.initial();
@@ -64,7 +64,8 @@ pub(super) fn fresh_project_capacity(
         dependencies = (slots > 0).then_some(DependencySocketIntent { slots });
     }
     if !super::boot_budget::fits(
-        1,
+        super::PoolLayout::CompactV1,
+        super::MAX_PROJECT_SHARES,
         bridges.map_or(0, |value| value.slots),
         dependencies.map_or(0, |value| value.slots),
     ) {
@@ -87,14 +88,14 @@ mod tests {
                 dependency.map_or(0, |v| v.slots),
             )
         };
-        assert_eq!(size(SocketRequests::default()), (2, 1));
+        assert_eq!(size(SocketRequests::default()), (16, 8));
         assert_eq!(
             size(SocketRequests {
                 bridges: Some(BridgeIntent::new(1).unwrap()),
                 minimum_dependencies: Some(DependencySocketIntent::new(5).unwrap()),
                 ..Default::default()
             }),
-            (1, 5)
+            (1, 8)
         );
         assert_eq!(
             size(SocketRequests {

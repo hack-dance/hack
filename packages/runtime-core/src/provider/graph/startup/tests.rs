@@ -57,7 +57,14 @@ fn exact_aliases_share_a_port_without_sharing_a_listener() {
     value["HostConfig"]["ExtraHosts"] =
         json!(["one.example:host-gateway", "two.example:host-gateway"]);
     let original = value.clone();
-    attach(&mut value, &selected, "/storage/start", "/storage/helper").unwrap();
+    attach(
+        crate::provider::PoolLayout::Legacy,
+        &mut value,
+        &selected,
+        "/storage/start",
+        "/storage/helper",
+    )
+    .unwrap();
     assert_eq!(
         value["HostConfig"]["ExtraHosts"],
         json!(["one.example:127.0.0.2", "two.example:127.0.0.3"])
@@ -73,6 +80,7 @@ fn exact_aliases_share_a_port_without_sharing_a_listener() {
         unsafe_config["HostConfig"]["NetworkMode"] = json!(mode);
         assert!(
             attach(
+                crate::provider::PoolLayout::Legacy,
                 &mut unsafe_config,
                 &selected,
                 "/storage/start",
@@ -88,6 +96,7 @@ fn exact_aliases_share_a_port_without_sharing_a_listener() {
     ]);
     assert!(
         attach(
+            crate::provider::PoolLayout::Legacy,
             &mut unrelated,
             &selected,
             "/storage/start",
@@ -154,6 +163,7 @@ fn gate_wraps_environment_launch_and_health_without_changing_identity_or_stdin()
     .unwrap();
     let composed = value.clone();
     attach(
+        crate::provider::PoolLayout::Legacy,
         &mut value,
         &service(),
         "/storage/owned-startup",
@@ -232,7 +242,14 @@ fn reserved_mount_ancestors_and_descendants_refuse_before_mutation() {
             json!([{"Type":"bind","Source":"/fixture","Target":target,"ReadOnly":true}]);
         let before = value.clone();
         assert!(
-            attach(&mut value, &service(), "/storage/gate", "/storage/helper").is_err(),
+            attach(
+                crate::provider::PoolLayout::Legacy,
+                &mut value,
+                &service(),
+                "/storage/gate",
+                "/storage/helper"
+            )
+            .is_err(),
             "accepted reserved overlap {target}"
         );
         assert_eq!(value, before, "mutated refused config {target}");
@@ -240,6 +257,7 @@ fn reserved_mount_ancestors_and_descendants_refuse_before_mutation() {
     let mut adjacent = config();
     adjacent["HostConfig"]["Mounts"] = json!([{"Type":"bind","Source":"/fixture","Target":"/run/hack-startup-other","ReadOnly":true}]);
     attach(
+        crate::provider::PoolLayout::Legacy,
         &mut adjacent,
         &service(),
         "/storage/gate",
@@ -385,6 +403,7 @@ fn multiple_bindings_hold_service_until_every_process_is_provisioned() {
     assert!(value.services["web"].all_provisioned());
     let mut config = config();
     attach(
+        crate::provider::PoolLayout::Legacy,
         &mut config,
         &value.services["web"],
         "/storage/gate",
@@ -444,6 +463,7 @@ fn named_routes_refuse_resolver_mount_shadowing_without_changing_aliasless_polic
             json!([{"Type":"bind", "Source":"/storage/source", "Target":target, "ReadOnly":true}]);
         let mut aliasless = original.clone();
         attach(
+            crate::provider::PoolLayout::Legacy,
             &mut aliasless,
             &service(),
             "/storage/gate",
@@ -454,7 +474,14 @@ fn named_routes_refuse_resolver_mount_shadowing_without_changing_aliasless_polic
         named.bindings.get_mut("default").unwrap().aliases = vec!["one.example".into()];
         original["HostConfig"]["ExtraHosts"] = json!(["one.example:host-gateway"]);
         assert!(
-            attach(&mut original, &named, "/storage/gate", "/storage/helper").is_err(),
+            attach(
+                crate::provider::PoolLayout::Legacy,
+                &mut original,
+                &named,
+                "/storage/gate",
+                "/storage/helper"
+            )
+            .is_err(),
             "{target}"
         );
     }
@@ -463,7 +490,14 @@ fn named_routes_refuse_resolver_mount_shadowing_without_changing_aliasless_polic
     let mut config = config();
     config["HostConfig"]["ExtraHosts"] = json!(["one.example:host-gateway"]);
     config["HostConfig"]["Mounts"] = json!([{"Target":"/etc/hosts-backup"}]);
-    attach(&mut config, &named, "/storage/gate", "/storage/helper").unwrap();
+    attach(
+        crate::provider::PoolLayout::Legacy,
+        &mut config,
+        &named,
+        "/storage/gate",
+        "/storage/helper",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -574,7 +608,14 @@ fn low_port_binding_requires_the_explicit_lowered_capability_profile() {
     value["HostConfig"]["NetworkMode"] = json!("none");
     value["HostConfig"]["CapDrop"] = json!(["ALL"]);
     value["HostConfig"]["CapAdd"] = profile.clone();
-    attach(&mut value, &selected, "/storage/start", "/storage/helper").unwrap();
+    attach(
+        crate::provider::PoolLayout::Legacy,
+        &mut value,
+        &selected,
+        "/storage/start",
+        "/storage/helper",
+    )
+    .unwrap();
     // The sysctl is the only change; the reviewed capability profile is untouched.
     assert_eq!(value["HostConfig"]["CapAdd"], profile);
     assert_eq!(value["HostConfig"]["CapDrop"], json!(["ALL"]));
@@ -588,6 +629,7 @@ fn low_port_binding_requires_the_explicit_lowered_capability_profile() {
     implicit["HostConfig"]["CapAdd"] = profile;
     assert!(
         attach(
+            crate::provider::PoolLayout::Legacy,
             &mut implicit,
             &selected,
             "/storage/start",
@@ -616,6 +658,34 @@ fn next13_writer_receipt_keeps_legacy_control_identity_and_pending_enrollment() 
         18080
     );
     assert_eq!(receipt.resources["volume:data"].phase, "created");
+}
+
+#[test]
+fn compact_dependency_uses_one_guest_namespace_and_keeps_the_container_target() {
+    let mut value = config();
+    attach(
+        crate::provider::PoolLayout::CompactV1,
+        &mut value,
+        &service(),
+        "/storage/gate",
+        "/storage/helper",
+    )
+    .unwrap();
+    let mounts = value["HostConfig"]["Mounts"].as_array().unwrap();
+    let sockets = mounts
+        .iter()
+        .filter(|mount| {
+            mount["Target"]
+                .as_str()
+                .is_some_and(|target| target.starts_with("/run/hack-dependencies/"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(sockets.len(), 1);
+    assert_eq!(sockets[0]["Source"], "/run/hd/01");
+    assert_eq!(
+        sockets[0]["Target"],
+        "/run/hack-dependencies/dependency-01.sock"
+    );
 }
 
 /// Wiring guard: the inspections and publications need an owned VM (and settlement

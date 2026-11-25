@@ -493,6 +493,8 @@ impl Default for ReclamationPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Owner {
+    #[serde(default, skip_serializing_if = "super::PoolLayout::is_legacy")]
+    pub(super) socket_layout: super::PoolLayout,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_share: Option<super::ProjectShareIntent>,
     /// Further project roots shared into the same development pool, in admission order.
@@ -663,7 +665,8 @@ impl Owner {
         }
         let owner = read_owner(&root.join("owner.json"))?;
         owner.network.validate()?;
-        super::project_share::validate_set(
+        super::project_share::validate_layout(
+            owner.socket_layout,
             owner.project_share.as_ref(),
             &owner.additional_project_shares,
         )?;
@@ -932,8 +935,12 @@ impl Owner {
             .read_exact(&mut bytes)
             .map_err(io)?;
         let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let socket_layout = super::PoolLayout::CompactV1;
         let owner = Self {
-            project_share,
+            socket_layout,
+            project_share: project_share
+                .map(|share| share.with_layout(socket_layout))
+                .transpose()?,
             additional_project_shares: Vec::new(),
             network,
             profile,
@@ -1028,6 +1035,29 @@ impl Owner {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn omitted_pool_layout_round_trips_as_absent() {
+        let owner: Owner = serde_json::from_value(serde_json::json!({
+            "version": 1, "checkout": "/fixture", "token": "a".repeat(32),
+            "machine": "fixture", "short_home": "/fixture", "created": false,
+            "phase": "initializing", "process": null, "storage": null, "overlay": null,
+            "guest_boot_id": null, "daemon_pid": null, "daemon_start": null,
+            "rootfs_digest": null, "profile": "development", "network": "isolated",
+        }))
+        .unwrap();
+        assert_eq!(owner.socket_layout, super::super::PoolLayout::Legacy);
+        let saved = serde_json::to_value(&owner).unwrap();
+        assert!(saved.get("socket_layout").is_none());
+        let reloaded: Owner = serde_json::from_value(saved).unwrap();
+        assert_eq!(reloaded.socket_layout, owner.socket_layout);
+        let mut compact = reloaded;
+        compact.socket_layout = super::super::PoolLayout::CompactV1;
+        assert_eq!(
+            serde_json::to_value(compact).unwrap()["socket_layout"],
+            "compact-v1"
+        );
+    }
+
     #[test]
     fn a_start_waiter_reacquires_after_release_or_gives_up_with_the_holder() {
         use std::sync::mpsc;

@@ -673,7 +673,10 @@ cleanup admits it. Graph admission counts an ended boot's native run by its pres
 such a run is not live for `runtime down` or the idle check, nor in a stopped pool's
 `live_runs`. A native foreground owner reads the pool record about once a second and, after
 two readings that its boot ended, exits with `native_graph_pool_ended` and no cleanup effect,
-keeping its publication for the dead-owner recovery; a start fails at its next check. `runtime
+keeping its publication for the dead-owner recovery; a start fails at its next check. A record
+that still says `running` while the provider it names is proven gone (a crash, `process-exited`)
+also counts as an ended boot (`journal::boot_of`); the native `hack down` runs `runtime recover`
+on such a pool first. `runtime
 down --force` waits up to 10 seconds, after the stop and outside the lease, for the owners of
 the native runs it interrupted (the owner lock probe) and reports them in
 `interrupted_owners` (`exited`, `running`). `runtime down` waits up to 5 seconds for a held

@@ -14,16 +14,10 @@ import {
 const runtime = { binary: "/fixture/hack-native", home: "/fixture/home" };
 const projectRoot = "/fixture/project";
 const RUN = "a".repeat(32);
-const UP = [
-  "runtime",
-  "up",
-  "--profile",
-  "development",
-  "--project-share",
-  projectRoot,
-  "--unfiltered-source",
-  "--json",
-];
+// The pool boots exactly as recorded: no project share is asked for, because
+// the pool may already share another project's root (seen on a real VM at
+// c1dfac73: `project_share_extension_required`, nothing started).
+const UP = ["runtime", "up", "--json"];
 const BOOT = ["graph", "native", "boot", "--run-id", RUN, "--json"];
 
 function boot(fields: Record<string, unknown>) {
@@ -174,6 +168,69 @@ test("HACK-2715 review: the receipt is checked before any pool is started", asyn
     NATIVE_GRAPH_ENDED_BOOT_UNSUPPORTED
   );
   expect(calls).toEqual([["runtime", "status", "--json"], BOOT]);
+});
+
+// HACK-2715 review round 2 (Codex P2): a provider that died under the pool leaves
+// its record `running` and `runtime status` reports `process-exited`. The
+// HACK-2579 boundary (`runtime recover`) records it stopped first, so the run's
+// receipt then reads as of an ended boot and is recovered as after a forced stop.
+// A pool whose recovery is refused starts nothing.
+test("HACK-2715 review round 2: a pool whose provider died is recovered before the receipt is checked", async () => {
+  const run = (recovered: unknown) => {
+    const calls: string[][] = [];
+    const notices: string[] = [];
+    const invoke = ((request: { readonly args: readonly string[] }) => {
+      calls.push([...request.args]);
+      if (request.args[1] === "status") {
+        return Promise.resolve({
+          phase: "process-exited",
+          process_alive: false,
+        });
+      }
+      if (request.args[1] === "recover") {
+        return Promise.resolve(recovered);
+      }
+      if (request.args[2] === "boot") {
+        return Promise.resolve(boot({}));
+      }
+      return Promise.resolve({ phase: "running" });
+    }) as unknown as typeof invokeNativeRuntime;
+    return {
+      calls,
+      notices,
+      result: startStoppedPoolForAuthoredRecovery({
+        runtime,
+        projectRoot,
+        run: () => Promise.resolve(RUN),
+        invoke,
+        notice: (line) => notices.push(line),
+      }).catch((error: unknown) => error),
+    };
+  };
+  const { NATIVE_EXITED_RUNTIME_NOTICE } = await import(
+    "../src/backends/native-runtime-preflight.ts"
+  );
+  const recovered = run({ phase: "recovered-unclean", process_alive: false });
+  expect(await recovered.result).toBe(true);
+  expect(recovered.calls).toEqual([
+    ["runtime", "status", "--json"],
+    ["runtime", "status", "--json"],
+    ["runtime", "recover", "--json"],
+    BOOT,
+    UP,
+  ]);
+  expect(recovered.notices).toEqual([
+    NATIVE_EXITED_RUNTIME_NOTICE,
+    NATIVE_AUTHORED_STOPPED_POOL_NOTICE,
+  ]);
+  // A recovery that leaves the provider exited is refused; nothing starts.
+  const refused = run({ phase: "process-exited" });
+  expect(await refused.result).toBeInstanceOf(NativeRuntimeRequestError);
+  expect(refused.calls.map((args) => args[1])).toEqual([
+    "status",
+    "status",
+    "recover",
+  ]);
 });
 
 // HACK-2715 review round 2 (M1): after a failed stop on a pool `hack down` did

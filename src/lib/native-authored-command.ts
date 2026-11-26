@@ -534,7 +534,7 @@ function commandFailure(options: {
       code: "E_LIFECYCLE_FAILED",
       message:
         options.mode === "stop"
-          ? "Native project stop is unconfirmed or its ownership changed; selected state is retained. Run hack ps to inspect it. Values omitted. No request was replayed."
+          ? "Native project stop is unconfirmed or its ownership changed; selected state is retained. Run hack ps to inspect it. Values omitted. No request was replayed. If its owner was still exiting, run hack down again."
           : "Native project recovery is incomplete or its ownership changed; selected state is retained. Run hack ps to inspect it. Values omitted.",
     });
   }

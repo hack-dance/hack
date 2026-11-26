@@ -740,29 +740,48 @@ pub(super) fn ended_boot_recoverable(
 }
 /// Which boot a receipt belongs to, read from the pool's own record without a lock and
 /// without a running pool (HACK-2715). `Ended` only on positive evidence: the record is
-/// this receipt's pool owner and says the pool is not running, or running another boot.
-/// An absent or unreadable record, or a record of another owner, proves nothing and
+/// this receipt's pool owner and says the pool is not running, or running another boot,
+/// or still says running this boot while the provider it records is proven gone (a
+/// crash or a kill, HACK-2579 `process-exited`; review round 2). An absent or
+/// unreadable record, or a record of another owner, proves nothing and
 /// returns `Current`, so the caller keeps the strict same-boot rules. Callers that act
 /// on the run re-check the boot against the connected engine before any effect.
 pub(super) fn pool_boot(candidate: &Candidate, receipt: &Receipt) -> ReceiptBoot {
     boot_of(candidate, &receipt.owner, &receipt.boot)
 }
 /// [`pool_boot`] for a pool owner token and guest boot id: `Ended` only on positive
-/// evidence that the pool record of this owner is not running that boot.
+/// evidence that the pool record of this owner is not running that boot, or that the
+/// provider it records is gone.
 pub(super) fn boot_of(candidate: &Candidate, owner: &str, boot: &str) -> ReceiptBoot {
     let Ok(pool) =
         state::read::<serde_json::Value>(&candidate.state_root.join("run/smolvm/owner.json"))
     else {
         return ReceiptBoot::Current;
     };
+    boot_in(&pool, owner, boot)
+}
+fn boot_in(pool: &serde_json::Value, owner: &str, boot: &str) -> ReceiptBoot {
     if pool["token"].as_str() != Some(owner) {
         return ReceiptBoot::Current;
     }
     if pool["phase"] == "running" && pool["guest_boot_id"].as_str() == Some(boot) {
+        // A provider that died under the pool (a crash, or a kill) leaves its record
+        // `running` (HACK-2579 `process-exited`). Its guest is gone with it, so its boot
+        // has ended too: positive evidence only, when the recorded provider identity
+        // proves the process gone (HACK-2715 review round 2, Codex P2).
+        if recorded_provider_gone(pool) {
+            return ReceiptBoot::Ended;
+        }
         ReceiptBoot::Current
     } else {
         ReceiptBoot::Ended
     }
+}
+/// Whether the pool record names a provider process that is proven gone (exited, a
+/// zombie, or a reused pid); an absent or unreadable identity proves nothing.
+fn recorded_provider_gone(pool: &serde_json::Value) -> bool {
+    serde_json::from_value::<crate::provider::identity::ProcessIdentity>(pool["process"].clone())
+        .is_ok_and(|process| crate::provider::identity::provider_gone(&process).unwrap_or(false))
 }
 /// The pool owner token and guest boot id of a pool recorded running, read without a
 /// lock; `None` otherwise. A foreground owner records it when it starts, to notice later
@@ -929,4 +948,58 @@ pub(super) fn load_at(
     let receipt: Receipt = serde_json::from_slice(&bytes).map_err(|_| refused())?;
     receipt.validate(run, owner.unwrap_or(&receipt.owner))?;
     Ok((receipt, root))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod pool_boot_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// HACK-2715 review round 2 (Codex P2): a provider that died under a running pool
+    /// leaves its record `running`, and its boot has ended with it. Only a recorded
+    /// identity proven gone says so; a live provider, an absent or unreadable identity,
+    /// or another owner's record proves nothing.
+    #[test]
+    fn a_provider_that_died_under_a_running_pool_ends_its_boot() {
+        let record = |process: serde_json::Value| json!({"token": "owner", "phase": "running", "guest_boot_id": "boot", "process": process});
+        let live = crate::provider::identity::observe(std::process::id() as i32).unwrap();
+        let live = serde_json::to_value(&live).unwrap();
+        assert_eq!(
+            boot_in(&record(live.clone()), "owner", "boot"),
+            ReceiptBoot::Current
+        );
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let gone = crate::provider::identity::observe(child.id() as i32).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let gone = serde_json::to_value(&gone).unwrap();
+        assert_eq!(
+            boot_in(&record(gone.clone()), "owner", "boot"),
+            ReceiptBoot::Ended
+        );
+        for (pool, owner) in [
+            (
+                json!({"token": "owner", "phase": "running", "guest_boot_id": "boot"}),
+                "owner",
+            ),
+            (record(json!({"pid": "unreadable"})), "owner"),
+            (record(gone.clone()), "another owner"),
+        ] {
+            assert_eq!(
+                boot_in(&pool, owner, "boot"),
+                ReceiptBoot::Current,
+                "{pool}"
+            );
+        }
+        let mut stopped = record(live);
+        stopped["phase"] = json!("recovered-unclean");
+        assert_eq!(boot_in(&stopped, "owner", "boot"), ReceiptBoot::Ended);
+        assert_eq!(
+            boot_in(&record(gone), "owner", "another boot"),
+            ReceiptBoot::Ended
+        );
+    }
 }

@@ -768,3 +768,66 @@ bunTest.skipIf(process.platform !== "darwin")(
   },
   CASE_TIMEOUT_MS + SETTLEMENT_BUDGET_MS + NATIVE_FIXTURE_BUN_MARGIN_MS
 );
+
+// HACK-2715 review round 2 (seen on a real VM at 3c88966f, rows 1 and 3): once a
+// ready run's pool boot ended, its graph owner exits with no cleanup effect. If
+// the frontend owner then returned normally, it released its admission lock and
+// left ready, start and live-stop records that the dead-owner recovery cannot
+// select (it needs the interrupted lock of a dead owner), so `hack down`, `up -d`
+// and `exec` all refused. It now ends as a crash would: every record, the
+// settlement proof and the admission lock are still in place when it exits.
+macTest(
+  "HACK-2715 review round 2: a ready live-stop owner whose pool boot ended exits as a crash would, keeping its records and admission lock",
+  async () => {
+    const selected = await fixture({
+      liveStop: true,
+      poolEndsAfterReady: true,
+    });
+    const runs = join(
+      selected.scope.projectDir,
+      ".internal",
+      "native-authored-runs"
+    );
+    const ended = new Error("ended as a crash would");
+    let kept: string[] | undefined;
+    const result = await serveNativeAuthoredProject({
+      ...selected,
+      run,
+      startupTimeoutMs: STARTUP_TIMEOUT_MS,
+      onReady: () => {
+        void writeFile(join(selected.root, "pool-ended"), "ended", {
+          mode: 0o600,
+        });
+        return undefined;
+      },
+      exitOnPoolEnd: async () => {
+        kept = (await readdir(runs)).sort();
+        throw ended;
+      },
+    }).catch((error: unknown) => error);
+    // The real exit never returns; the test seam throws, and the start reports it retained.
+    expect(result).toBeInstanceOf(NativeAuthoredProjectStartError);
+    expect(kept).toBeDefined();
+    const names = kept ?? [];
+    for (const suffix of [
+      ".admission.lock",
+      ".start.json",
+      ".live-stop.json",
+      ".live-stop.json.settled",
+    ]) {
+      expect(names.some((name) => name.endsWith(suffix))).toBe(true);
+    }
+    expect(names).toContain(`${run}.source.json`);
+    // The ready record itself (`<key>.json`) is kept too.
+    expect(
+      names.filter(
+        (name) =>
+          name.endsWith(".json") &&
+          !name.endsWith(".start.json") &&
+          !name.endsWith(".live-stop.json") &&
+          !name.endsWith(".source.json")
+      )
+    ).toHaveLength(1);
+  },
+  CASE_TIMEOUT_MS
+);

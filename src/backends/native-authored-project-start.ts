@@ -246,7 +246,32 @@ type Options = {
   readonly onEnvironmentSelected?: (
     fingerprint: ComposeEnvFingerprintRecord
   ) => undefined;
+  /**
+   * How a live-stop owner ends once its pool boot ended under its ready run
+   * (HACK-2715 review round 2): as a crash would, keeping its admission lock
+   * and every record for the dead-owner recovery. The CLI exits the process;
+   * tests observe it. Never returns normally.
+   */
+  readonly exitOnPoolEnd?: () => Promise<never>;
 };
+
+/** The graph owner's exit codes that mean its pool boot ended under the run. */
+const POOL_ENDED_CODES = new Set([
+  "native_graph_pool_ended",
+  "runtime_not_running",
+  "native_graph_ended_boot_unsupported",
+]);
+
+/** The line a live-stop owner writes before it exits as a crash would. */
+export const NATIVE_AUTHORED_POOL_ENDED_EXIT =
+  "The native pool boot of this run ended under it (runtime down --force or a crash); its owner exits and keeps the run and its data for hack down in this project.";
+
+function exitAsCrash(): Promise<never> {
+  process.stderr.write(`${NATIVE_AUTHORED_POOL_ENDED_EXIT}\n`);
+  // No unwinding: the admission lock, the live-stop record and its settlement
+  // proof stay exactly as the dead-owner recovery selects them after a crash.
+  return process.exit(1);
+}
 
 type SelectedEnvironment = Readonly<
   Record<string, Readonly<Record<string, string>>>
@@ -687,6 +712,7 @@ async function runPreparedLifecycle(ctx: {
   let processSettled = false;
   let original: NativeAuthoredProcessIncarnation | undefined;
   let liveStopRequested = false;
+  let poolEnded = false;
   try {
     code = await serveNativeAuthoredProjectGraph({
       runtime: ctx.options.runtime,
@@ -739,6 +765,9 @@ async function runPreparedLifecycle(ctx: {
         ctx.completeStop(false);
       },
       onExitDiagnostic: (diagnostic) => {
+        poolEnded =
+          POOL_ENDED_CODES.has(diagnostic.nativeCode ?? "") ||
+          POOL_ENDED_CODES.has(diagnostic.nativeCauseCode ?? "");
         ctx.nativeCode(diagnostic);
         const observed: unknown = ctx.options.onExitDiagnostic?.(diagnostic);
         void Promise.resolve(observed).catch(() => undefined);
@@ -798,6 +827,21 @@ async function runPreparedLifecycle(ctx: {
       failure ??
       new Error("Native foreground settlement is unconfirmed; values omitted.")
     );
+  }
+  if (
+    ctx.hookOwner === undefined &&
+    liveStop !== undefined &&
+    ctx.admitted.ready !== undefined &&
+    poolEnded
+  ) {
+    // HACK-2715 review round 2 (seen on a real VM at 3c88966f): the ready run's
+    // graph owner exited because its pool boot ended (it noticed, or its own
+    // cleanup found no engine). No cleanup can run here. Returning would retire
+    // the attempt's locks normally and leave ready, start and live-stop records
+    // with no interrupted admission lock, which the dead-owner recovery cannot
+    // select: every later `hack down`, `up -d` and `exec` then refused. End as a
+    // crash would instead; its settlement proof is already written.
+    await (ctx.options.exitOnPoolEnd ?? exitAsCrash)();
   }
   ctx.hookOwner?.graphSettled();
   const retirement = {

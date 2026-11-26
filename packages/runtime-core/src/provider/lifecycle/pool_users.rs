@@ -199,15 +199,18 @@ pub(super) fn live_graph_runs(state_root: &Path) -> Option<Vec<String>> {
             // or a host reboot, HACK-2715) runs nothing in this boot: its guest stopped
             // and its containers with it. It no longer keeps the pool in use; its project
             // clears it with `hack down` ([`after_forced_stop`]). On a pool recorded
-            // stopped no native run is live either (HACK-2715 review round 2, seen on
-            // a real VM: a stopped pool's `runtime status` still listed one). Compose
-            // receipts name no boot here and keep their rule.
-            let ended = directory == "run/native-graphs"
-                && match &current {
-                    PoolRecord::Running(boot) => receipt["boot"].as_str() != Some(boot.as_str()),
-                    PoolRecord::Stopped => true,
-                    PoolRecord::Unknown => false,
-                };
+            // stopped no run of either kind runs anything, so none is live
+            // (HACK-2715 review round 2, seen on a real VM: right after `--force` a
+            // stopped pool's `runtime status` still listed the ready Compose run).
+            // Compose receipts name no boot, so on a running pool they keep their rule.
+            let ended = match &current {
+                PoolRecord::Running(boot) => {
+                    directory == "run/native-graphs"
+                        && receipt["boot"].as_str() != Some(boot.as_str())
+                }
+                PoolRecord::Stopped => true,
+                PoolRecord::Unknown => false,
+            };
             if !ended
                 && receipt["phase"]
                     .as_str()
@@ -769,15 +772,11 @@ mod tests {
             .unwrap();
         };
         // HACK-2715 review round 2 (seen on a real VM): on a pool recorded stopped,
-        // no native run is live; Compose runs keep their rule. A pool booting or
-        // quiescing proves nothing.
+        // no run of either kind is live (right after `--force` the ready Compose
+        // run was still listed). A pool booting or quiescing proves nothing.
         for stopped in super::super::STOPPED_PHASES {
             record(stopped);
-            assert_eq!(
-                live_graph_runs(&home.0),
-                Some(vec![compose.clone()]),
-                "{stopped}"
-            );
+            assert_eq!(live_graph_runs(&home.0), Some(vec![]), "{stopped}");
         }
         for unknown in ["booting", "quiescing"] {
             record(unknown);

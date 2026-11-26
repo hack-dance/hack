@@ -298,6 +298,13 @@ export function createNativeAuthoredStartHarness() {
      * inconclusive.
      */
     readonly runtimeStopped?: boolean;
+    /**
+     * HACK-2715 review round 2: once the test writes `pool-ended` in the fixture
+     * root, the ready live-stop graph owner exits the way it does when its pool
+     * boot ends under it (`native_graph_pool_ended`), with its receipt left
+     * ready-observed and no cleanup effect.
+     */
+    readonly poolEndsAfterReady?: boolean;
     /** `runtime status --json` hangs, so a caller can cancel during the check. */
     readonly runtimeStatusHangs?: boolean;
     /**
@@ -619,6 +626,12 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
  };
  process.on('SIGTERM',finish);await writeFile(journal,JSON.stringify(receipt));
  console.log(JSON.stringify({version:2,kind:'native-graph-foreground-ready',run:input.run,review:review.review_id,receipt}));
+ if(${options.poolEndsAfterReady === true}){
+  const ended=${JSON.stringify(join(root, "pool-ended"))};
+  const cap=performance.now()+${STAND_IN_CAP_MS};
+  while(!(await Bun.file(ended).exists())&&performance.now()<cap)await Bun.sleep(10);
+  console.error(JSON.stringify({code:'native_graph_pool_ended',message:${JSON.stringify(CANARY)}}));process.exit(2);
+ }
  if(${options.finiteHooks === true || options.liveStop === true}){ while(true)await Bun.sleep(50); }
  // Handshake, not a wall-clock window: retire only once the frontend has
  // finished ready publication and the test released this run (or on SIGTERM).

@@ -3224,7 +3224,7 @@ const contracts: readonly ModelContract[] = [
       // VM). Its controls: a start caught mid-way refused by admission and
       // recovery; the live owner's stop same-boot only; `hack down` starting a
       // stopped pool without checking the receipt first.
-      { name: "two-projects", negative: false, states: 6245 },
+      { name: "two-projects", negative: false, states: 6296 },
       {
         name: "admission-ended-boot",
         negative: true,
@@ -3314,6 +3314,26 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NoOwnerLeftByForce",
         fields: ["forcedOwner = TRUE", 'pool = "stopped"', 'nowner = "live"'],
+      },
+      // Codex P2 on #1257: a provider that died under the pool leaves its record
+      // `running`; only `hack native recover` moved such a pool on. The native
+      // `hack down` now runs `runtime recover` first, and owners count a provider
+      // proven gone as the end of their boot.
+      {
+        name: "native-down-on-crash",
+        negative: true,
+        invariant: "NativeDownActs",
+        fields: ['pool = "crashed"', 'nrun = "preparing"'],
+        alternativeWitnesses: [['pool = "crashed"', 'nrun = "ready"']],
+      },
+      // The real-VM regression at 3c88966f: an owner whose pool boot ended
+      // returned normally and released its admission lock, which the dead-owner
+      // recovery needs. It now ends as a crash would.
+      {
+        name: "owner-exits-released",
+        negative: true,
+        invariant: "NativeCanComeUp",
+        fields: ['nowner = "gone"', 'nrun = "ready"'],
       },
     ],
   },

@@ -841,6 +841,18 @@ The second review round adds two switches, from the review and from a real-VM ru
   in the report and stopped by `hack down`, as after a crash. Invariant
   `NoOwnerLeftByForce` restates the forced stop's effect, as `NoDownOverLiveRun`
   restates the plain one's guard.
+- `CrashSeen` (the Codex P2 on #1257). A provider that died under the pool leaves its
+  record `running`. The native `hack down` now runs the existing `runtime recover`
+  first (`NativeDownRecoversCrash`, HACK-2579), and an owner counts a recorded
+  provider proven gone as the end of its boot. Invariant `NativeDownActs`: from every
+  state the native project is not settled in, its own `hack down` acts (or its start
+  or owner settles on its own), without `hack native recover` first.
+- `ExitsAsCrash` (the real-VM regression at 3c88966f). A ready run's owner whose pool
+  boot ended (it noticed, its stop found no engine, or `--force` waited for it) now
+  ends as a crash would: its admission lock, live-stop record and settlement proof
+  stay for the dead-owner recovery. At 3c88966f it returned normally and released the
+  lock (`nowner = "gone"`), which no recovery selects, so `hack down`, `up -d` and
+  `exec` refused for good.
 
 `NoDeadEnd` says that from every reachable state some named command can act, or
 the owner is still noticing its guest is gone. `Recovers` (`[]<>Settled` under weak
@@ -851,7 +863,7 @@ publication left. `BootBoundUnreached` shows the boot bound (8) never limits a c
 | Control | Switches | Result |
 | --- | --- | --- |
 | `positive` | stopped-pool recovery and recovery from any earlier boot; something else may boot the pool; a fault may strike between a recovery's boot and its graph recovery | 210 states; `NoDeadEnd`, `CanComeUp`, `BootBoundUnreached`, `NoDownOverLiveRun` and `Recovers` hold |
-| `two-projects` | `positive` plus the native-authored project, with every HACK-2715 part and its review fixes; the native run may start, be caught mid-start, and keep boot-bound state | 6245 states; `NoDeadEnd`, `CanComeUp`, `NativeCanComeUp`, `NoWastedPoolStart`, `DownConfirms`, `NoOwnerLeftByForce`, `BootBoundUnreached`, `NoDownOverLiveRun`, `Recovers` and `NativeRecovers` hold |
+| `two-projects` | `positive` plus the native-authored project, with every HACK-2715 part and its review fixes; the native run may start, be caught mid-start, and keep boot-bound state | 6296 states; `NoDeadEnd`, `CanComeUp`, `NativeCanComeUp`, `NoWastedPoolStart`, `DownConfirms`, `NoOwnerLeftByForce`, `NativeDownActs`, `BootBoundUnreached`, `NoDownOverLiveRun`, `Recovers` and `NativeRecovers` hold |
 | `admission-ended-boot` | `two-projects`, but admission refuses the native run of an ended boot (`AdmitEndedBoot = FALSE`, `next` before HACK-2715) | `CanComeUp` fails: the native run (ready or mid-start) of an earlier boot, and the Compose start is refused |
 | `native-same-boot` | `two-projects`, but the native recovery accepts only its own boot (`NativeCrossBoot = FALSE`) | `NativeCanComeUp` fails: pool running in a later boot, the native run left, `nowner = "dead"` |
 | `native-stopped-pool` | `two-projects`, but the native `hack down` does not start a stopped pool (`NativeStartsPool = FALSE`) | `NativeCanComeUp` fails: pool stopped, the native run left |
@@ -861,6 +873,8 @@ publication left. `BootBoundUnreached` shows the boot bound (8) never limits a c
 | `native-bound-owner` | `two-projects`, but `hack down` refuses a boot-bound run of an ended boot before its owner's stop on a stopped pool, and owners do not watch the pool (`OwnerStopFirst = FALSE`, `OwnerWatchesPool = FALSE`, the code at the first review-fix head) | `NativeCanComeUp` fails: pool stopped, `nrun = "ready"`, `nbound = TRUE`, `nowner = "live"`: the owner and its publication stay up |
 | `native-stop-after-start` | the same switches; invariant `DownConfirms` | fails: `hack down` started the pool for the live owner's stop, the stop did not confirm, and the run is left (`nunconfirmed = TRUE`, `nowner = "dead"`, `nrun = "ready"`) |
 | `force-leaves-owner` | `two-projects`, but owners do not watch the pool (`OwnerWatchesPool = FALSE`) | `NoOwnerLeftByForce` fails: pool stopped by `--force`, `nowner = "live"` |
+| `owner-exits-released` | `two-projects`, but an owner whose pool boot ended returns normally and releases its admission lock (`ExitsAsCrash = FALSE`, 3c88966f) | `NativeCanComeUp` fails: `nowner = "gone"`, `nrun = "ready"`, and nothing recovers the run |
+| `native-down-on-crash` | `two-projects`, but `hack down` does not recover a pool whose provider died, and owners do not see a dead provider (`CrashSeen = FALSE`) | `NativeDownActs` fails: `pool = "crashed"` with the native run left, and only `hack native recover` acts |
 | `negative` | `next` before HACK-2456 | `NoDeadEnd` fails in an `OwnerCrash` or `OwnerNotices` state: stopped pool, ready run, dead owner, publication left |
 | `by-hand` | `next`, counting an unnamed `runtime up` | fails in a `RuntimeUp` state with `boot = 3`, `runBoot = 1` |
 | `strict` | stopped-pool recovery with the old predecessor-only rule, while something else boots the pool | fails in `RecoverStopped` (or `RuntimeUp`) with `boot = 3`, `runBoot = 1` |
@@ -901,7 +915,8 @@ and absent-publication cleanup after a host reboot.
 | `NativeRecover` | `native-authored-project-recovery.ts` `recover-live-owner` → `graph/native/foreground/recovery/cleanup.rs` `recover` → `runtime.rs` `cleanup_recovery`; with `NativeCrossBoot`, `journal::load_for_recovery` accepts an ended boot's graph2 run (`ended_boot_recoverable`), and `archive.rs` `load_inspection` inspects its removed receipt |
 | `NativeRecoverStopped` | `native-authored-command.ts` `runRecovery` → `native-authored-stopped-pool.ts` `startStoppedPoolForAuthoredRecovery` |
 | `NativeStopEnded` | `native-authored-command.ts` `runStop`: `nativeAuthoredStoppedPoolRun` checks the pool read-only, `stopNativeAuthoredProject` asks the live owner to stop with the pool left as it is, `native-authored-live-stop.ts` waits for the owner to exit (`NativeAuthoredStopOwnerExitedError`), then `runRecovery` starts the pool for a recoverable run (`startNativeRuntimeForAuthoredRecovery`) and recovers it, or the bound run is named; on a running pool a failed stop is named by `nativeAuthoredEndedBootRefusal` |
-| `NativeOwnerNotices` | `graph/native/foreground.rs` `serve`: the ready owner reads the pool record about once a second (`journal::boot_of`) and exits with `native_graph_pool_ended` after two readings of an ended boot; a start fails at its next check (`journal::running_boot`) |
+| `NativeDownRecoversCrash` | `native-authored-stopped-pool.ts` `nativeAuthoredStoppedPoolRun`: on `process-exited` it runs `recoverExitedNativeRuntime` (`runtime recover`) before the boot check, for plain `hack down` and `--recover` |
+| `NativeOwnerNotices` | `graph/native/foreground.rs` `serve`: the ready owner reads the pool record about once a second (`journal::boot_of`, which also counts a recorded provider proven gone) and exits with `native_graph_pool_ended` after two readings of an ended boot; a start fails at its next check (`journal::running_boot`) |
 | `RuntimeDownForce` (owners) | `provider/lifecycle.rs` `down`: after the stop and outside the lease, `settle_interrupted_owners` waits up to 10 s for each interrupted native owner (`foreground::owner_running`, the owner lock probe) and reports `interrupted_owners`; `main.rs` `interrupted_owners_note` names each run |
 | `NativeStart`, `NativeStop`, `NativeRuntimeUp` | `serveNativeAuthoredProject` (refuses a stopped pool, `refuseStoppedNativeRuntime`), `stopNativeAuthoredProject`, `runtime up` |
 | `Start` / `Stop` | ordinary `hack up` (fresh or retained) and `hack down` |

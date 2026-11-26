@@ -409,6 +409,10 @@ macTest(
       expect(String((unconfirmed as HackCliError).message)).toContain(
         "stop is unconfirmed"
       );
+      // A hook owner (no recorded original to wait for) may still be exiting.
+      expect(String((unconfirmed as HackCliError).message)).toMatch(
+        /run hack down again\.$/
+      );
       expect(order).toEqual([found, "stop"]);
       expect(notes()).toBe(1);
       // On a running pool an owner that exited without removing its run is
@@ -600,6 +604,109 @@ macTest(
     } finally {
       info.mockRestore();
     }
+  }
+);
+
+macTest(
+  "HACK-2715 review round 2 (Codex P2): plain down and down --recover after a provider crash recover the pool record first and settle the run in one command",
+  async () => {
+    const selected = await fixture();
+    const RUN = "e".repeat(32);
+    const {
+      nativeAuthoredStoppedPoolRun,
+      startStoppedPoolForAuthoredRecovery,
+    } = await import("../src/backends/native-authored-stopped-pool.ts");
+    const { NativeAuthoredStopOwnerExitedError } = await import(
+      "../src/backends/native-authored-stop-errors.ts"
+    );
+    const run = (recover: boolean) => {
+      const calls: string[] = [];
+      // The provider died: its record still says running until `runtime recover`.
+      let recovered = false;
+      const invoke = ((request: { readonly args: readonly string[] }) => {
+        calls.push(request.args.slice(0, 3).join(" "));
+        if (request.args[1] === "status") {
+          return Promise.resolve(
+            recovered
+              ? { phase: "recovered-unclean", process_alive: false }
+              : { phase: "process-exited", process_alive: false }
+          );
+        }
+        if (request.args[1] === "recover") {
+          recovered = true;
+          return Promise.resolve({ phase: "recovered-unclean" });
+        }
+        if (request.args[2] === "boot") {
+          // Before the recovery the record names the receipt's boot as running.
+          return Promise.resolve({
+            version: 1,
+            kind: "native-graph-boot",
+            run: RUN,
+            phase: "ready-observed",
+            ended_boot: recovered,
+            ended_boot_recoverable: recovered,
+          });
+        }
+        return Promise.resolve({ phase: "running" });
+      }) as Parameters<typeof nativeAuthoredStoppedPoolRun>[0]["invoke"];
+      const seam = <T extends { readonly projectRoot: string }>(value: T) => ({
+        ...value,
+        run: () => Promise.resolve(RUN),
+        invoke,
+        notice: () => calls.push("notice"),
+      });
+      const result = tryNativeAuthoredCommand({
+        ...selected,
+        options: { ...selected.options, operation: "down" as const, recover },
+        serve: () => {
+          throw new Error("A stop cannot invoke startup.");
+        },
+        unreservedSelected: () => Promise.resolve(false),
+        nothingToRecover: () => Promise.resolve(false),
+        stoppedPoolRun: (value) => nativeAuthoredStoppedPoolRun(seam(value)),
+        startStoppedPool: (value) =>
+          startStoppedPoolForAuthoredRecovery(seam(value)),
+        startPool: () => {
+          calls.push("runtime up");
+          return Promise.resolve();
+        },
+        stop: () => {
+          calls.push("stop");
+          return Promise.reject(new NativeAuthoredStopOwnerExitedError());
+        },
+        recover: () => {
+          calls.push("recover-run");
+          return Promise.resolve({}) as ReturnType<
+            typeof recoverNativeAuthoredProject
+          >;
+        },
+      }).catch((error: unknown) => error);
+      return { calls, result };
+    };
+    const plain = run(false);
+    expect(await plain.result).toBe(0);
+    expect(plain.calls).toEqual([
+      "runtime status --json",
+      "runtime status --json",
+      "runtime recover --json",
+      "notice",
+      "graph native boot",
+      "stop",
+      "runtime up",
+      "recover-run",
+    ]);
+    const explicit = run(true);
+    expect(await explicit.result).toBe(0);
+    expect(explicit.calls).toEqual([
+      "runtime status --json",
+      "runtime status --json",
+      "runtime recover --json",
+      "notice",
+      "graph native boot",
+      "notice",
+      "runtime up --json",
+      "recover-run",
+    ]);
   }
 );
 

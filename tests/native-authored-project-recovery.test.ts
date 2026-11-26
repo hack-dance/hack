@@ -148,7 +148,13 @@ function removed() {
 async function fixture(
   bootSession = false,
   liveStop = false,
-  preReady?: "interrupted" | "released"
+  preReady?: "interrupted" | "released",
+  /**
+   * HACK-2715 review round 2: the owner records its original's settlement (as
+   * the frontend does once its graph owner exits) before it ends as a crash
+   * would, the shape a live-stop owner leaves when its pool boot ended.
+   */
+  settledBeforeExit = false
 ) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-frontend-recovery-"))
@@ -185,8 +191,8 @@ async function fixture(
           "installFixtureProcessCensus(()=>[process.pid,native.pid]);",
           "await Bun.write(scope.projectRoot+'/native-pid',String(native.pid));",
           "phase='capture';const original=await captureNativeAuthoredProcessIncarnation({pid:native.pid,selected:'/bin/sleep'});",
-          "phase='endpoint';await admission.publishLiveStop({expectedStart:start,expectedRun:ready,source,original,assertFresh:async()=>undefined,stop:async()=>false});",
-          "void (async()=>{while(!(await Bun.file(scope.projectRoot+'/stop-original').exists()))await Bun.sleep(10);if(native.exitCode===null)native.kill('SIGKILL');await native.exited;await Bun.write(scope.projectRoot+'/native-settled','yes');process.exit(77)})();",
+          "phase='endpoint';const live=await admission.publishLiveStop({expectedStart:start,expectedRun:ready,source,original,assertFresh:async()=>undefined,stop:async()=>false});",
+          `void (async()=>{while(!(await Bun.file(scope.projectRoot+'/stop-original').exists()))await Bun.sleep(10);if(native.exitCode===null)native.kill('SIGKILL');await native.exited;${settledBeforeExit ? "await live.settled();" : ""}await Bun.write(scope.projectRoot+'/native-settled','yes');process.exit(77)})();`,
         ]
       : []),
     ...(preReady === "released"
@@ -1295,5 +1301,62 @@ originalCase(
         spy.mockRestore();
       }
     }
+  }
+);
+
+// HACK-2715 review round 2 (seen on a real VM at 3c88966f, rows 1 and 3): a ready
+// live-stop owner whose pool boot ended records its original's settlement and
+// ends as a crash would, keeping its admission lock and every record. Plain
+// `hack down` then finds no owner to ask and settles the run through the
+// dead-owner recovery in the same command; nothing is left that refuses `up -d`.
+originalCase(
+  "a live-stop owner that ended as a crash would after its pool boot ended is cleared by plain hack down",
+  async () => {
+    const current = await fixture(true, true, undefined, true);
+    await current.kill();
+    const settled = (await readdir(current.paths.dir)).filter((name) =>
+      name.endsWith(".live-stop.json.settled")
+    );
+    expect(settled).toHaveLength(1);
+    expect(
+      (await readdir(current.paths.dir)).some((name) =>
+        name.endsWith(".admission.lock")
+      )
+    ).toBe(true);
+    if (process.platform === "darwin") {
+      expect(
+        await tryNativeAuthoredCommand({
+          selected: { kind: "native", projectRoot: current.root },
+          options: { cwd: current.root, operation: "down", instance: "qa" },
+          env: {
+            HACK_RUNTIME_BACKEND: "native",
+            HACK_NATIVE_BINARY: "/bin/sleep",
+            HACK_NATIVE_HOME: current.scope.nativeHome,
+            HACK_COMPOSE_STARTUP_TIMEOUT_MS: "30000",
+          },
+          stoppedPoolRun: () => Promise.resolve("none"),
+          recover: (options) =>
+            recoverNativeAuthoredProject({
+              ...options,
+              request: current.request,
+            }),
+          serve: () => {
+            throw new Error("Recovery must not start a generation.");
+          },
+        })
+      ).toBe(0);
+    } else {
+      expect(
+        (await recoverNativeAuthoredProject(current.options)).receipt.phase
+      ).toBe("removed");
+    }
+    expect(current.cleanupCalls()).toBe(1);
+    // Only the completed recovery history is left, so a new start is admitted.
+    expect((await readdir(current.paths.dir)).sort()).toEqual(
+      [".gitignore", basename(current.paths.intent)].sort()
+    );
+    const saved = JSON.parse(await Bun.file(current.paths.intent).text());
+    expect(saved.record.live_stop_retired).toBe(true);
+    expect(saved.record.live_stop.settled).not.toBeNull();
   }
 );

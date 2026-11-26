@@ -29,15 +29,13 @@
  */
 
 import { isRecord } from "../lib/guards.ts";
-import {
-  nativeProjectRuntimeUpArgs,
-  nativeRuntimePoolStopped,
-} from "./native-project-runtime-up.ts";
+import { nativeRuntimeStatusStopped } from "./native-project-runtime-up.ts";
 import type { NativeRuntimeSelection } from "./native-runtime-client.ts";
 import {
   invokeNativeRuntime,
   NativeRuntimeRequestError,
 } from "./native-runtime-client.ts";
+import { recoverExitedNativeRuntime } from "./native-runtime-preflight.ts";
 
 /** The one line `hack down` prints when it starts a stopped pool. */
 export const NATIVE_AUTHORED_STOPPED_POOL_NOTICE =
@@ -81,6 +79,8 @@ type CheckOptions = {
   /** The project's selected run id, or null when it has none. */
   readonly run: () => Promise<string | null>;
   readonly invoke?: typeof invokeNativeRuntime;
+  /** Where the one-line notices go; stderr by default. */
+  readonly notice?: (line: string) => void;
 };
 
 async function selectedRun(opts: CheckOptions): Promise<string | null> {
@@ -134,14 +134,33 @@ export async function nativeAuthoredStoppedPoolRun(
   opts: CheckOptions
 ): Promise<NativeAuthoredStoppedPoolRun> {
   const run = await selectedRun(opts);
-  if (
-    run === null ||
-    !(await nativeRuntimePoolStopped({
-      runtime: opts.runtime,
-      projectRoot: opts.projectRoot,
-      invoke: opts.invoke ?? invokeNativeRuntime,
-    }))
-  ) {
+  if (run === null) {
+    return "none";
+  }
+  const invoke = opts.invoke ?? invokeNativeRuntime;
+  // HACK-2715 review round 2 (Codex P2): a provider that died under the pool (a
+  // crash, a kill) leaves its record `running`; `runtime status` reports
+  // `process-exited`. The existing boundary (HACK-2579) records it stopped first,
+  // under the provider lease and with the provider proven dead, so the receipt's
+  // boot then reads as ended and the run is recovered like one after a forced stop.
+  const status = await invoke({
+    runtime: opts.runtime,
+    cwd: opts.projectRoot,
+    args: ["runtime", "status", "--json"],
+    timeoutMs: 30_000,
+  }).catch(() => undefined);
+  if (isRecord(status) && status.phase === "process-exited") {
+    if (
+      !(await recoverExitedNativeRuntime({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        invoke,
+        notice: opts.notice,
+      }))
+    ) {
+      return "none";
+    }
+  } else if (!nativeRuntimeStatusStopped(status)) {
     return "none";
   }
   const check = await bootCheck(opts, run);
@@ -155,8 +174,13 @@ export async function nativeAuthoredStoppedPoolRun(
 
 /**
  * Start the stopped pool for a run that {@link nativeAuthoredStoppedPoolRun}
- * found `recoverable`, with the arguments every project start sends, saying so
- * once. A failed `runtime up` throws its own error.
+ * found `recoverable`, saying so once. A failed `runtime up` throws its own
+ * error. It boots the pool exactly as recorded (`runtime up --json`: its profile
+ * and the project shares it already has). A native-authored project needs no
+ * project share, and the pool may already share another project's root: asking
+ * for this project's root refused `project_share_extension_required` on a real
+ * VM at c1dfac73 (row 2), so nothing was started and the stop was reported
+ * unconfirmed.
  */
 export async function startNativeRuntimeForAuthoredRecovery(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -170,7 +194,7 @@ export async function startNativeRuntimeForAuthoredRecovery(opts: {
   await (opts.invoke ?? invokeNativeRuntime)({
     runtime: opts.runtime,
     cwd: opts.projectRoot,
-    args: [...nativeProjectRuntimeUpArgs(opts.projectRoot), "--json"],
+    args: ["runtime", "up", "--json"],
   });
 }
 
@@ -193,7 +217,7 @@ export function isNativeAuthoredEndedBootRefusal(
  * project with no run makes no runtime call (HACK-2715 review round 2, L4).
  */
 export async function startStoppedPoolForAuthoredRecovery(
-  opts: CheckOptions & { readonly notice?: (line: string) => void }
+  opts: CheckOptions
 ): Promise<boolean> {
   const found = await nativeAuthoredStoppedPoolRun(opts);
   if (found === "bound") {

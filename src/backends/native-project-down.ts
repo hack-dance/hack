@@ -1251,9 +1251,12 @@ async function nativeProjectDownOnce(opts: {
     );
   };
   // `hack down --recover` only: see `lostContainerRemovals`.
-  const repairLostRemovals = async (snapshot: unknown): Promise<unknown> => {
+  // Verify a stopped run, first removing containers a lost VM brought back.
+  // The note prints only once the re-inspection verifies the stop.
+  const verifyStoppedRepairing = async (snapshot: unknown): Promise<void> => {
     if (!(opts.recover === true && lostContainerRemovals(snapshot))) {
-      return snapshot;
+      verify(snapshot, run, true);
+      return;
     }
     await invoke({
       runtime: opts.runtime,
@@ -1261,10 +1264,10 @@ async function nativeProjectDownOnce(opts: {
       args: ["graph", "cleanup", "--run-id", run.run, "--json"],
       timeoutMs: 590_000,
     });
+    verify(await inspect(), run, true);
     (opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)))(
       NATIVE_LOST_REMOVAL_NOTE
     );
-    return await inspect();
   };
   const recovered = await recoverNativeInterruptedStartupCleanup({
     runtime: opts.runtime,
@@ -1274,7 +1277,7 @@ async function nativeProjectDownOnce(opts: {
     invoke,
   });
   if (recovered !== null) {
-    verify(await repairLostRemovals(recovered), run, true);
+    await verifyStoppedRepairing(recovered);
     await opts.retireHostProcesses?.(run);
     await wait();
     await owedAfterStop();
@@ -1307,8 +1310,7 @@ async function nativeProjectDownOnce(opts: {
     // completed hooks must not replay; only journaled owed phases run once.
     // The one exception is the runtime's own removal of containers the receipt
     // already records removed but a lost VM brought back; no hook runs for it.
-    initial = await repairLostRemovals(initial);
-    verify(initial, run, true);
+    await verifyStoppedRepairing(initial);
     await opts.retireHostProcesses?.(run);
     await wait();
     await owedAfterStop();

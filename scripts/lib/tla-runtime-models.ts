@@ -3303,7 +3303,7 @@ const contracts: readonly ModelContract[] = [
     // restart-recovers is the reachability witness of a recovered restart.
     name: "foreground-loss-recovery",
     module: "ForegroundLossRecovery",
-    states: 88,
+    states: 100,
     invariant: "NoRefusedAdvice",
     fields: ['outcome = "refused"', 'lostAt = "Preparing"'],
     alternativeWitnesses: [['outcome = "refused"', 'lostAt = "Requested"']],
@@ -3320,6 +3320,14 @@ const contracts: readonly ModelContract[] = [
           'msg = "genericUp"',
           'lostAt = "Preparing"',
         ],
+      },
+      {
+        // 38347515 (round-4 review): a lost-provider code alone counts as a
+        // lost VM, so an ordinary failure on a healthy VM gets lost-VM advice.
+        name: "code-without-veto",
+        negative: true,
+        invariant: "NoFalseLoss",
+        fields: ['endedBy = "ordinary"', 'lostAt = "Preparing"'],
       },
       {
         // Real-VM row 8: containers a lost VM brought back are not removed,

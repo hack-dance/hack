@@ -6,6 +6,7 @@ import {
   type NativeStartPoolEnd,
   nativeForegroundPoolEndMessage,
   nativeLostProviderCode,
+  nativeLostVmCauseLine,
   watchNativeStartPool,
 } from "../src/backends/native-start-pool-watch.ts";
 
@@ -412,4 +413,40 @@ test("a failed start is classified as lost from the same pool reading as the wat
       gone: () => false,
     })
   ).toBeUndefined();
+});
+
+test("a live provider on the watched boot vetoes a lost-provider code", async () => {
+  // Round-4 review: the runtime reports `process_identity_unavailable` for
+  // failures on a healthy VM too (an image build's context snapshot, an
+  // incarnation read, a helper scan, engine verification).
+  const coded = new NativeRuntimeRequestError({
+    message: "Native runtime request failed (process_identity_unavailable).",
+    nativeCode: "process_identity_unavailable",
+  });
+  const classify = (record: unknown) =>
+    classifyNativeLostProvider({
+      error: coded,
+      home: "/unused",
+      bootId: boot,
+      read: async () => record,
+      gone: () => false,
+    });
+  expect(await classify(record({ process: { pid: 4242 } }))).toBeUndefined();
+  // Still recorded, mid-transition: not proven ended, so not lost either.
+  expect(await classify(record({ phase: "starting" }))).toBeUndefined();
+  // A record naming no boot at all leaves the code to decide.
+  expect(await classify({ token: owner, phase: "running" })).toEqual({
+    bootId: boot,
+  });
+});
+
+test("the cause line keeps the start's own message, bounded to one line", () => {
+  expect(
+    nativeLostVmCauseLine(new Error("Image preparation failed.\n- web (x): y"))
+  ).toBe("(cause: Image preparation failed. - web (x): y)");
+  expect(nativeLostVmCauseLine(" \n ")).toBeUndefined();
+  expect(nativeLostVmCauseLine(undefined)).toBeUndefined();
+  const long = nativeLostVmCauseLine(new Error("x".repeat(1000)));
+  expect(long?.length).toBeLessThan(420);
+  expect(long?.endsWith("…)")).toBe(true);
 });

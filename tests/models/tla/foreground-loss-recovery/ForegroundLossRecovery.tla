@@ -45,9 +45,14 @@
 \*     the run is stopped with data kept, when the restart lock is free.
 \*   RepairLeftover: `hack down --recover` removes containers the receipt
 \*     records removed that a lost VM brought back.
+\*   ClassifyRule = "veto": a start error counts as a lost VM only from the
+\*     pool record, or from a lost-provider code when the record shows nothing
+\*     live for the watched boot (this fix); "code": the code alone suffices
+\*     (38347515), though the runtime also reports it on a healthy VM.
 EXTENDS Naturals, Sequences
 
-CONSTANTS MessageRule, ErrorRule, ReleaseLock, RetireIntent, RepairLeftover
+CONSTANTS MessageRule, ErrorRule, ReleaseLock, RetireIntent, RepairLeftover,
+          ClassifyRule
 
 VARIABLES kind, recorded, start, lostAt, endedBy, leftover, receipt, intent,
           lock, msg, todo, outcome
@@ -62,13 +67,13 @@ TypeOK ==
     /\ recorded \in BOOLEAN
     /\ start \in Stages \cup {"Dead", "Lost"}
     /\ lostAt \in Stages \cup {"none"}
-    /\ endedBy \in {"none", "watch", "error"}
+    /\ endedBy \in {"none", "watch", "error", "ordinary"}
     /\ leftover \in BOOLEAN
     /\ receipt \in {"none", "stopped", "unready", "ready"}
     /\ intent \in {"none", "cleaned"}
     /\ lock \in BOOLEAN
     /\ msg \in {"none", "up", "downUp", "downRestart", "inspect",
-                "genericUp", "genericDown"}
+                "genericUp", "genericDown", "own"}
     /\ todo \in Seq(Commands)
     /\ outcome \in {"pending", "ok", "refused"}
 
@@ -167,6 +172,20 @@ StartFails ==
         IF ErrorRule = "stage" THEN Message(lostAt) ELSE GenericMessage(lostAt),
         FALSE)
 
+\* An ordinary failure on a healthy VM (no `Die`): the record still shows the
+\* watched boot's provider alive. Its error may still carry the runtime's
+\* `process_identity_unavailable` (an image build's context snapshot, an
+\* incarnation read). It must keep its own message (`own`, nothing to run).
+OrdinaryFail ==
+    /\ start \in Stages
+    /\ \E coded \in BOOLEAN :
+         msg' = IF ClassifyRule = "code" /\ coded
+                THEN Message(start) ELSE "own"
+    /\ start' = "Lost" /\ lostAt' = start /\ endedBy' = "ordinary"
+    /\ todo' = <<>> /\ outcome' = "ok"
+    /\ lock' = FALSE
+    /\ UNCHANGED <<kind, recorded, leftover, receipt, intent>>
+
 \* `hack down --recover` depends on where the start was lost, not on what the
 \* message said. Lost while preparing, the record (if any) is still the
 \* stopped retained run, and a fresh `up` has none (`not_started`); lost once
@@ -205,7 +224,8 @@ Step ==
                          ELSE IF c = "restart" THEN "none" ELSE intent
     /\ UNCHANGED <<kind, recorded, start, lostAt, endedBy, lock, msg>>
 
-Next == Request \/ GraphReady \/ Serve \/ Die \/ Watch \/ StartFails \/ Step
+Next == Request \/ GraphReady \/ Serve \/ Die \/ Watch \/ StartFails
+        \/ OrdinaryFail \/ Step
 Spec == Init /\ [][Next]_vars
 
 \* Every command the message names, run in order, is accepted.
@@ -215,5 +235,8 @@ NoRefusedAdvice == outcome # "refused"
 NoNeedlessWithholding == msg = "inspect" => lostAt = "Requested"
 \* Reachability witness (expected to fail): a lost restart is recovered by
 \* following its message.
-NoRestartRecovery == ~(kind = "restart" /\ outcome = "ok" /\ msg # "inspect")
+NoRestartRecovery ==
+    ~(kind = "restart" /\ outcome = "ok" /\ msg \notin {"inspect", "own"})
+\* An ordinary failure on a live VM never gets lost-VM advice.
+NoFalseLoss == endedBy = "ordinary" => msg = "own"
 =============================================================================

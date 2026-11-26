@@ -264,6 +264,7 @@ import {
   type NativeForegroundLossStage,
   type NativeStartPoolEnd,
   nativeForegroundPoolEndMessage,
+  nativeLostVmCauseLine,
   watchNativeStartPool,
 } from "./native-start-pool-watch.ts";
 import { formatNativeStartupLogReport } from "./native-startup-logs.ts";
@@ -4959,8 +4960,9 @@ export async function startNativeProject(
 
 /**
  * A foreground start that failed because its VM was lost (HACK-2096): the stage
- * message the pool watch would have printed, as the start's error. The original
- * error stays as `cause`.
+ * message the pool watch would have printed, as the start's error, then the
+ * original error's message on one `(cause: …)` line so a misclassification can
+ * be diagnosed. The original error also stays as `cause`.
  */
 export class NativeForegroundVmLostError extends ClosedCliError {
   readonly end: NativeStartPoolEnd;
@@ -4970,9 +4972,14 @@ export class NativeForegroundVmLostError extends ClosedCliError {
     readonly loss: NativeForegroundLossStage;
     readonly cause: unknown;
   }) {
-    super(nativeForegroundPoolEndMessage(opts.end, opts.loss), {
-      cause: opts.cause,
-    });
+    const cause = nativeLostVmCauseLine(opts.cause);
+    super(
+      [
+        nativeForegroundPoolEndMessage(opts.end, opts.loss),
+        ...(cause ? [cause] : []),
+      ].join("\n"),
+      { cause: opts.cause }
+    );
     this.end = opts.end;
     this.loss = opts.loss;
   }

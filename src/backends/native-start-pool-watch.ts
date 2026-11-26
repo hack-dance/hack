@@ -269,9 +269,14 @@ export function nativeLostProviderCode(error: unknown, depth = 0): boolean {
  * grace. This is the one classification every such path goes through, so the
  * user gets the same stage message whichever notices first. The pool record is
  * the evidence (the same reading as the watch: the watched boot's provider pid
- * is gone, or the boot ended); a lost-provider code in the error also counts,
- * for a record that cannot be read or does not yet show the loss. Undefined
- * when neither proves a loss.
+ * is gone, or the boot ended). A record that still names the watched boot
+ * without proving it ended (its provider pid is alive) vetoes everything else:
+ * the runtime also reports `process_identity_unavailable` for failures on a
+ * healthy VM (an image build's context snapshot, an incarnation read, a helper
+ * process scan, engine verification), and those must keep their own message.
+ * Only when the record cannot be read, or names no state for the watched boot,
+ * does a lost-provider code in the error count. Undefined when nothing proves a
+ * loss.
  */
 export async function classifyNativeLostProvider(opts: {
   readonly error: unknown;
@@ -290,9 +295,32 @@ export async function classifyNativeLostProvider(opts: {
   if (end) {
     return end;
   }
+  if (isRecord(record) && record.guest_boot_id === opts.bootId) {
+    // The watched boot is still recorded and not proven ended: not lost.
+    return undefined;
+  }
   return nativeLostProviderCode(opts.error)
     ? { bootId: opts.bootId }
     : undefined;
+}
+
+/**
+ * The failed start's own message as one bounded line, appended to a lost-VM
+ * error so a misclassification can still be diagnosed (HACK-2096 review). The
+ * text is the closed message the CLI would have printed anyway.
+ */
+export function nativeLostVmCauseLine(cause: unknown): string | undefined {
+  let message = "";
+  if (cause instanceof Error) {
+    message = cause.message;
+  } else if (typeof cause === "string") {
+    message = cause;
+  }
+  const line = message.replace(/\s+/g, " ").trim();
+  if (line === "") {
+    return undefined;
+  }
+  return `(cause: ${line.length > 400 ? `${line.slice(0, 399)}…` : line})`;
 }
 
 /** The provider pid a running pool record names, when it is a plausible pid. */

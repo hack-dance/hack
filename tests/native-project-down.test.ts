@@ -3222,6 +3222,8 @@ function lostRemovalSnapshot(webState: string) {
 async function lostRemovalDown(opts: {
   readonly recover: boolean;
   readonly webState: "exited" | "running";
+  /** Whether the runtime's cleanup actually removes the container. */
+  readonly cleanupClears?: boolean;
 }) {
   const fx = await fixture();
   const calls: string[] = [];
@@ -3260,7 +3262,9 @@ async function lostRemovalDown(opts: {
         return { authority: { present: false } };
       }
       expect(command).toBe("inspect");
-      return lostRemovalSnapshot(cleaned ? "absent" : opts.webState);
+      return lostRemovalSnapshot(
+        cleaned && opts.cleanupClears !== false ? "absent" : opts.webState
+      );
     },
   });
   const result = await down.then(
@@ -3288,6 +3292,19 @@ test.each([
   expect(result).toBeInstanceOf(Error);
   expect(String(result)).toContain("cleanup is unconfirmed");
   expect(calls).not.toContain("cleanup");
+  expect(notices).not.toContain(NATIVE_LOST_REMOVAL_NOTE);
+});
+
+test("down --recover prints no removal note when the re-inspection still finds the container", async () => {
+  // Round-4 review: the note prints only after the re-inspection verifies.
+  const { result, calls, notices } = await lostRemovalDown({
+    recover: true,
+    webState: "exited",
+    cleanupClears: false,
+  });
+  expect(result).toBeInstanceOf(Error);
+  expect(String(result)).toContain("cleanup is unconfirmed");
+  expect(calls).toContain("cleanup");
   expect(notices).not.toContain(NATIVE_LOST_REMOVAL_NOTE);
 });
 

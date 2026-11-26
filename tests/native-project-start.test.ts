@@ -8058,34 +8058,56 @@ test.each([
     expect(lost.cause).toBe(original);
   }
   expect(lost.end).toEqual({ bootId: boot, providerPid: pid });
-  expect(lost.message).toContain(`pid ${pid}`);
-  expect(lost.message).toContain("exit code 1");
-  expect(lost.message).not.toContain("hack restart");
-  expect(lost.message).not.toContain("Image preparation failed");
+  // The stage message, then the start's own error on one cause line (round-4
+  // review: a misclassification stays diagnosable).
+  const lines = lost.message.split("\n");
+  const causeLine = lines.at(-1) ?? "";
+  const advice = lines.slice(0, -1).join("\n");
+  expect(causeLine.startsWith("(cause: ")).toBe(true);
+  if (path === "unwind") {
+    // The start's own unwind error (real-VM row 2's shape).
+    expect(causeLine).toContain(
+      "Native foreground exit cleanup is unconfirmed"
+    );
+  } else if (original instanceof Error) {
+    expect(causeLine).toContain(original.message.split("\n")[0]!);
+  }
+  expect(advice).toContain(`pid ${pid}`);
+  expect(advice).toContain("exit code 1");
+  expect(advice).not.toContain("hack restart");
+  expect(advice).not.toContain("Image preparation failed");
   if (stage === "preparing") {
     expect(lost.loss).toEqual({ stage: "preparing", recorded: false });
-    expect(lost.message).not.toContain("hack down");
-    expect(lost.message.split("\n").at(-1)).toBe(
-      "Run hack up to start it again."
-    );
+    expect(advice).not.toContain("hack down");
+    expect(lines.at(-2)).toBe("Run hack up to start it again.");
   } else if (stage === "preparing-restore") {
     expect(lost.loss).toEqual({ stage: "preparing", recorded: true });
-    expect(lost.message).toContain(
+    expect(advice).toContain(
       "Run hack down --recover to retire the interrupted start with the run's data kept, then hack up to start it again."
     );
   } else if (stage === "requested") {
     expect(lost.loss).toEqual({ stage: "requested" });
-    expect(lost.message).not.toContain("hack down");
-    expect(lost.message).toContain("Keep this native home unchanged");
+    expect(advice).not.toContain("hack down");
+    expect(advice).toContain("Keep this native home unchanged");
   } else {
     expect(lost.loss).toEqual({ stage: "ready" });
-    expect(lost.message).toContain(
+    expect(advice).toContain(
       "Run hack down --recover to retire this run with its data kept, then hack up to start it again."
     );
   }
 });
 
-test("a start error with no lost-provider evidence keeps its own message", async () => {
+/**
+ * Round-4 review: the runtime also reports `process_identity_unavailable` for
+ * failures on a healthy VM (an image build's context snapshot, an incarnation
+ * read, a helper scan). A live provider on the watched boot vetoes the code.
+ */
+test.each([
+  { error: "plain" },
+  { error: "lost-provider code" },
+] as const)("a start error on a live VM keeps its own message ($error)", async ({
+  error,
+}) => {
   const { opts } = await fixture(false);
   const boot = "87654321-4321-4321-4321-cba987654321";
   opts.dependencies.watchPool = () => () => undefined;
@@ -8105,7 +8127,18 @@ test("a start error with no lost-provider evidence keeps its own message", async
     request.args[0] === "runtime" && request.args[1] === "up"
       ? { phase: "running", process_alive: true, guest_boot_id: boot }
       : await invoke(request);
-  const original = new Error("synthetic image read failure");
+  const original =
+    error === "plain"
+      ? new Error("synthetic image read failure")
+      : new NativeImageBatchError([
+          {
+            reference: "docker.io/library/python:3.10-alpine",
+            code: "process_identity_unavailable",
+            reason: "Cannot establish native provider process identity",
+            recovery: "Inspect hack doctor, then retry hack up.",
+            services: ["web"],
+          },
+        ]);
   opts.dependencies.retainedImages = async () => {
     throw original;
   };

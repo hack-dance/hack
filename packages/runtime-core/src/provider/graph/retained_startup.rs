@@ -72,8 +72,9 @@ fn exited_unadmitted_retained(candidate: &Candidate, run: &str) -> bool {
         .is_some_and(|(receipt, _)| receipt.phase == "stopped-data-retained")
 }
 
-/// A start the cross-boot dead-owner recovery admits (`failed-retained` or
-/// `preparing` with a settled relay startup). Presentation only, as above.
+/// A start the cross-boot dead-owner recovery admits (`failed-retained`,
+/// `preparing` or `restoring`, with a settled relay startup). Presentation only,
+/// as above.
 fn exited_unconfirmed_start(candidate: &Candidate, run: &str) -> bool {
     Owner::load(candidate)
         .ok()

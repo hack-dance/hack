@@ -42,6 +42,34 @@ test("only the versioned bounded reply contract is accepted, whole or not at all
   }
 });
 
+test("an exited service's tail carries its exit status, and only an integer one", () => {
+  expect(
+    readNativeStartupLogs({
+      version: 1,
+      services: [
+        tail({ service: "app", stderr: "error", exit_code: 1 }),
+        tail({ service: "api", exit_code: 0 }),
+        tail({ service: "db" }),
+      ],
+    })
+  ).toEqual([
+    { ...tail({ service: "app", stderr: "error" }), exitCode: 1 },
+    { ...tail({ service: "api" }), exitCode: 0 },
+    tail({ service: "db" }),
+  ]);
+  for (const exit_code of [1.5, "1", null, Number.MAX_SAFE_INTEGER + 1]) {
+    expect(
+      readNativeStartupLogs({ version: 1, services: [tail({ exit_code })] })
+    ).toBeUndefined();
+  }
+  expect(
+    readNativeStartupLogs({
+      version: 1,
+      services: [tail({ exit_code: 1, extra: true })],
+    })
+  ).toBeUndefined();
+});
+
 test("every managed value is redacted, including substrings, escaped forms and lines", () => {
   const key = "-----BEGIN KEY-----\nc3ludGhldGlj\n-----END KEY-----";
   const values = ["synthetic-secret", "s3cr3t-token", key];

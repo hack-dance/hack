@@ -112,6 +112,20 @@ If writable source sharing asks for consent, review the exact source roots and
 [sharing limits](full-reference.md#explicit-writable-development-source) before
 opting in. Check the app and saved data yourself; a running VM is not acceptance.
 
+If a service's own process exits before the start is ready, for example because
+its command names a script that does not exist, `up` stops the failed start and
+fails with `E_SERVICE_EXITED`. The message names each service and its exit code
+("Service app exited with code 1 during startup"). An exit with code 0 before
+readiness is reported the same way. This applies only when the exit is the
+start's first failure: if another service failed first (for example a database
+that never became healthy) and a dependent service then exited, `up` reports the
+first failure and still prints each failed service's last lines.
+With `--json`, `error.detail.services` lists
+each service's `name` and `exitCode`, and `error.detail.nativeCode` keeps the
+runtime's own code. A foreground `up` also prints each failed service's last
+output lines with managed values redacted. A detached `up` never carries service
+output, so run `hack up` without `-d` in a terminal to see them.
+
 For a native project backed by a Compose file, use `hack up redis` or pass
 several service names to start that selection and its `depends_on` dependencies.
 Hack adds them to the current run if the project is already up. Running services
@@ -126,6 +140,15 @@ changed. On native, use `hack restart` to apply those changes. If the owner is
 still warming or starting another selection, a second targeted start returns
 `E_NATIVE_STILL_STARTING` through the owner. Use `hack ps` to check its progress
 and retry.
+
+A targeted start sends the owner a review of the whole Compose file. If that
+review no longer matches what the run recorded (for example, a running service's
+definition or the source changed since the run started), the owner records its
+own review of the combined services instead, and `up` warns that it did. The
+start still succeeds. A later restore of this run, after a retaining
+`hack down`, has to reconcile that review: it refuses when the run uses live
+source sharing, carries a source cache scope or has a pending initializer cache
+release. Runtimes from before this check omit the warning.
 
 Adding routes or loopback ports requires enough free bridge sockets in the
 running pool. Hack checks capacity before recording or creating the selected
@@ -149,6 +172,9 @@ created midway. The owner can answer after an in-flight image inspection,
 volume preparation or container operation settles. Confirmed
 `hack down --remove-data` during a service append also cancels it and stops
 the run, then removes its owned volumes once the stop is confirmed.
+If the add finished or rolled back while you were confirming, nothing is
+removed and the project keeps running; run `hack down`, then
+`hack down --remove-data`.
 If the owner exited, use
 `hack down --recover`. Recovery uses the last committed receipt for cleanup
 and keeps interrupted writes as evidence. After a retaining `down`, `ps` shows
@@ -206,12 +232,26 @@ Stop with the **same version and native home**:
 "$CANDIDATE" down --path /absolute/project
 ```
 
-If the foreground owner exited during startup, run `"$CANDIDATE" down --recover
---path /absolute/project` while the original pool is still running. Recovery
-retains project data and requires matching records for this run. If those
-records cannot prove ownership, keep the old home and use a separate checkout
-with a [fresh manual native home](setup.md#manual-homes). This starts a separate
-run without transferring the old run’s data.
+If a foreground `up` is lost (its terminal closed or the process was killed)
+while its services run, run `"$CANDIDATE" down --recover --path /absolute/project`,
+then `"$CANDIDATE" up` to start it again. The graph owner notices that its
+frontend went and stops the services on its own, with data retained. `down
+--recover` stops an owner that is still running through its own cleanup,
+waits up to 15 s for one that is finishing its own stop, accepts the stop the
+owner already made, or recovers an owner that died before or after its stop, and
+it finishes the lost frontend's shutdown. If the owner is still exiting when
+that wait ends, run the same command again once it has exited.
+
+If the foreground owner exited during startup, run the same `down --recover`
+while the original pool is still running. Recovery retains project data and
+requires matching records for this run. If it refuses, run `hack ps --json`:
+while the owner is still running or stopping, wait for it to exit and run
+`down --recover` again. If it still refuses after the owner exited, the run
+cannot be recovered in this boot. A start that failed or never finished, or an
+owner that died during its own stop, keeps its data in this home, and the
+[explicit dead-owner cleanup](https://github.com/hack-dance/hack/blob/next/docs/guides/native-candidate.md#explicit-cleanup-after-a-dead-foreground-owner)
+recovers it across a pool stop. That cleanup does not cover an owner that died
+while restoring or restarting a retained run; keep the home and its receipts.
 
 If stop reports retained or unknown cleanup, follow its inspection instructions
 before switching. Keep the home and receipts; use the
@@ -273,3 +313,7 @@ Native `hack up --json` includes the same `hack.timings/1` records
 in `data.timings`. Add `--timings-file <file>` to save those records as JSONL
 in a new file. Times overlap when steps run together, so use `command.total`
 for elapsed startup time.
+
+Native `hack down` and `hack ps` accept the same two flags. `--timings` prints
+the command's timeline to stderr, so a `--json` result on stdout is unchanged.
+`--timings-file <file>` saves the joined `hack.timings/1` records as JSONL.

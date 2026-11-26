@@ -1,14 +1,95 @@
 import { expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   countJsonValues,
   globalContainersVerdict,
   groupWritableAncestors,
   installedLauncher,
+  noComposeDockerScript,
+  noComposeInstallVerdict,
   parseCheckArgs,
   pathWithoutHack,
   renderStepTable,
 } from "../scripts/linux-first-run-check.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
+
+test("the no-Compose docker wrapper rejects only compose and runs the real CLI otherwise (HACK-2673)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "first-run-no-compose-"));
+  try {
+    // A stand-in for the real docker, at a path that needs quoting.
+    const real = join(dir, "real docker's bin");
+    await writeFile(real, '#!/bin/sh\necho "real $*"\n', { mode: 0o700 });
+    const wrapper = join(dir, "docker");
+    await writeFile(wrapper, noComposeDockerScript(real), { mode: 0o700 });
+    const run = (args: string[]) =>
+      spawnSyncBounded([wrapper, ...args], { timeout: 10_000 });
+    const compose = run(["compose", "version"]);
+    expect(compose.exitCode).toBe(1);
+    expect(compose.stderr.toString()).toContain(
+      "'compose' is not a docker command"
+    );
+    const info = run(["info", "--format", "x y"]);
+    expect(info.exitCode).toBe(0);
+    expect(info.stdout.toString()).toBe("real info --format x y\n");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the no-Compose install passes only when it names the plugin and not the ports (HACK-2673)", () => {
+  const refusal =
+    "E_DOCKER_UNAVAILABLE: Docker is running, but `docker compose version` failed: Hack needs the Docker Compose v2 plugin.\n";
+  expect(
+    noComposeInstallVerdict({ exit: 1, stdout: "", stderr: refusal })
+  ).toEqual({
+    ok: true,
+    note: "E_DOCKER_UNAVAILABLE names the Compose plugin",
+  });
+  expect(
+    noComposeInstallVerdict({
+      exit: 1,
+      stdout: "",
+      stderr: `${refusal}The proxy could not start on ports 80 and 443.\n`,
+    })
+  ).toEqual({ ok: false, note: "blamed ports 80/443" });
+  // The listener-naming message and the setting count as blaming the ports.
+  expect(
+    noComposeInstallVerdict({
+      exit: 1,
+      stdout: "",
+      stderr: `${refusal}The proxy cannot publish ports 80 and 443: 10.8.0.2:443 is already in use by vpn-client.\n`,
+    })
+  ).toEqual({ ok: false, note: "blamed ports 80/443" });
+  expect(
+    noComposeInstallVerdict({
+      exit: 1,
+      stdout: "",
+      stderr: `${refusal}Set proxy.bind_address to publish on one address.\n`,
+    })
+  ).toEqual({ ok: false, note: "blamed ports 80/443" });
+  expect(noComposeInstallVerdict({ exit: 0, stdout: "", stderr: "" }).ok).toBe(
+    false
+  );
+  expect(
+    noComposeInstallVerdict({ exit: 1, stdout: "", stderr: "boom\n" }).note
+  ).toContain("did not name the plugin");
+});
+
+test("the no-Compose install runs after the real install, so that one starts from a fresh HOME (HACK-2673)", async () => {
+  const source = await Bun.file(
+    join(import.meta.dir, "..", "scripts", "linux-first-run-check.ts")
+  ).text();
+  const body = source.slice(source.indexOf("async function globalSetup("));
+  const realInstall = body.indexOf('"2 global install",');
+  const noCompose = body.indexOf("await composePluginMissingStep(run);");
+  expect(realInstall).toBeGreaterThan(0);
+  expect(noCompose).toBeGreaterThan(realInstall);
+  // Called once, from globalSetup only.
+  expect(source.split("await composePluginMissingStep(run);").length).toBe(2);
+});
 
 test("counts one document, line-delimited values, and refuses garbage", () => {
   expect(countJsonValues('{\n  "ok": true\n}\n')).toBe(1);

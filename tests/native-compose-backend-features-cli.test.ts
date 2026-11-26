@@ -162,6 +162,12 @@ async function cli(
   return { code, output: stdout + stderr };
 }
 
+/** Native builds turned off with the only off switch, plus the shared-source grant. */
+const BUILDS_OFF_ENV = {
+  HACK_NATIVE_SHARED_SOURCE: "1",
+  HACK_NATIVE_BUILDS: "0",
+} as const;
+
 /** The activity log every lifecycle command appends to, refused ones too. */
 const ACTIVITY_ENTRIES = new Set([
   join("user-home", ".hack"),
@@ -302,7 +308,7 @@ test(
 );
 
 test(
-  "a build outside the basic form refuses native up before any request or write",
+  "with HACK_NATIVE_BUILDS=0, a build outside the basic form refuses native up before any request or write",
   async () => {
     await expectComposeBackendRefusal({
       compose: {
@@ -310,6 +316,7 @@ test(
           web: { build: { context: "..", args: { TOKEN_NAME: "build-arg" } } },
         },
       },
+      env: BUILDS_OFF_ENV,
       phrase:
         "a Compose build outside the basic context, dockerfile and target form",
       secrets: ["TOKEN_NAME", "build-arg"],
@@ -348,7 +355,7 @@ test(
         networks: { edge: { external: { name: "edge" } } },
         volumes: { cache: { external: true } },
       },
-      env: {},
+      env: { HACK_NATIVE_BUILDS: "0" },
       phrase:
         "an external Compose network, an external Compose volume, a Compose build outside the basic context, dockerfile and target form and a service platform other than linux/arm64",
     });
@@ -418,11 +425,11 @@ test(
         NATIVE_CONFIGURATION_REFUSAL,
       ],
       [{ image: IMAGE, logging: "json-file" }, NATIVE_CONFIGURATION_REFUSAL],
-      // A basic build stays refused unless native builds are explicitly enabled.
+      // A basic build stays refused while HACK_NATIVE_BUILDS=0 turns builds off.
       [{ build: ".." }, nativeBuildsDisabledRefusal("web")],
     ] as const) {
       const f = await fixture({ services: { web: service } });
-      const result = await cli(f, ["up"]);
+      const result = await cli(f, ["up"], BUILDS_OFF_ENV);
       const label =
         typeof service === "object" && "labels" in service
           ? Object.keys(service.labels)[0]
@@ -439,11 +446,11 @@ test(
   SPAWN_TIMEOUT_MS
 );
 
-/** Native builds enabled, with the usual shared-source grant. */
-const BUILDS_ENV = { HACK_NATIVE_SHARED_SOURCE: "1", HACK_NATIVE_BUILDS: "1" };
+/** Native builds on by default (HACK-2532): no switch, the usual shared-source grant. */
+const BUILDS_ENV = { HACK_NATIVE_SHARED_SOURCE: "1" };
 
 test(
-  "with native builds enabled, build args pass the check and reach native start",
+  "with native builds on by default, build args pass the check and reach native start",
   async () => {
     // HACK-1925: args are a native builds field, so the Compose-backend check
     // passes and native start goes on to its own source preflight and runtime.
@@ -466,7 +473,7 @@ test(
 );
 
 test(
-  "with native builds enabled, a build arg equal to a managed secret refuses by name only",
+  "with native builds on by default, a build arg equal to a managed secret refuses by name only",
   async () => {
     const secret = "synthetic-dummy-managed-value-1925";
     const f = await fixture({
@@ -501,7 +508,7 @@ test(
 );
 
 test(
-  "with native builds enabled, a build field native builds lack names the service and field in three lines",
+  "with native builds on by default, a build field native builds lack names the service and field in three lines",
   async () => {
     const f = await fixture({
       services: {
@@ -731,10 +738,12 @@ test(
 );
 
 test(
-  "native doctor warns for a basic build that native up refuses",
+  "with HACK_NATIVE_BUILDS=0, native doctor warns for a basic build that native up refuses",
   async () => {
     const f = await fixture({ services: { web: { build: ".." } } });
-    const result = await cli(f, ["doctor", "--json"], {});
+    const result = await cli(f, ["doctor", "--json"], {
+      HACK_NATIVE_BUILDS: "0",
+    });
     const envelope: unknown = JSON.parse(
       result.output.slice(result.output.indexOf("{"))
     );
@@ -753,6 +762,32 @@ test(
       },
     });
     expect(result.output).toContain("hack config import --dry-run");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "by default, native doctor reports no refusal for a basic build that native up builds",
+  async () => {
+    // HACK-2532: native builds are on unless HACK_NATIVE_BUILDS=0.
+    const f = await fixture({ services: { web: { build: ".." } } });
+    const result = await cli(f, ["doctor", "--json"], {});
+    const envelope: unknown = JSON.parse(
+      result.output.slice(result.output.indexOf("{"))
+    );
+    expect(envelope).toMatchObject({
+      data: {
+        checks: expect.arrayContaining([
+          expect.objectContaining({
+            id: "compose backend features",
+            status: "ok",
+            composeBackend: { features: [] },
+          }),
+        ]),
+      },
+    });
+    expect(result.output).not.toContain("basic_build");
+    expect(result.output).not.toContain("HACK_NATIVE_BUILDS");
   },
   SPAWN_TIMEOUT_MS
 );

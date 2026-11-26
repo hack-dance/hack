@@ -70,7 +70,12 @@ check the host runtime bins with the script's exact features, the
 `packages/relay-guest` binary on `aarch64-unknown-linux-musl`, and runtime-core's
 `hack-storage-root-witness` binary on that target with
 `--features storage-root-witness-tool`. For musl checks, use the script's Zig
-compiler/linker for cross-target C dependencies. Linux checks do not replace the macOS host check or
+compiler/linker for cross-target C dependencies. `sh scripts/check-runtime-core-cross.sh`
+(pinned Rust and Zig, `aarch64-apple-darwin` and `aarch64-unknown-linux-musl`
+targets installed) runs `clippy -D warnings` for macOS with default and all features
+and for the musl storage tool, from Linux or a Mac; the Linux `Candidate core` leg
+runs it on every PR that selects that job. It compiles macOS-gated code; it does not run
+macOS tests. Linux checks do not replace the macOS host check or
 actual candidate bundle build. List target/feature commands and results in the
 ready note; do not infer guest compilation from host tests or green hosted jobs.
 

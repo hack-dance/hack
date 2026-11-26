@@ -335,6 +335,38 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // HACK-2188: without resume, a rerun refuses a restore that was only
+    // interrupted after moving the step's output aside.
+    name: "upgrade-restore",
+    module: "Restore",
+    states: 613,
+    invariant: "InterruptedRestoreResumes",
+    fields: [
+      'target = "none"',
+      'aside = <<"S">>',
+      'outcome = "conflict"',
+      'phase = "idle"',
+      "force = FALSE",
+    ],
+    additionalControls: [
+      {
+        // Review of HACK-2188: when a completed restore keeps the step
+        // output keyed, a plain rerun after the user deletes the restored
+        // file adopts it and recreates the path without overwrite.
+        name: "kept-keys",
+        negative: true,
+        invariant: "DeletionKept",
+        fields: [
+          "emptied = TRUE",
+          'outcome = "restored"',
+          "force = FALSE",
+          'aside = <<"S">>',
+          "consumed = 0",
+        ],
+      },
+    ],
+  },
+  {
     name: "interactive-session",
     module: "Session",
     states: 459,
@@ -3033,6 +3065,35 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // HACK-2097: `down --recover` after a lost foreground whose graph owner
+    // still runs and then stops itself (its publication reading `uncertain`
+    // mid-retirement), dies at any point of its run or its stop, or loses its
+    // publication. `negative` is the code before: a running selection whose
+    // stop found the owner gone refused without naming a working step.
+    // `no-settle` reselects without the bounded wait and refuses an owner
+    // still exiting. `unconfirmed-absent` accepts a retired publication
+    // without the stopped-receipt check and reports a false success.
+    name: "native-down-lost-frontend",
+    module: "DownLostFrontend",
+    states: 57,
+    invariant: "NoDeadEnd",
+    fields: ['pc = "refused"', 'why = "unnamed"', "reselected = FALSE"],
+    additionalControls: [
+      {
+        name: "no-settle",
+        negative: true,
+        invariant: "NoDeadEnd",
+        fields: ['pc = "refused"', 'why = "unnamed"', "reselected = TRUE"],
+      },
+      {
+        name: "unconfirmed-absent",
+        negative: true,
+        invariant: "DoneIsStopped",
+        fields: ['pc = "done"', 'graph = "ready"', "vanished = TRUE"],
+      },
+    ],
+  },
+  {
     // HACK-2456: a pool that stops or dies under a live run. Positive: the
     // stopped-pool recovery plus recovery from any earlier boot of the pool,
     // with every fault (other boots, a stop between a recovery's boot and its
@@ -3511,6 +3572,14 @@ const contracts: readonly ModelContract[] = [
           'recorded = "expired"',
           'chose = "recorded"',
         ],
+      },
+      {
+        // HACK-2534. Restores the separate digest pass a cached archive took
+        // before import; import's validation already hashes every byte.
+        name: "early-digest",
+        negative: true,
+        invariant: "CachedSingleRead",
+        fields: ['source = "cached"', "reads = 2"],
       },
       {
         name: "eviction",

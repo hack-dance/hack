@@ -231,6 +231,8 @@ function checkoutCompiles(opts: {
       at(node, `runs in the checkout (${cwd.getText()})`);
     }
   };
+  /** `process.chdir` targets in source order, as the walk reaches them. */
+  const chdirTargets: (ts.Node | null)[] = [];
   const visit = (node: ts.Node): void => {
     if (
       ts.isArrayLiteralExpression(node) &&
@@ -263,16 +265,28 @@ function checkoutCompiles(opts: {
       hasCompileProperty(node)
     ) {
       checked += 1;
-      if (!ownProcess) {
+      if (ownProcess) {
+        // The latest `process.chdir` earlier in the file sets the directory.
+        const target = chdirTargets.at(-1);
+        if (target === undefined) {
+          at(node, "compiles in its process's cwd without process.chdir first");
+        } else if (target === null || namesCheckout(target)) {
+          at(
+            node,
+            `changes into the checkout (${target?.getText() ?? "no target"}) before compiling`
+          );
+        }
+      } else {
         at(
           node,
           "compiles in the test runner's process, whose cwd is the checkout"
         );
-      } else if (
-        !opts.text.slice(0, node.getStart(source)).includes("process.chdir(")
-      ) {
-        at(node, "compiles in its process's cwd without process.chdir first");
       }
+    } else if (
+      ts.isCallExpression(node) &&
+      node.expression.getText() === "process.chdir"
+    ) {
+      chdirTargets.push(node.arguments[0] ?? null);
     } else {
       const text = stringText(node);
       if (text !== null && text !== "--compile" && COMMAND_COMPILE.test(text)) {
@@ -437,6 +451,29 @@ test("the scan covers command strings, Bun shell and Bun.build", () => {
   expect(
     scan("tests/fixtures/b.ts", `process.chdir(dirname(o));\n${inProcess}`)
   ).toEqual([]);
+  expect(
+    scan(
+      "tests/fixtures/b.ts",
+      `process.chdir(resolve(import.meta.dir, ".."));\n${inProcess}`
+    )
+  ).toEqual([
+    'tests/fixtures/b.ts:2 changes into the checkout (resolve(import.meta.dir, "..")) before compiling',
+  ]);
+  // The latest chdir before the compile decides; a later one does not count.
+  expect(
+    scan(
+      "tests/fixtures/b.ts",
+      `process.chdir(REPO);\nprocess.chdir(dirname(o));\n${inProcess}\nprocess.chdir(REPO);`
+    )
+  ).toEqual([]);
+  expect(
+    scan(
+      "tests/fixtures/b.ts",
+      `process.chdir(dirname(o));\nprocess.chdir(REPO);\n${inProcess}`
+    )
+  ).toEqual([
+    "tests/fixtures/b.ts:3 changes into the checkout (REPO) before compiling",
+  ]);
   // A bundle without compile writes no .bun-build.
   expect(
     scan("tests/a.test.ts", "await Bun.build({ entrypoints: [e] });")

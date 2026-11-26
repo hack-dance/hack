@@ -11,7 +11,10 @@
 \*   GraphReady: ready and mapped, the rest of the frontend's readiness work
 \*     (HTTPS, `up.after`, and for a restart the retirement of its pending
 \*     intent and its operation lock) still running;
-\*   Serving.
+\*   Serving;
+\*   Stopping: Ctrl-C while serving; the owner's own stop is under way, inside
+\*     its enrolled relay cleanup, and the receipt reads `cleanup-intent`
+\*     (HACK-2746, real VM: the provider killed about 50 ms after Ctrl-C).
 \* Two things then race to end the start: the pool watch (it prints the
 \* message, releases the restart lock and exits 1), or the start's own error
 \* path (a request, image preparation or the foreground unwind fails first;
@@ -71,6 +74,13 @@
 \*     Either proof needs a settled relay startup; routes do not.
 \*   Unsettled: a relay startup may be left unsettled when the VM dies after
 \*     services were requested (HACK-2731).
+\*   StopRecovery = "cross-boot": the runtime's cross-boot recovery finishes a
+\*     stop interrupted at `cleanup-intent` once the pool boots again, and
+\*     `hack down --recover` starts the stopped pool for it (`cross_boot_stop`,
+\*     HACK-2746); "none": before, the down kept `runtime_not_running`.
+\*   StopAdvice: the message for a run lost while stopping names
+\*     `hack down --recover` only when the runtime finishes that stop (this
+\*     fix); FALSE names it always, as the ready-stage message did.
 \*   LiveRelayAdvice: the message once ready names `hack down --recover` only
 \*     when the runtime can prove the dead owner's relay (`cross_boot_relay`:
 \*     routes, or a settled relay startup; this fix). FALSE is #1273, which
@@ -92,7 +102,7 @@ EXTENDS Naturals, Sequences
 
 CONSTANTS MessageRule, ErrorRule, ReleaseLock, RetireIntent, RepairLeftover,
           ClassifyRule, StorageBarrier, CrossBootStart, RouteProof, Unsettled,
-          LiveRelayAdvice
+          LiveRelayAdvice, StopRecovery, StopAdvice
 
 VARIABLES kind, recorded, ports, start, lostAt, endedBy, leftover, stale,
           left, settled, receipt, intent, lock, msg, todo, outcome
@@ -100,7 +110,9 @@ vars == <<kind, recorded, ports, start, lostAt, endedBy, leftover, stale,
           left, settled, receipt, intent, lock, msg, todo, outcome>>
 
 Commands == {"down", "up", "restart"}
-Stages == {"Preparing", "Requested", "GraphReady", "Serving"}
+Stages == {"Preparing", "Requested", "GraphReady", "Serving", "Stopping"}
+\* Stages once the graph was ready and mapped.
+ReadyStages == {"GraphReady", "Serving", "Stopping"}
 
 TypeOK ==
     /\ kind \in {"up", "restart"}
@@ -113,7 +125,7 @@ TypeOK ==
     /\ stale \in BOOLEAN
     /\ left \in {"none", "failed", "restoring"}
     /\ settled \in BOOLEAN
-    /\ receipt \in {"none", "stopped", "unready", "ready"}
+    /\ receipt \in {"none", "stopped", "unready", "ready", "stopping"}
     /\ intent \in {"none", "cleaned"}
     /\ lock \in BOOLEAN
     /\ msg \in {"none", "up", "downUp", "downRestart", "inspect",
@@ -162,6 +174,13 @@ Serve ==
     /\ intent' = "none" /\ lock' = FALSE
     /\ UNCHANGED <<lostAt, receipt>> /\ UNCHANGED Frozen
 
+\* Ctrl-C while serving: the owner starts its own stop, enrolled in its relay
+\* cleanup, and the receipt reads `cleanup-intent`.
+Stop ==
+    /\ start = "Serving"
+    /\ start' = "Stopping" /\ receipt' = "stopping"
+    /\ UNCHANGED <<lostAt, intent, lock>> /\ UNCHANGED Frozen
+
 \* The provider VM dies under the start. A recorded run lost before any
 \* service was requested may get its removed containers back (row 8), unless
 \* the down that removed them flushed the guest disk first. The record may
@@ -180,6 +199,15 @@ Die ==
     /\ UNCHANGED <<kind, recorded, ports, endedBy, receipt, intent, lock, msg,
                    todo, outcome>>
 
+\* The dead owner's relay is proved by the run's routes, or with no published
+\* port by the relay's clean exit (RouteProof, HACK-2711), which needs a
+\* settled relay startup (HACK-2731).
+RelayProved == ports \/ (settled /\ RouteProof = "exit")
+\* The cross-boot recovery finishes a stop interrupted at `cleanup-intent`: its
+\* persisted bridge selection (the run's routes) or a settled relay startup
+\* proves the dead relay owner (HACK-2746).
+StopFinished == StopRecovery = "cross-boot" /\ RelayProved
+
 ByIntent == IF intent = "cleaned" THEN "downRestart" ELSE "downUp"
 
 StageMessage(at) ==
@@ -197,15 +225,17 @@ RecoverMessage(at) ==
             IF settled THEN "downUp" ELSE "inspect"
       [] at \in {"GraphReady", "Serving"} /\ LiveRelayAdvice
             /\ ~ports /\ ~settled -> "inspect"
+      [] at = "Stopping" /\ StopAdvice ->
+            IF StopFinished THEN "downUp" ELSE "inspect"
       [] OTHER -> StageMessage(at)
 
 Message(at) ==
     CASE MessageRule = "recover" -> RecoverMessage(at)
       [] MessageRule = "stage" -> StageMessage(at)
       [] MessageRule = "graph" ->
-            IF at \in {"GraphReady", "Serving"} THEN "downUp" ELSE "inspect"
+            IF at \in ReadyStages THEN "downUp" ELSE "inspect"
       [] MessageRule = "intent" ->
-            IF at \in {"GraphReady", "Serving"} THEN ByIntent
+            IF at \in ReadyStages THEN ByIntent
             ELSE StageMessage(at)
       [] OTHER -> ByIntent
 
@@ -273,7 +303,7 @@ OrdinaryFail ==
 \* settled whatever its ports (`cross_boot_start`).
 \* Containers a lost VM brought back fail the confirmation unless the down
 \* removes them again.
-RelayProved == ports \/ (settled /\ RouteProof = "exit")
+\* (RelayProved and StopFinished are defined before the messages.)
 LostStartAdmitted ==
     \/ CrossBootStart = "restoring"
     \/ CrossBootStart = "failed" /\ left = "failed"
@@ -281,6 +311,7 @@ Retirable ==
     CASE lostAt = "Preparing" -> TRUE
       [] lostAt = "Requested" ->
             recorded /\ LostStartAdmitted /\ settled /\ RelayProved
+      [] lostAt = "Stopping" -> StopFinished
       [] OTHER -> RelayProved
 DownAccepts ==
     /\ Retirable
@@ -316,7 +347,7 @@ Step ==
                    settled,
                    lock, msg>>
 
-Next == Request \/ GraphReady \/ Serve \/ Die \/ Watch \/ StartFails
+Next == Request \/ GraphReady \/ Serve \/ Stop \/ Die \/ Watch \/ StartFails
         \/ OrdinaryFail \/ Step
 Spec == Init /\ [][Next]_vars
 
@@ -333,6 +364,7 @@ NoNeedlessWithholding ==
         \/ lostAt = "Requested"
            /\ ~(recorded /\ CrossBootStart # "none" /\ settled)
         \/ lostAt \in {"GraphReady", "Serving"} /\ ~ports /\ ~settled
+        \/ lostAt = "Stopping" /\ ~StopFinished
 \* Reachability witness (expected to fail): a lost restart is recovered by
 \* following its message.
 NoRestartRecovery ==

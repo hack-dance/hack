@@ -39,19 +39,31 @@ export const NATIVE_CROSS_BOOT_START_PHASES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The phase of a stop its owner left inside its enrolled relay cleanup when
+ * its VM was lost (HACK-2746: Ctrl-C, then the provider killed). The runtime's
+ * cross-boot recovery finishes it once the pool boots again, when
+ * `graph foreground-owner` reports `cross_boot_stop` (a pending relay cleanup
+ * marker of the run's boot, its persisted bridge selection, and a provable
+ * relay owner).
+ */
+export const NATIVE_CROSS_BOOT_STOP_PHASE = "cleanup-intent";
+
+/**
  * Whether the cross-boot recovery admits a receipt as `graph foreground-owner`
  * reported it: a live phase whose dead relay owner the runtime can prove
  * (`cross_boot_relay`: the run holds a bridge slot, or its relay startup
  * settled; a run with no published port and an unsettled relay startup is
- * refused with `relay_owner_refused`, HACK-2731), or a lost start the runtime
- * itself admits. A pending same-boot recovery (`live_owner_recovery`) resumes
- * only in its own boot, so it is never one. Whether the owner exited is the
- * caller's check.
+ * refused with `relay_owner_refused`, HACK-2731), a lost start the runtime
+ * itself admits, or a stop interrupted inside its enrolled relay cleanup
+ * (`cross_boot_stop`, HACK-2746). A pending same-boot recovery
+ * (`live_owner_recovery`) resumes only in its own boot, so it is never one.
+ * Whether the owner exited is the caller's check.
  */
 export function nativeCrossBootRecoverable(selection: {
   readonly phase: string;
   readonly crossBootStart: boolean;
   readonly crossBootRelay: boolean;
+  readonly crossBootStop: boolean;
   readonly liveOwnerRecovery: string | null;
 }): boolean {
   return (
@@ -59,8 +71,32 @@ export function nativeCrossBootRecoverable(selection: {
     ((NATIVE_RECOVERABLE_LIVE_PHASES.has(selection.phase) &&
       selection.crossBootRelay) ||
       (NATIVE_CROSS_BOOT_START_PHASES.has(selection.phase) &&
-        selection.crossBootStart))
+        selection.crossBootStart) ||
+      (selection.phase === NATIVE_CROSS_BOOT_STOP_PHASE &&
+        selection.crossBootStop))
   );
+}
+
+/**
+ * Whether a run lost once ready is retired by `hack down --recover`, as the
+ * selection read once its VM was lost shows (HACK-2731, HACK-2746). A live
+ * receipt is, unless the runtime cannot prove its relay owner
+ * (`nativeLiveRelayUnprovable`). A stop its owner left at `cleanup-intent`
+ * (Ctrl-C, then the VM lost) is only with `cross_boot_stop`, or once a
+ * dead-owner recovery of it is selected; the runtime refuses any other one.
+ * Any other phase (`stopped-data-retained` after a completed stop, a pending
+ * same-boot recovery) keeps the down advice, whose own paths handle it.
+ */
+export function nativeReadyLossRetirable(
+  selection: Pick<
+    NativeForegroundOwnerSelection,
+    "phase" | "crossBootRelay" | "crossBootStop" | "deadOwnerRecovery"
+  >
+): boolean {
+  if (selection.phase === NATIVE_CROSS_BOOT_STOP_PHASE) {
+    return selection.crossBootStop || selection.deadOwnerRecovery !== null;
+  }
+  return !nativeLiveRelayUnprovable(selection);
 }
 
 /**
@@ -110,6 +146,12 @@ export type NativeForegroundOwnerSelection = {
    */
   readonly crossBootRelay: boolean;
   /**
+   * That recovery finishes a stop its owner left inside its enrolled relay
+   * cleanup (`cross_boot_stop`, HACK-2746). Absent from an older runtime,
+   * which never finished one: false.
+   */
+  readonly crossBootStop: boolean;
+  /**
    * A lost-removal repair whose storage barrier has not confirmed
    * (`lost_removal_pending`, HACK-2719), read from its host marker. Absent
    * from an older runtime: false.
@@ -133,6 +175,7 @@ export function parseNativeForegroundOwner(
     !optionalBoolean(value.failed_start_recoverable) ||
     !optionalBoolean(value.cross_boot_start) ||
     !optionalBoolean(value.cross_boot_relay) ||
+    !optionalBoolean(value.cross_boot_stop) ||
     !optionalBoolean(value.lost_removal_pending) ||
     value.run !== run.run ||
     value.owner !== run.owner ||
@@ -174,6 +217,7 @@ export function parseNativeForegroundOwner(
     failedStartRecoverable: value.failed_start_recoverable === true,
     crossBootStart: value.cross_boot_start === true,
     crossBootRelay: value.cross_boot_relay !== false,
+    crossBootStop: value.cross_boot_stop === true,
     lostRemovalPending: value.lost_removal_pending === true,
     receiptSha256: value.receipt_sha256,
     foreground:

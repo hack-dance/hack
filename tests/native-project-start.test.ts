@@ -8805,6 +8805,17 @@ test.each([
     retirable: true,
   },
   { name: "ready", selected: { phase: "ready-observed" }, retirable: true },
+  // HACK-2746: a stop interrupted inside its enrolled relay cleanup.
+  {
+    name: "interrupted stop",
+    selected: { phase: "cleanup-intent", cross_boot_stop: true },
+    retirable: true,
+  },
+  {
+    name: "cleanup-intent without cross_boot_stop",
+    selected: { phase: "cleanup-intent", cross_boot_stop: false },
+    retirable: false,
+  },
   // HACK-2731: a live run with no published port and an unsettled relay
   // startup, which the runtime refuses (`relay_owner_refused`).
   {
@@ -8912,9 +8923,12 @@ test.each([
     }),
     expected: { stage: "ready", retirable: true },
   },
-  // #1279 review: a ready-stage loss whose receipt is not live (a VM lost
-  // during the owner's own stop) is not refused for its relay, so it keeps the
-  // down advice, whatever `cross_boot_relay` says.
+  // #1279 review: a ready-stage loss whose receipt is not live is not refused
+  // for `cross_boot_relay`. HACK-2746 (real VM, 3 of 3): a VM lost during the
+  // owner's own stop leaves `cleanup-intent`, which the runtime finishes across
+  // the boot only with `cross_boot_stop` (or once a dead-owner recovery of it
+  // is selected); without it the down was refused (`runtime_not_running`), so
+  // no command is named for it.
   {
     name: "owner's stop, cleanup-intent with a dead-owner hint",
     reply: foregroundOwnerReply({
@@ -8925,12 +8939,27 @@ test.each([
     expected: { stage: "ready", retirable: true },
   },
   {
-    name: "owner's stop, cleanup-intent, relay unprovable",
+    name: "owner's stop, cleanup-intent finished across the boot",
     reply: foregroundOwnerReply({
       phase: "cleanup-intent",
       cross_boot_relay: false,
+      cross_boot_stop: true,
     }),
     expected: { stage: "ready", retirable: true },
+  },
+  {
+    name: "owner's stop, cleanup-intent the runtime refuses",
+    reply: foregroundOwnerReply({
+      phase: "cleanup-intent",
+      cross_boot_relay: true,
+      cross_boot_stop: false,
+    }),
+    expected: { stage: "ready", retirable: false },
+  },
+  {
+    name: "owner's stop, cleanup-intent, older runtime",
+    reply: foregroundOwnerReply({ phase: "cleanup-intent" }),
+    expected: { stage: "ready", retirable: false },
   },
   {
     name: "stopped retained",
@@ -8998,9 +9027,14 @@ test.each([
     retirable: true,
   },
   {
-    name: "cleanup-intent",
-    selected: { phase: "cleanup-intent", cross_boot_relay: false },
+    name: "cleanup-intent finished across the boot",
+    selected: { phase: "cleanup-intent", cross_boot_stop: true },
     retirable: true,
+  },
+  {
+    name: "cleanup-intent the runtime refuses",
+    selected: { phase: "cleanup-intent", cross_boot_relay: false },
+    retirable: false,
   },
   {
     name: "stopped retained",

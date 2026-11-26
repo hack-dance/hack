@@ -25,6 +25,13 @@ fn published_owner_refused(candidate: &Candidate, run: &str) -> CandidateError {
             "graph_foreground_owner_exited",
             "The previous foreground owner of this run exited while its services were running and did not retire its publication. Run hack down --recover to stop the orphaned services with data retained, then hack up.",
         ),
+        // HACK-2746: the owner died during its own stop with its VM, inside its
+        // enrolled relay cleanup. Its services may still be listed; the same
+        // cross-boot recovery as for a ready run finishes that stop.
+        Ok(PublishedOwner::Exited) if exited_interrupted_stop(candidate, run) => error(
+            "graph_foreground_owner_exited",
+            "The previous foreground owner of this run exited during its own stop, before that stop was confirmed, and did not retire its publication. Run hack down --recover to finish that stop with data retained, then hack up.",
+        ),
         Ok(PublishedOwner::Exited) if exited_unadmitted_retained(candidate, run) => error(
             "graph_foreground_owner_exited_unadmitted",
             "The previous foreground owner of this run exited before its restore was admitted and did not retire its publication. Data is retained. Run hack down --recover to retire that attempt, then hack up.",
@@ -70,6 +77,20 @@ fn exited_unadmitted_retained(candidate: &Candidate, run: &str) -> bool {
         .ok()
         .and_then(|owner| load_at(directory(candidate, run).ok()?, run, &owner.token).ok())
         .is_some_and(|(receipt, _)| receipt.phase == "stopped-data-retained")
+}
+
+/// A stop interrupted inside its enrolled relay cleanup that the cross-boot
+/// dead-owner recovery finishes (`dead_owner_cleanup::interrupted_stop`).
+/// Presentation only, as above.
+fn exited_interrupted_stop(candidate: &Candidate, run: &str) -> bool {
+    Owner::load(candidate).ok().is_some_and(|owner| {
+        directory(candidate, run)
+            .ok()
+            .and_then(|root| load_at(root, run, &owner.token).ok())
+            .is_some_and(|(receipt, root)| {
+                super::dead_owner_cleanup::interrupted_stop(candidate, &root, &receipt, &owner)
+            })
+    })
 }
 
 /// A start the cross-boot dead-owner recovery admits (`failed-retained`,
@@ -934,6 +955,45 @@ pub(in crate::provider::graph) mod tests {
         let error = preflight(&fixture.candidate, &fixture.run).unwrap_err();
         assert_eq!(error.code, "graph_foreground_owner_exited");
         assert!(error.message.contains("hack down --recover"));
+        assert_eq!(state(&fixture), before);
+        // HACK-2746 (real VM): an owner whose VM was lost during its own stop, inside
+        // its enrolled relay cleanup, has the code of an exited ready owner, so
+        // `hack up` and its message name `hack down --recover`, then `hack up`.
+        // Before, it named no command ("no supported command can prove ...").
+        let fixture = Fixture::new();
+        let owner = Owner::load(&fixture.candidate).unwrap();
+        let mut receipt = fixture.receipt();
+        receipt.phase = "cleanup-intent".into();
+        receipt.relay_startup = Some(
+            serde_json::from_value(json!({"control_only":true,"guest_root":null,
+                "control_root":"/private/owned","artifact":"e".repeat(64),"services":{}}))
+            .unwrap(),
+        );
+        let context = super::super::host_relay::context(
+            &receipt.owner,
+            owner.guest_boot_id.as_deref().unwrap(),
+        )
+        .unwrap();
+        receipt.relay_cleanup = Some(
+            serde_json::from_value(json!({
+                "version":1,"runtime":context.runtime,"boot":context.boot,"operation":([3;16]),
+                "effect":([4;32]),"control_root":"/private/owned","phase":"pending"
+            }))
+            .unwrap(),
+        );
+        state::write(&fixture.graph().join("state.json"), &receipt).unwrap();
+        state::write(
+            &fixture.graph().join("relay-cleanup-bridges.json"),
+            &json!({"version":1}),
+        )
+        .unwrap();
+        foreground::transport::fixture_exited_publication(&fixture.candidate, &fixture.run);
+        let before = state(&fixture);
+        let error = preflight(&fixture.candidate, &fixture.run).unwrap_err();
+        assert_eq!(error.code, "graph_foreground_owner_exited");
+        assert!(error.message.contains("during its own stop"));
+        assert!(error.message.contains("hack down --recover"));
+        assert!(error.message.contains("then hack up"));
         assert_eq!(state(&fixture), before);
     }
 

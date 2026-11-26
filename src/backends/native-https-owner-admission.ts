@@ -31,7 +31,7 @@ async function identity(
 /** Existing private locks are waited on only by normal admission; recovery fails closed. */
 export async function acquireNativeHttpsOwnerAdmission(opts: {
   readonly home: string;
-  readonly waitMs: 0 | 15_000;
+  readonly waitMs: 0 | 5000 | 15_000;
 }): Promise<{ readonly path: string; release(): Promise<void> }> {
   await nativeHttpsPrivateDirectory(opts.home);
   const storage = join(opts.home, "native-https");
@@ -75,7 +75,11 @@ export async function acquireNativeHttpsOwnerAdmission(opts: {
         throw identityError;
       }
       if (Date.now() >= deadline) {
-        throw nativeHttpsOwnerRefused();
+        // Another command holds admission (an exited-owner retirement can hold
+        // it for longer than this wait, #1271 review).
+        throw new Error(
+          `${nativeHttpsOwnerRefused().message} Another hack command holds the shared HTTPS owner admission; retry in a few seconds. If this persists, an interrupted command left ${NATIVE_HTTPS_OWNER_ADMISSION} in the native-https directory: inspect it before removing anything.`
+        );
       }
       await Bun.sleep(25);
     }

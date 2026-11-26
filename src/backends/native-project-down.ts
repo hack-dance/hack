@@ -705,6 +705,33 @@ async function resumeSelectedOwner(opts: {
 /** How often a down that waits for an unpublished start checks it again. */
 const STARTUP_WAIT_POLL_MS = 500;
 
+/** After this long, a `down` that still waits for its run's frontend says so. */
+export const FINALIZATION_NOTICE_MS = 5000;
+
+/**
+ * Run `wait`, printing `line` once if it is still pending after `afterMs`
+ * (#1271: a `down` that waited for its frontend printed nothing at all).
+ */
+export async function withSlowNotice<T>(opts: {
+  readonly wait: () => Promise<T>;
+  readonly line: string;
+  readonly afterMs?: number;
+  readonly notice?: (line: string) => void;
+}): Promise<T> {
+  const timer = setTimeout(
+    () =>
+      (opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+        opts.line
+      ),
+    opts.afterMs ?? FINALIZATION_NOTICE_MS
+  );
+  try {
+    return await opts.wait();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Wait for a live start of this instance to end (HACK-2351): a detached start
  * whose launcher gave up can still hold the native runtime while it builds or
@@ -1317,11 +1344,16 @@ async function nativeProjectDownOnce(opts: {
       // once, then wait on the lifetime that now carries it.
       for (;;) {
         try {
-          await waitNativeProjectFinalization({
-            scope: opts.scope,
-            run,
-            token: latest,
-            timeoutMs: frontendGone ? 1 : opts.finalizationTimeoutMs,
+          const token = latest;
+          await withSlowNotice({
+            line: "Waiting for this run's frontend to finish its cleanup: its HTTPS lease release or recovery. Retiring an exited HTTPS owner usually finishes within about 35 s after the services stop; the release is then verified against the stopped graph.",
+            wait: () =>
+              waitNativeProjectFinalization({
+                scope: opts.scope,
+                run,
+                token,
+                timeoutMs: frontendGone ? 1 : opts.finalizationTimeoutMs,
+              }),
           });
           break;
         } catch (error) {

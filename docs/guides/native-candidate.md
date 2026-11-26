@@ -996,6 +996,34 @@ their receipts say.
 another operation holds, such as a project start writing its receipt, and then refuses
 `provider_busy`, naming the holder when the lock records one.
 
+A `hack up` or `hack up -d` waits up to 35 seconds for the provider lease when another
+operation holds it. The usual holder is another project's `hack down`, which holds
+the lease for its whole graph stop: a service with the 30-second stop grace limit
+keeps it for about 31 seconds. This applies to the waits that admit nothing: the
+retained-start check, resuming the running pool, the pool boot's admission, and the
+startup reads before a restore. A short holder such as `hack ps` costs only its own
+hold, because the start takes the lease as soon as it is free. When the wait lasts
+about 3 seconds, the start prints one line that names the holder, for example
+`Waiting for the native runtime lock, held by a project stop.` The line appears at
+most once per command, however many of the start's requests wait. A foreground owner
+that stops its own run records itself as `project stop` in the lock, whether after
+`hack down` or while it rolls back a failed start. The record is advisory and never
+names the project. If the holder keeps the lease past 35 seconds, the start refuses
+`provider_busy` with nothing started, names the holder, and tells you to retry the
+same command once that holder finishes. You do not need `hack down` or a pool stop
+first. This wait is only for starts: `hack exec` keeps its own 15-second wait,
+`hack ps` and `hack logs` keep their short observer behavior, and the inspection a
+foreground start makes after it ends (after Ctrl-C, for example) keeps its 5-second
+bound.
+
+When two projects start on a stopped pool at the same time, the first boots it. The
+second waits for the lease and, once it holds it, finds the pool running and joins
+it, as it would have if it had started later.
+
+While a start waits, it keeps its project's run lock. A `hack down` of the same
+project during that wait is refused `provider_busy` for up to 35 seconds. Run it
+again once the start has returned.
+
 `runtime down --force` stops the pool anyway, as a crash or a host reboot would. The
 projects' containers stop with the guest and their data is kept. Its JSON lists the
 runs that were live in `interrupted_runs`, or sets `interrupted_runs_unknown` when they
@@ -5479,6 +5507,45 @@ owner directory, diagnostic included, moves beside a retired-owner record
 (`native-https/released-leases/<generation>/failed-owner`), the release is still verified
 against the stopped graph, and the next `up` starts a new shared owner. `down`
 does not fail and the next `up` needs no recovery because of it.
+
+A serving hostname authority also notices when its owner is gone. It reads its
+stdin FIFO without blocking after every wake-up and waits at most a second, also
+with no clients, so after the shared owner is killed (for example `kill -9`) the
+authority stops serving within about 2 seconds, on macOS as on Linux. Whenever it
+stops serving it asks its Caddy to stop through Caddy's own admin socket (a
+graceful stop with a 1 second grace period, never a signal), then removes its
+socket and receipt as a cooperative stop does. When its owner is gone it keeps
+trying for up to 2 seconds while Caddy's session directory exists, so a Caddy
+that was still starting when its owner was killed is stopped too. When the run's lease is then
+recovered (by its frontend or by `hack down`), the exited owner generation is
+retired: recovery proves, under the owner admission lock, that the owner had
+published its endpoint, that its control socket refuses connections, that no
+process runs its exact owner invocation, and that the pool still runs the
+owner's boot. It waits up to 5 seconds for the authority and Caddy to exit. An
+authority still serving after that (an older runtime, or a recovery faster than
+its check) is stopped only through the runtime's cooperative stop, and only when
+the dead owner's receipt names its exact socket, receipt hash and process;
+anything else, or an HTTPS port that stays in use, is refused with a next step
+(run `hack down` again shortly, or stop that process yourself) and every record
+is kept; the message says whether the authority was already stopped. Records
+that do not match (a malformed receipt, a non-empty owner lock) are refused
+the same way and kept as evidence. The owner process is checked once more
+before anything is removed. Retirement holds the owner admission lock, so
+another command that waits for it may be told to retry in a few seconds.
+The run's frontend does this itself once its owner connection has closed,
+instead of sending its release to the closed connection (which waited out a
+120 second timer while `hack down` waited for it, printing nothing). The
+retirement is bounded: up to 5 seconds for the admission lock, then at most
+about 30 seconds of process, pool and child checks; it usually takes a second
+or two. The release is then verified against the stopped graph, which waits up
+to 15 seconds for a busy provider lock. A release whose connection closes
+before the owner replies tries this recovery once too. A `hack down` still waiting for its run's frontend after 5 seconds
+says so in one line. Otherwise the receipt, the dead challenge socket and the empty owner
+lock are removed, the owner directory moves beside a retired-owner record
+(`native-https/released-leases/<generation>/exited-owner`), the release is still
+verified against the stopped graph, `hack down` exits 0 and the next `up -d`
+starts a new shared owner. The owner's temporary session directory is left for
+the system to clear.
 
 An authority child that exits before readiness can supply a bounded structured
 native error code without exposing its stderr. Malformed, oversized or missing

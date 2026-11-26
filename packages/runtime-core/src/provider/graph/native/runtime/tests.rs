@@ -1915,6 +1915,32 @@ fn removed_inventory_refuses_even_matching_resource_reappearance_without_effects
     }
 }
 
+/// HACK-2724: the run's own owner stopping it (cleanup bound to its receipt) records its
+/// provider lease holder as a project stop for the whole cleanup, so another project's
+/// start waiting on that lease names it. The unbound `graph native cleanup` does not, and
+/// the record ends with the cleanup. The guard runs at each step under that record; it
+/// refuses here, before any provider connection.
+#[test]
+fn the_receipt_bound_native_cleanup_records_a_project_stop() {
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
+    let seen = std::cell::RefCell::new(Vec::new());
+    let guard = || {
+        seen.borrow_mut()
+            .push(crate::provider::state::recorded_operation());
+        Err(error("native_graph_foreground", "observed"))
+    };
+    let receipt = session.receipt.clone();
+    assert!(cleanup_guarded(&fixture.candidate, RUN, Some(&receipt), Some(&guard)).is_err());
+    assert!(cleanup_guarded(&fixture.candidate, RUN, None, Some(&guard)).is_err());
+    let seen = seen.into_inner();
+    assert_eq!(seen[0], "project_stop");
+    assert_ne!(seen[1], "project_stop");
+    assert_ne!(crate::provider::state::recorded_operation(), "project_stop");
+}
+
 #[test]
 fn cleanup_owner_guard_refuses_before_provider_connection_or_receipt_mutation() {
     let fixture = Fixture::new(basic());

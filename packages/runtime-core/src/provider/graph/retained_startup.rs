@@ -249,11 +249,12 @@ impl Guard {
 /// values or restore authority are returned. An absent/uncertain owner refuses.
 pub fn preflight(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
     let guard = Guard::acquire(candidate, run, None)?;
-    // Eligibility is read-only: wait out a brief holder such as the inspection behind
-    // `hack ps`, as runtime startup does, rather than failing the `up` that asked.
+    // Eligibility is read-only: wait out a holder such as the inspection behind `hack ps`
+    // or another project's stop, as runtime startup does, rather than failing the `up`
+    // that asked (HACK-2724).
     let _lease = state::Lock::acquire_existing_waiting(
         &candidate.state_root.join("run/smolvm"),
-        lifecycle::STARTUP_LEASE_WAIT,
+        lifecycle::START_LEASE_WAIT,
     )?;
     guard.verify(candidate)?;
     let (owner, receipt) = checked(candidate, run)?;

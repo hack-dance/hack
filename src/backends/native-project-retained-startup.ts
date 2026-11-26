@@ -1,5 +1,6 @@
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { reportNativeStartLeaseWait } from "../lib/native-detached-up.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
 import type {
@@ -11,6 +12,7 @@ import type {
   invokeNativeRuntime,
   NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
+import { NATIVE_START_LEASE_REQUEST_TIMEOUT_MS } from "./native-start-lease.ts";
 
 const SHA = /^[a-f0-9]{64}$/;
 /**
@@ -40,8 +42,11 @@ export async function preflightNativeRetainedStartup(opts: {
     runtime: opts.runtime,
     cwd: opts.projectRoot,
     args: ["graph", "retained-preflight", "--run-id", opts.run.run, "--json"],
-    timeoutMs: 30_000,
+    // The runtime waits up to 35 s for a lock another project's stop holds
+    // (HACK-2724), then checks eligibility.
+    timeoutMs: NATIVE_START_LEASE_REQUEST_TIMEOUT_MS,
     signal: opts.signal,
+    onLeaseWait: reportNativeStartLeaseWait,
   });
   requireActive(opts.signal);
   if (

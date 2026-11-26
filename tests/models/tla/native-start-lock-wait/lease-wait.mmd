@@ -1,13 +1,19 @@
 ---
-title: LeaseWait · bounded native startup
+title: LeaseWait · native startup
 ---
 stateDiagram-v2
   direction TB
   [*] --> waiting
-  waiting --> waiting : Tick [below bound]
-  waiting --> waiting : Release [first holder]
-  waiting --> acquired : Acquire [free, in time]
+  waiting --> waiting : Tick [held, in bound]
+  waiting --> waiting : Release [within StopHold]
+  waiting --> acquired : Acquire [stopped]
+  waiting --> resumed : Resume [running]
   waiting --> expired : Expire [at bound]
+  note right of waiting
+    StopHold under Bound: no expiry
+    35 s wait, 31 s project stop
+  end note
   class waiting wait
   class acquired ok
+  class resumed ok
   class expired fail

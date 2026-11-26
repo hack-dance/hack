@@ -28,6 +28,7 @@ import {
   reportNativeImageDownloadWait,
   reportNativeImageNotice,
   reportNativeImageWork,
+  reportNativeStartLeaseWait,
 } from "../lib/native-detached-up.ts";
 import {
   describeNativeProcessRefusals,
@@ -265,6 +266,10 @@ import {
   monitorNativeServiceExits,
   type NativeServiceExit,
 } from "./native-service-exit-monitor.ts";
+import {
+  markNativeStartLeaseRefusal,
+  nativeStartLeaseRefusal,
+} from "./native-start-lease.ts";
 import {
   classifyNativeLostProvider,
   NATIVE_START_POOL_GRACE_MS,
@@ -3998,6 +4003,7 @@ async function startNativeProjectAttempt(
             "--json",
           ],
           signal: controller.signal,
+          onLeaseWait: reportNativeStartLeaseWait,
         });
     emitNativeHotReloadNotice(pool, deps.warn);
     requireActiveStartup(controller.signal);
@@ -4312,9 +4318,12 @@ async function startNativeProjectAttempt(
           ) {
             throw unconfirmed("the host dependency plan");
           }
+          // The final inspection after serve settled, often after Ctrl-C: no start
+          // is waiting any more, so it keeps the short bound it had (5 s) and prints
+          // no start progress line (HACK-2724).
           const invokeInspect = () =>
             inspectNativeProjectGraph({
-              startupWait: true,
+              busyWaitMs: NATIVE_FINAL_INSPECT_BUSY_WAIT_MS,
               runtime: opts.runtime,
               projectRoot: opts.scope.projectRoot,
               run,
@@ -5033,23 +5042,27 @@ function reportForegroundStopFailure(failure: unknown, failed: boolean): void {
   }
 }
 
-const START_LOCK_HOLDER =
-  /^Provider lease acquisition refused; recorded holder: ([a-z ]+); no operation was admitted\.$/;
+/**
+ * How long the final inspection after `serve` settles retries a busy lease: the
+ * 5 s the runtime-side startup wait gave it before HACK-2724 raised that wait.
+ */
+const NATIVE_FINAL_INSPECT_BUSY_WAIT_MS = 5000;
 
-function withStartupLockBlocker(error: unknown): unknown {
+/** A start whose lease wait expired names the holder and a plain retry (HACK-2724). */
+function withStartupLockBlocker(error: unknown, detached: boolean): unknown {
   if (
     !(error instanceof NativeRuntimeRequestError) ||
     error.nativeCode !== "provider_busy"
   ) {
     return error;
   }
-  const holder =
-    START_LOCK_HOLDER.exec(error.nativeMessage ?? "")?.[1] ?? "unavailable";
-  error.message = [
-    "Native startup could not acquire a runtime lock (provider_busy).",
-    `Holder: ${holder}.`,
-    "Run hack up again after the holder finishes.",
-  ].join("\n");
+  error.message = nativeStartLeaseRefusal({
+    nativeMessage: error.nativeMessage,
+    command: detached ? "hack up -d" : "hack up",
+  });
+  // Only this raw refusal is the detached owner's start-lease report; a wrapped
+  // provider_busy keeps its own recovery step.
+  markNativeStartLeaseRefusal(error);
   return error;
 }
 
@@ -5171,7 +5184,7 @@ export async function startNativeProject(
             loss,
             classify: opts.dependencies?.classifyLostProvider,
           });
-    throw lost ?? withStartupLockBlocker(error);
+    throw lost ?? withStartupLockBlocker(error, detached);
   } finally {
     settled = true;
     stopPoolWatch?.();

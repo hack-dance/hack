@@ -164,4 +164,112 @@ mod tests {
             UNCOVERED
         );
     }
+
+    /// HACK-2740 fixtures: a wrapped service (private env delivery or a host
+    /// dependency) keeps a materialized template. For each Compose shape, run
+    /// `job` on every derived one-off, with and without a requested command, and
+    /// check the argv the container runs, as `compose run` would: the requested
+    /// command replaces the service command and the entrypoint stays.
+    fn each_materialized_job(job: impl Fn(Value, &Value) -> Vec<Value>) {
+        use crate::provider::graph::image_process::apply_private;
+        let receipt:Receipt=serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"ready-observed","readiness":{},"resources":{}})).unwrap();
+        let resource:Resource=serde_json::from_value(json!({"kind":"container","key":"job-123","name":"hkg-owned-container-1","id":null,"image":"sha256:pin","phase":"reserved"})).unwrap();
+        let service = ["python", "-u", "-m", "http.server", "8080"];
+        let requested: Vec<String> = ["sh", "-c", "echo x"].map(String::from).to_vec();
+        let process = |prefix: &[&str], tail: &[&str]| -> Vec<Value> {
+            [prefix, tail]
+                .concat()
+                .into_iter()
+                .map(Value::from)
+                .collect()
+        };
+        for (image, create, prefix) in [
+            // Compose `command:` only, on an image without an entrypoint.
+            (
+                json!({"Cmd":["/bin/sh"],"User":"1000:1000"}),
+                json!({"Cmd":service,"HostConfig":{"Init":true,"Mounts":[]}}),
+                &[][..],
+            ),
+            // An image entrypoint stays and receives the requested command.
+            (
+                json!({"Entrypoint":["docker-entrypoint.sh"],"User":"1000:1000"}),
+                json!({"Cmd":service,"HostConfig":{"Init":true,"Mounts":[]}}),
+                &["docker-entrypoint.sh"][..],
+            ),
+            // So does a Compose `entrypoint:`.
+            (
+                json!({"Cmd":["/bin/sh"],"User":"1000:1000"}),
+                json!({"Entrypoint":["/entry"],"Cmd":service,"HostConfig":{"Init":true,"Mounts":[]}}),
+                &["/entry"][..],
+            ),
+        ] {
+            let mut template = create;
+            apply_private(&mut template, &image).unwrap();
+            for (argv, expected) in [
+                (requested.clone(), process(prefix, &["sh", "-c", "echo x"])),
+                (Vec::new(), process(prefix, &service)),
+            ] {
+                let derived = prepare(&template, &receipt, &resource, &argv, None).unwrap();
+                assert_eq!(job(derived, &image), expected, "{image} {argv:?}");
+            }
+        }
+    }
+
+    /// A job with fresh values is materialized again and runs in the env launcher.
+    #[test]
+    fn requested_command_replaces_a_materialized_service_command() {
+        use crate::provider::graph::{image_process::apply_private, launcher};
+        each_materialized_job(|mut job, image| {
+            apply_private(&mut job, image).unwrap();
+            launcher::attach(&mut job, "/run/slot/values.json", "/storage/launcher").unwrap();
+            assert_eq!(job["Cmd"], json!([]));
+            job["Entrypoint"].as_array().unwrap()[3..].to_vec()
+        });
+    }
+
+    /// A host-dependency service without env values: the job is not materialized
+    /// again and goes straight to the release barrier (`startup::attach`).
+    #[test]
+    fn requested_command_replaces_a_dependency_wrapped_service_command() {
+        use crate::provider::graph::startup;
+        let service: startup::Service = serde_json::from_value(json!({
+            "generation": "a".repeat(32),
+            "bindings": {"default": {"slot": 1, "port": 25252, "process": null}},
+            "phase": "prepared",
+            "started_at": null
+        }))
+        .unwrap();
+        each_materialized_job(|mut job, _| {
+            startup::attach(
+                crate::provider::PoolLayout::Legacy,
+                &mut job,
+                &service,
+                "/storage/owned-startup",
+                "/storage/owned-relay",
+            )
+            .unwrap();
+            let entry = job["Entrypoint"].as_array().unwrap();
+            assert_eq!(
+                entry[..2],
+                [json!("/run/hack-relay-guest"), json!("--await-release")]
+            );
+            assert_eq!(job["Cmd"], json!([]));
+            entry[4..].to_vec()
+        });
+    }
+
+    /// Values removed after `up`: the template is still materialized, but the job
+    /// has no wrapper. The engine runs `Entrypoint ++ Cmd` as given; the explicit
+    /// empty entrypoint must not let the image entrypoint back in.
+    #[test]
+    fn requested_command_replaces_a_materialized_command_without_a_wrapper() {
+        each_materialized_job(|job, _| {
+            let entry = job["Entrypoint"].as_array().expect("explicit entrypoint");
+            entry
+                .iter()
+                .chain(job["Cmd"].as_array().unwrap())
+                .cloned()
+                .collect()
+        });
+    }
 }

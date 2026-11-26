@@ -745,19 +745,40 @@ pub(super) fn ended_boot_recoverable(
 /// returns `Current`, so the caller keeps the strict same-boot rules. Callers that act
 /// on the run re-check the boot against the connected engine before any effect.
 pub(super) fn pool_boot(candidate: &Candidate, receipt: &Receipt) -> ReceiptBoot {
+    boot_of(candidate, &receipt.owner, &receipt.boot)
+}
+/// [`pool_boot`] for a pool owner token and guest boot id: `Ended` only on positive
+/// evidence that the pool record of this owner is not running that boot.
+pub(super) fn boot_of(candidate: &Candidate, owner: &str, boot: &str) -> ReceiptBoot {
     let Ok(pool) =
         state::read::<serde_json::Value>(&candidate.state_root.join("run/smolvm/owner.json"))
     else {
         return ReceiptBoot::Current;
     };
-    if pool["token"].as_str() != Some(receipt.owner.as_str()) {
+    if pool["token"].as_str() != Some(owner) {
         return ReceiptBoot::Current;
     }
-    if pool["phase"] == "running" && pool["guest_boot_id"].as_str() == Some(receipt.boot.as_str()) {
+    if pool["phase"] == "running" && pool["guest_boot_id"].as_str() == Some(boot) {
         ReceiptBoot::Current
     } else {
         ReceiptBoot::Ended
     }
+}
+/// The pool owner token and guest boot id of a pool recorded running, read without a
+/// lock; `None` otherwise. A foreground owner records it when it starts, to notice later
+/// that its boot ended under it ([`boot_of`]).
+#[cfg(target_os = "macos")]
+pub(super) fn running_boot(candidate: &Candidate) -> Option<(String, String)> {
+    let pool =
+        state::read::<serde_json::Value>(&candidate.state_root.join("run/smolvm/owner.json"))
+            .ok()?;
+    if pool["phase"] != "running" {
+        return None;
+    }
+    Some((
+        pool["token"].as_str()?.to_owned(),
+        pool["guest_boot_id"].as_str()?.to_owned(),
+    ))
 }
 /// What `graph native boot` reports for one run (HACK-2715): its phase, whether its
 /// receipt belongs to an ended pool boot ([`pool_boot`]), and whether its own owner's

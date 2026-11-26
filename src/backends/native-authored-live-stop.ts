@@ -24,6 +24,10 @@ import {
   type NativeAuthoredProcessIncarnation,
   parseNativeAuthoredProcessIncarnation,
 } from "./native-authored-process-incarnation.ts";
+import {
+  NativeAuthoredStopOwnerExitedError,
+  NativeAuthoredStopUnavailableError,
+} from "./native-authored-stop-errors.ts";
 
 const LIMIT = 64 * 1024;
 const SHA = /^[a-f0-9]{64}$/;
@@ -340,6 +344,44 @@ export async function publishNativeAuthoredLiveStop(input: {
   }
 }
 
+/** How long a requester waits for a stop owner to exit after its stop failed. */
+export const NATIVE_AUTHORED_STOP_OWNER_EXIT_WAIT_MS = 15_000;
+
+/**
+ * Whether the stop owner process (`pid`, the recorded original's parent) has
+ * exited, polled for at most {@link NATIVE_AUTHORED_STOP_OWNER_EXIT_WAIT_MS}
+ * within the stop's own budget. Observation only: the recovery that follows
+ * proves the owner's absence again before any effect.
+ */
+export async function waitForNativeAuthoredStopOwnerExit(
+  pid: number,
+  remaining: () => number,
+  signal: AbortSignal | undefined,
+  waitMs = NATIVE_AUTHORED_STOP_OWNER_EXIT_WAIT_MS
+): Promise<boolean> {
+  if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) {
+    return false;
+  }
+  const deadline = performance.now() + waitMs;
+  while (!signal?.aborted && performance.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (hasCode(error, "ESRCH")) {
+        return true;
+      }
+      return false;
+    }
+    try {
+      remaining();
+    } catch {
+      return false;
+    }
+    await Bun.sleep(100);
+  }
+  return false;
+}
+
 /** Returns false only for a missing new-format record, allowing the unchanged
  * hook-owner client. Incomplete/malformed/foreign no-host records never fall back. */
 export async function requestNativeAuthoredLiveStop(input: {
@@ -397,13 +439,33 @@ export async function requestNativeAuthoredLiveStop(input: {
     await unchanged(current);
     await available(store);
   }
-  await requestNativeHookStop({
-    run,
-    port: value.port,
-    token: value.token,
-    timeoutMs: remaining(),
-    signal,
-  });
+  try {
+    await requestNativeHookStop({
+      run,
+      port: value.port,
+      token: value.token,
+      timeoutMs: remaining(),
+      signal,
+    });
+  } catch (error) {
+    // HACK-2715 review round 2: a dispatched stop whose cleanup could not remove
+    // the run (its pool stopped under it) ends with the owner exiting. Wait,
+    // bounded, for the recorded owner process to go, so the caller can run the
+    // dead-owner recovery in the same command instead of reporting "unconfirmed".
+    if (
+      error instanceof NativeAuthoredStopUnavailableError ||
+      signal?.aborted ||
+      value.original === undefined ||
+      !(await waitForNativeAuthoredStopOwnerExit(
+        value.original.parent,
+        remaining,
+        signal
+      ))
+    ) {
+      throw error;
+    }
+    throw new NativeAuthoredStopOwnerExitedError();
+  }
   remaining();
   await available(store);
   for (const path of [store.path, store.ready, store.start, store.source]) {

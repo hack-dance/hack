@@ -1635,9 +1635,10 @@ fn interrupted_runs_line(
         .filter(|runs| !runs.is_empty())
     {
         Some(format!(
-            "Stopped the native runtime while {} project run(s) were running; their containers stopped with it and their data is kept. To start the runtime again and recover them: {}",
+            "Stopped the native runtime while {} project run(s) were running; their containers stopped with it and their data is kept. To start the runtime again and recover them: {}{}",
             runs.len(),
-            forced_stop_plan(runs, kind)
+            forced_stop_plan(runs, kind),
+            interrupted_owners_note(result.interrupted_owners.as_ref())
         ))
     } else if result.interrupted_runs_unknown {
         Some(
@@ -1647,6 +1648,30 @@ fn interrupted_runs_line(
     } else {
         None
     }
+}
+
+/// What the interrupted native owners did after the forced stop (HACK-2715 review round
+/// 2), per run; empty when none was running.
+fn interrupted_owners_note(
+    owners: Option<&hack_runtime_core::provider::InterruptedOwners>,
+) -> String {
+    let Some(owners) = owners else {
+        return String::new();
+    };
+    let mut note = String::new();
+    if !owners.exited.is_empty() {
+        note.push_str(&format!(
+            " The native owner of {} noticed the stop and exited, keeping its run for hack down.",
+            owners.exited.join(", ")
+        ));
+    }
+    if !owners.running.is_empty() {
+        note.push_str(&format!(
+            " The native owner of {} was still running when this command stopped waiting; hack down in its project asks it to stop (that needs no running pool) and recovers the run.",
+            owners.running.join(", ")
+        ));
+    }
+    note
 }
 
 fn sweep_running_pool(phase: &str, process_alive: Option<bool>) {
@@ -2392,6 +2417,30 @@ mod usage_tests {
                 .is_none()
             );
         }
+    }
+
+    /// HACK-2715 review round 2: the forced stop's line names, per run, whether its native
+    /// owner exited or was still running, and says nothing when no owner was running.
+    #[test]
+    fn the_forced_stop_names_what_each_interrupted_owner_did() {
+        use super::interrupted_owners_note;
+        use hack_runtime_core::provider::InterruptedOwners;
+        assert_eq!(interrupted_owners_note(None), "");
+        let (exited, running) = ("a".repeat(32), "b".repeat(32));
+        let note = interrupted_owners_note(Some(&InterruptedOwners {
+            exited: vec![exited.clone()],
+            running: vec![running.clone()],
+        }));
+        assert!(note.contains(&format!(
+            "The native owner of {exited} noticed the stop and exited"
+        )));
+        assert!(note.contains(&format!("The native owner of {running} was still running")));
+        assert!(note.contains("hack down in its project asks it to stop"));
+        let only_exited = interrupted_owners_note(Some(&InterruptedOwners {
+            exited: vec![exited],
+            running: vec![],
+        }));
+        assert!(!only_exited.contains("still running"));
     }
 
     /// HACK-2715: after `--force`, a ready Compose run comes back with `hack up`, one caught

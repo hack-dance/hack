@@ -312,7 +312,7 @@ macTest(
 );
 
 macTest(
-  "HACK-2715 review: plain down starts the pool before the owner's stop, and a failure after a started pool says it still runs",
+  "HACK-2715 review round 2: plain down on a stopped pool asks the live owner to stop first, then settles the run by recovery in the same command",
   async () => {
     const selected = await fixture();
     const options = { ...selected.options, operation: "down" as const };
@@ -320,9 +320,12 @@ macTest(
     const { NATIVE_RECOVERY_RUNTIME_STARTED_NOTE } = await import(
       "../src/backends/native-project-runtime-up.ts"
     );
+    const { NativeAuthoredStopOwnerExitedError } = await import(
+      "../src/backends/native-authored-stop-errors.ts"
+    );
     const order: string[] = [];
     const run = (opts: {
-      readonly started: boolean;
+      readonly found: "none" | "recoverable";
       readonly stop: () => Promise<void>;
       readonly recover?: () => Promise<unknown>;
     }) =>
@@ -334,9 +337,16 @@ macTest(
         },
         unreservedSelected: () => Promise.resolve(false),
         nothingToRecover: () => Promise.resolve(false),
-        startStoppedPool: (value) => {
-          order.push(`pool:${value.projectRoot}`);
-          return Promise.resolve(opts.started);
+        stoppedPoolRun: (value) => {
+          order.push(`found:${value.projectRoot}`);
+          return Promise.resolve(opts.found);
+        },
+        startPool: () => {
+          order.push("pool");
+          return Promise.resolve();
+        },
+        startStoppedPool: () => {
+          throw new Error("plain down does not check the pool twice (L4)");
         },
         endedBootRefusal: () => {
           order.push("check");
@@ -359,42 +369,66 @@ macTest(
         info.mock.calls.filter(
           ([input]) => input.message === NATIVE_RECOVERY_RUNTIME_STARTED_NOTE
         ).length;
-      // The run's own live owner stops it once the pool runs.
-      expect(await run({ started: true, stop: () => Promise.resolve() })).toBe(
-        0
-      );
-      expect(order).toEqual([`pool:${selected.root}`, "stop"]);
+      const found = `found:${selected.root}`;
+      // Seen on a real VM: the live owner outlives a forced stop. Its stop is
+      // sent on the stopped pool (it needs none); its cleanup refuses and the
+      // owner exits. The same command then starts the pool and recovers the
+      // run, so a later `up -d` is not refused.
+      expect(
+        await run({
+          found: "recoverable",
+          stop: () => Promise.reject(new NativeAuthoredStopOwnerExitedError()),
+        })
+      ).toBe(0);
+      expect(order).toEqual([found, "stop", "pool", "recover"]);
       expect(notes()).toBe(0);
-      // An owner that is gone falls back to the recovery, which does not check
-      // or start the pool a second time (review round 2, L4) and reports the
-      // started pool when it fails.
+      // An owner whose stop removed the run needs nothing more.
+      order.length = 0;
+      expect(
+        await run({ found: "recoverable", stop: () => Promise.resolve() })
+      ).toBe(0);
+      expect(order).toEqual([found, "stop"]);
+      // An owner that is gone goes straight to the recovery, which reports
+      // the pool it started when it fails.
       order.length = 0;
       const failed = await run({
-        started: true,
+        found: "recoverable",
         stop: () => Promise.reject(new NativeAuthoredStopUnavailableError()),
         recover: () => Promise.reject(new Error("refused")),
       });
       expect(failed).toBeInstanceOf(HackCliError);
-      expect(order).toEqual([`pool:${selected.root}`, "stop", "recover"]);
+      expect(order).toEqual([found, "stop", "pool", "recover"]);
       expect(notes()).toBe(1);
-      // A stop that fails after this command started the pool says so too; the
-      // started pool means the receipt was recoverable, so it is not re-checked.
+      // An owner that neither removed its run nor exited is reported as an
+      // unconfirmed stop, and no pool is started under it.
       order.length = 0;
-      await run({
-        started: true,
+      const unconfirmed = await run({
+        found: "recoverable",
         stop: () => Promise.reject(new Error("refused")),
       });
-      expect(notes()).toBe(2);
-      expect(order).toEqual([`pool:${selected.root}`, "stop"]);
-      // Nothing is said when this command did not start the pool; the failed
-      // stop is checked once for a boot-bound run of an ended boot.
+      expect(String((unconfirmed as HackCliError).message)).toContain(
+        "stop is unconfirmed"
+      );
+      expect(order).toEqual([found, "stop"]);
+      expect(notes()).toBe(1);
+      // On a running pool an owner that exited without removing its run is
+      // recovered without any pool start.
+      order.length = 0;
+      expect(
+        await run({
+          found: "none",
+          stop: () => Promise.reject(new NativeAuthoredStopOwnerExitedError()),
+        })
+      ).toBe(0);
+      expect(order).toEqual([found, "stop", "recover"]);
+      // Any other failed stop there is checked once for a boot-bound run.
       order.length = 0;
       await run({
-        started: false,
+        found: "none",
         stop: () => Promise.reject(new Error("refused")),
       });
-      expect(notes()).toBe(2);
-      expect(order).toEqual([`pool:${selected.root}`, "stop", "check"]);
+      expect(order).toEqual([found, "stop", "check"]);
+      expect(notes()).toBe(1);
     } finally {
       info.mockRestore();
     }
@@ -410,7 +444,11 @@ macTest(
     const {
       startStoppedPoolForAuthoredRecovery,
       nativeAuthoredEndedBootRefusal,
+      nativeAuthoredStoppedPoolRun,
     } = await import("../src/backends/native-authored-stopped-pool.ts");
+    const { NativeAuthoredStopOwnerExitedError } = await import(
+      "../src/backends/native-authored-stop-errors.ts"
+    );
     const { logger } = await import("../src/ui/logger.ts");
     const { NATIVE_RECOVERY_RUNTIME_STARTED_NOTE } = await import(
       "../src/backends/native-project-runtime-up.ts"
@@ -450,6 +488,16 @@ macTest(
         },
         unreservedSelected: () => Promise.resolve(false),
         nothingToRecover: () => Promise.resolve(false),
+        stoppedPoolRun: (value) =>
+          nativeAuthoredStoppedPoolRun({
+            ...value,
+            run: () => Promise.resolve(RUN),
+            invoke,
+          }),
+        startPool: () => {
+          calls.push("runtime up");
+          return Promise.resolve();
+        },
         startStoppedPool: (value) =>
           startStoppedPoolForAuthoredRecovery({
             ...value,
@@ -505,6 +553,18 @@ macTest(
       });
       named(await alive.result);
       expect(alive.calls).toEqual([
+        "runtime status --json",
+        "graph native boot",
+        "stop",
+      ]);
+      // An owner confirmed gone after its stop gets the same refusal, and no
+      // recovery or pool start.
+      const exited = run({
+        pool: "stopped",
+        stop: () => Promise.reject(new NativeAuthoredStopOwnerExitedError()),
+      });
+      named(await exited.result);
+      expect(exited.calls).toEqual([
         "runtime status --json",
         "graph native boot",
         "stop",

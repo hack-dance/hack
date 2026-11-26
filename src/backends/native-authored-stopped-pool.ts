@@ -3,11 +3,14 @@
  *
  * After `runtime down --force`, a crash or a host reboot, the run's receipt
  * still belongs to the pool boot that ended. Its detached foreground owner is a
- * host process and may well still run (seen on a real VM): plain `hack down`
- * then asks that owner to stop, and its cleanup clears the run in the new boot.
- * Once the owner is gone, `hack down` (or `hack down --recover`) runs the
- * explicit dead-owner recovery instead. Both need a running pool: the runtime
- * removes the run's stopped containers in the new boot.
+ * host process and may still run (seen on a real VM) until it notices its boot
+ * ended. On a stopped pool, plain `hack down` first asks that owner to stop:
+ * the stop needs no pool, the owner's cleanup refuses without an effect and the
+ * owner exits (HACK-2715 review round 2, seen on a real VM: an owner's stop sent
+ * right after this command started the pool did not confirm). Once the owner is
+ * gone, `hack down` (or `hack down --recover`) runs the explicit dead-owner
+ * recovery, which needs a running pool: the runtime removes the run's stopped
+ * containers in the new boot.
  *
  * So `hack down` first checks the run with the read-only, lock-free
  * `graph native boot` (it needs no running pool, as Compose's
@@ -16,11 +19,10 @@
  * a stopped pool started, with the arguments every project start sends, and the
  * command says so once. A run that cleanup refuses (persistent data, a live
  * source, a custom network or a managed environment) gets the named refusal and
- * no pool start. Its owner's stop needs no pool, so `hack down` still sends that
- * stop first, then reports the refusal (HACK-2715 review round 2). A project with
- * no selected run makes no runtime call here. A running pool, an unreadable
- * status or check, and a run of the current boot are left as they are; the stop
- * or recovery then reports its own result.
+ * no pool start, after its owner's stop. A project with no selected run makes no
+ * runtime call here. A running pool, an unreadable status or check, and a run
+ * of the current boot are left as they are; the stop or recovery then reports
+ * its own result.
  *
  * Starting the pool grants nothing: the owner's cleanup and the recovery still
  * prove the binding, the owner and the boot before any cleanup effect.
@@ -110,10 +112,65 @@ function boundToEndedBoot(check: BootCheck | undefined): boolean {
   );
 }
 
-function endedBootRefusal(): NativeRuntimeRequestError {
+/** The named refusal of a boot-bound run of an ended boot. */
+export function nativeAuthoredEndedBootRefusalError(): NativeRuntimeRequestError {
   return new NativeRuntimeRequestError({
     message: "Native project recovery from an ended pool boot is refused.",
     nativeCode: NATIVE_GRAPH_ENDED_BOOT_UNSUPPORTED,
+  });
+}
+const endedBootRefusal = nativeAuthoredEndedBootRefusalError;
+
+/**
+ * The selected run on a pool `runtime status` proves stopped: `recoverable`
+ * when its receipt belongs to an ended boot that a cleanup from an ended boot
+ * admits, `bound` when it belongs to one that none admits, and `none` for a
+ * running or unreadable pool, no run, a run of the current boot, a removed run
+ * or an unreadable check. Read-only; it grants nothing.
+ */
+export type NativeAuthoredStoppedPoolRun = "none" | "recoverable" | "bound";
+
+export async function nativeAuthoredStoppedPoolRun(
+  opts: CheckOptions
+): Promise<NativeAuthoredStoppedPoolRun> {
+  const run = await selectedRun(opts);
+  if (
+    run === null ||
+    !(await nativeRuntimePoolStopped({
+      runtime: opts.runtime,
+      projectRoot: opts.projectRoot,
+      invoke: opts.invoke ?? invokeNativeRuntime,
+    }))
+  ) {
+    return "none";
+  }
+  const check = await bootCheck(opts, run);
+  if (boundToEndedBoot(check)) {
+    return "bound";
+  }
+  return check?.endedBoot === true && check.phase !== "removed"
+    ? "recoverable"
+    : "none";
+}
+
+/**
+ * Start the stopped pool for a run that {@link nativeAuthoredStoppedPoolRun}
+ * found `recoverable`, with the arguments every project start sends, saying so
+ * once. A failed `runtime up` throws its own error.
+ */
+export async function startNativeRuntimeForAuthoredRecovery(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly invoke?: typeof invokeNativeRuntime;
+  readonly notice?: (line: string) => void;
+}): Promise<void> {
+  (opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+    NATIVE_AUTHORED_STOPPED_POOL_NOTICE
+  );
+  await (opts.invoke ?? invokeNativeRuntime)({
+    runtime: opts.runtime,
+    cwd: opts.projectRoot,
+    args: [...nativeProjectRuntimeUpArgs(opts.projectRoot), "--json"],
   });
 }
 
@@ -138,33 +195,14 @@ export function isNativeAuthoredEndedBootRefusal(
 export async function startStoppedPoolForAuthoredRecovery(
   opts: CheckOptions & { readonly notice?: (line: string) => void }
 ): Promise<boolean> {
-  const invoke = opts.invoke ?? invokeNativeRuntime;
-  const run = await selectedRun(opts);
-  if (
-    run === null ||
-    !(await nativeRuntimePoolStopped({
-      runtime: opts.runtime,
-      projectRoot: opts.projectRoot,
-      invoke,
-    }))
-  ) {
-    return false;
-  }
-  const check = await bootCheck(opts, run);
-  if (boundToEndedBoot(check)) {
+  const found = await nativeAuthoredStoppedPoolRun(opts);
+  if (found === "bound") {
     throw endedBootRefusal();
   }
-  if (!check?.endedBoot || check.phase === "removed") {
+  if (found === "none") {
     return false;
   }
-  (opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)))(
-    NATIVE_AUTHORED_STOPPED_POOL_NOTICE
-  );
-  await invoke({
-    runtime: opts.runtime,
-    cwd: opts.projectRoot,
-    args: [...nativeProjectRuntimeUpArgs(opts.projectRoot), "--json"],
-  });
+  await startNativeRuntimeForAuthoredRecovery(opts);
   return true;
 }
 

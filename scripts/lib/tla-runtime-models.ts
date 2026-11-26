@@ -3224,7 +3224,7 @@ const contracts: readonly ModelContract[] = [
       // VM). Its controls: a start caught mid-way refused by admission and
       // recovery; the live owner's stop same-boot only; `hack down` starting a
       // stopped pool without checking the receipt first.
-      { name: "two-projects", negative: false, states: 6019 },
+      { name: "two-projects", negative: false, states: 6245 },
       {
         name: "admission-ended-boot",
         negative: true,
@@ -3291,6 +3291,29 @@ const contracts: readonly ModelContract[] = [
           'nowner = "live"',
           "nbound = TRUE",
         ],
+      },
+      // HACK-2715 review round 2 (real VM at c1dfac73): `hack down` started a
+      // stopped pool, then the live owner's stop did not confirm, and the run
+      // was left. The fix asks the owner to stop first, on the stopped pool,
+      // and settles the run by the dead-owner recovery in the same command.
+      {
+        name: "native-stop-after-start",
+        negative: true,
+        invariant: "DownConfirms",
+        fields: [
+          "nunconfirmed = TRUE",
+          'nowner = "dead"',
+          'nrun = "ready"',
+          'pool = "running"',
+        ],
+      },
+      // The same VM run: a native owner outlived `runtime down --force`. The fix
+      // makes the owner notice that its boot ended and exit, and `--force` waits.
+      {
+        name: "force-leaves-owner",
+        negative: true,
+        invariant: "NoOwnerLeftByForce",
+        fields: ["forcedOwner = TRUE", 'pool = "stopped"', 'nowner = "live"'],
       },
     ],
   },

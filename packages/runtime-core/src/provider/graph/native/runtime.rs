@@ -1568,7 +1568,15 @@ fn cleanup_inner(
     finish: Option<&CleanupFinish<'_>>,
 ) -> Result<(Receipt, journal::ReceiptBoot), CandidateError> {
     check_startup(guard)?;
-    let engine = Engine::connect_cleanup(candidate)?;
+    // A cleanup bound to the run's receipt (its own owner, or the recovery) waits for
+    // a briefly held lease instead of giving up (HACK-2715 review round 2, seen on a
+    // real VM: an owner's stop right after a pool start did not confirm). A stopped
+    // pool still refuses at once, before any wait.
+    let engine = if expected.is_some() {
+        Engine::connect_owned_cleanup(candidate)?
+    } else {
+        Engine::connect_cleanup(candidate)?
+    };
     check_startup(guard)?;
     let (mut receipt, root, which) = cleanup_journal(
         candidate,

@@ -670,7 +670,15 @@ down` still sends its live owner the stop first; it needs no pool). `graph nativ
 and without a running pool, whether a run's receipt belongs to an ended boot and whether that
 cleanup admits it. Graph admission counts an ended boot's native run by its present containers
 (by recorded id or exact name) instead of refusing it, the storage checks read every boot, and
-such a run is not live for `runtime down` or the idle check.
+such a run is not live for `runtime down` or the idle check, nor in a stopped pool's
+`live_runs`. A native foreground owner reads the pool record about once a second and, after
+two readings that its boot ended, exits with `native_graph_pool_ended` and no cleanup effect,
+keeping its publication for the dead-owner recovery; a start fails at its next check. `runtime
+down --force` waits up to 10 seconds, after the stop and outside the lease, for the owners of
+the native runs it interrupted (the owner lock probe) and reports them in
+`interrupted_owners` (`exited`, `running`). `runtime down` waits up to 5 seconds for a held
+provider lease before it refuses `provider_busy`. A cleanup bound to a run's receipt (its
+owner's or the recovery's) waits for a briefly held lease as the Compose owner's does.
 
 SmolVM seeds a machine's disks during its first start (`machine create` makes none) from expanded
 `*-template.ext4` files that it creates from the verified compressed templates and then reuses.

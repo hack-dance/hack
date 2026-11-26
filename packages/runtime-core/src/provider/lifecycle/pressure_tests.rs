@@ -457,7 +457,7 @@ fn down_samples_the_host_beside_the_stop_and_settles_it_after() {
             .unwrap_or_else(|| panic!("down_observed no longer contains `{step}`"))
     };
     let steps = [
-        "let lock = state::Lock::acquire(&root(candidate))?;",
+        "let lock = down_lease(&root(candidate), DOWN_LEASE_WAIT)?;",
         "let mut owner = Owner::load(candidate)?;",
         "let stopped = provider_stopped(&owner.phase, initial.process_alive);",
         "admission::opening::StopSample::beside(",

@@ -591,6 +591,22 @@ impl<'a> Engine<'a> {
         Self::from_guest(OwnedGuest::connect_cleanup_wait(candidate)?, true)
     }
 
+    /// The cleanup connection of a run's own owner or of its recovery: it waits for a
+    /// briefly held provider lease, as the Compose owner's cleanup does, because an owner
+    /// that gives up its cleanup exits with its services still bound (HACK-2715 review
+    /// round 2). Other platforms, and the receipt-only test engine, connect at once.
+    #[cfg(feature = "native-config-plan")]
+    pub(super) fn connect_owned_cleanup(candidate: &'a Candidate) -> Result<Self, CandidateError> {
+        #[cfg(all(test, target_os = "macos"))]
+        if fixture::active(candidate) {
+            return Self::connect_mode(candidate, true);
+        }
+        #[cfg(target_os = "macos")]
+        return Self::connect_cleanup_wait(candidate);
+        #[cfg(not(target_os = "macos"))]
+        Self::connect_cleanup(candidate)
+    }
+
     fn connect_mode(candidate: &'a Candidate, cleanup_only: bool) -> Result<Self, CandidateError> {
         #[cfg(all(test, target_os = "macos"))]
         if fixture::active(candidate) {

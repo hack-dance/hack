@@ -198,12 +198,16 @@ pub(super) fn live_graph_runs(state_root: &Path) -> Option<Vec<String>> {
             // A native run of a boot that ended under it (`runtime down --force`, a crash
             // or a host reboot, HACK-2715) runs nothing in this boot: its guest stopped
             // and its containers with it. It no longer keeps the pool in use; its project
-            // clears it with `hack down` ([`after_forced_stop`]). Compose receipts name
-            // no boot here and keep their rule.
+            // clears it with `hack down` ([`after_forced_stop`]). On a pool recorded
+            // stopped no native run is live either (HACK-2715 review round 2, seen on
+            // a real VM: a stopped pool's `runtime status` still listed one). Compose
+            // receipts name no boot here and keep their rule.
             let ended = directory == "run/native-graphs"
-                && current
-                    .as_deref()
-                    .is_some_and(|boot| receipt["boot"].as_str() != Some(boot));
+                && match &current {
+                    PoolRecord::Running(boot) => receipt["boot"].as_str() != Some(boot.as_str()),
+                    PoolRecord::Stopped => true,
+                    PoolRecord::Unknown => false,
+                };
             if !ended
                 && receipt["phase"]
                     .as_str()
@@ -216,14 +220,30 @@ pub(super) fn live_graph_runs(state_root: &Path) -> Option<Vec<String>> {
     live.sort();
     Some(live)
 }
-/// The boot the pool's record says is running, read without a lock; `None` when the
-/// pool is not recorded running or the record cannot be read.
-fn current_boot(state_root: &Path) -> Option<String> {
-    let pool: serde_json::Value = state::read(&state_root.join("run/smolvm/owner.json")).ok()?;
-    if pool["phase"] != "running" {
-        return None;
+/// What the pool's record says, read without a lock.
+enum PoolRecord {
+    /// Recorded running this boot.
+    Running(String),
+    /// Recorded in a phase written only before a start or after proven provider
+    /// absence ([`super::STOPPED_PHASES`]): nothing runs in the guest.
+    Stopped,
+    /// Absent, unreadable, booting, quiescing, or running with no boot id.
+    Unknown,
+}
+fn current_boot(state_root: &Path) -> PoolRecord {
+    let Ok(pool) = state::read::<serde_json::Value>(&state_root.join("run/smolvm/owner.json"))
+    else {
+        return PoolRecord::Unknown;
+    };
+    match pool["phase"].as_str() {
+        Some("running") => pool["guest_boot_id"]
+            .as_str()
+            .map_or(PoolRecord::Unknown, |boot| {
+                PoolRecord::Running(boot.to_owned())
+            }),
+        Some(phase) if super::STOPPED_PHASES.contains(&phase) => PoolRecord::Stopped,
+        _ => PoolRecord::Unknown,
     }
-    pool["guest_boot_id"].as_str().map(str::to_owned)
 }
 /// What brings a run back after `runtime down --force` (or a crash) stopped the pool
 /// under it (HACK-2715), as its project names it. Classified by the run's kind and its
@@ -718,9 +738,10 @@ mod tests {
 
     /// HACK-2715 review: a native run of a boot that ended under it runs nothing in the
     /// pool's current boot, so it no longer keeps a plain `runtime down` refused (seen on a
-    /// real VM: the leftover native run refused every later `runtime down`). A run of the
-    /// current boot, any Compose run, and every run while the pool record cannot be read
-    /// or is not running keep their old rule.
+    /// real VM: the leftover native run refused every later `runtime down`), and on a pool
+    /// recorded stopped no native run is live. A run of the current boot, any Compose run,
+    /// and every run while the pool record cannot be read or is booting or quiescing keep
+    /// their old rule.
     #[test]
     fn a_native_run_of_an_ended_boot_is_not_live() {
         let home = Home::new();
@@ -747,8 +768,21 @@ mod tests {
             )
             .unwrap();
         };
-        record("stopped");
-        assert_eq!(live_graph_runs(&home.0), everything);
+        // HACK-2715 review round 2 (seen on a real VM): on a pool recorded stopped,
+        // no native run is live; Compose runs keep their rule. A pool booting or
+        // quiescing proves nothing.
+        for stopped in super::super::STOPPED_PHASES {
+            record(stopped);
+            assert_eq!(
+                live_graph_runs(&home.0),
+                Some(vec![compose.clone()]),
+                "{stopped}"
+            );
+        }
+        for unknown in ["booting", "quiescing"] {
+            record(unknown);
+            assert_eq!(live_graph_runs(&home.0), everything, "{unknown}");
+        }
         record("running");
         assert_eq!(
             live_graph_runs(&home.0),

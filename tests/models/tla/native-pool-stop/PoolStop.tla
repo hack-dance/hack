@@ -132,19 +132,40 @@
 \*                     owner exits). FALSE: the refusal came before the stop on a
 \*                     stopped pool, so the owner and its publication stayed up
 \*                     until host reboot, while a running or crashed pool still
-\*                     got the stop: `native-bound-owner`.
+\*                     got the stop: `native-bound-owner`. With it, `hack down` on
+\*                     a stopped pool sends a live owner its stop first for every
+\*                     run (the owner exits), and the same command then settles the
+\*                     run by the dead-owner recovery, starting the pool only for a
+\*                     recoverable run. FALSE also is the order that started the
+\*                     pool first and then sent the owner its stop, which on a real
+\*                     VM did not confirm ("stop is unconfirmed") and left `up -d`
+\*                     refused; its cause there is not known, so the model lets that
+\*                     stop fail (`NativeStopAfterStartFails`): `native-stop-after-start`.
+\*   OwnerWatchesPool - a native owner notices from the pool record that its boot
+\*                     ended and exits, keeping its publication for the recovery
+\*                     (`NativeOwnerNotices`), and `runtime down --force` waits for
+\*                     the owners of the runs it interrupted (seen on a real VM: an
+\*                     owner outlived the forced stop). The model takes that wait as
+\*                     succeeding; an owner still running when it ends is named in the
+\*                     report and stopped by `hack down`, as after a crash. FALSE:
+\*                     `force-leaves-owner`.
+\* nstartedFor  - this `hack down` started the pool for a live owner's stop.
+\* nunconfirmed - a `hack down` ended with an unconfirmed stop and the run left.
+\* forcedOwner  - a forced stop left a native owner running.
 EXTENDS Naturals
 CONSTANTS Fixed, Strict, ByHand, OtherBoots, RecoveryFaults, MaxBoot, MaxFaults,
           Https, OwnerRetires, ArchiveWorks, FinalizeStopped, FinishAnyBoot,
           ReuseBind, ListenerCheck, IdleRestart, SecondCheck, DownRefuses,
           TwoProjects, AdmitEndedBoot, NativeCrossBoot, NativeStartsPool,
           NativeMidStart, OwnerStopsEndedBoot, NativeChecksFirst, NativeBoundState,
-          OwnerStopFirst
+          OwnerStopFirst, OwnerWatchesPool
 
 VARIABLES pool, boot, run, runBoot, owner, pub, faults, recovering, https,
           httpsBoot, fin, finBoot, port, overListener, restart, stoppedLive,
-          downOverLive, nrun, nrunBoot, nowner, nbound, nwasted
-N == <<nrun, nrunBoot, nowner, nbound, nwasted>>
+          downOverLive, nrun, nrunBoot, nowner, nbound, nwasted, nstartedFor,
+          nunconfirmed, forcedOwner
+X == <<nstartedFor, nunconfirmed, forcedOwner>>
+N == <<nrun, nrunBoot, nowner, nbound, nwasted, X>>
 vars == <<pool, boot, run, runBoot, owner, pub, faults, recovering, https,
           httpsBoot, fin, finBoot, port, overListener, restart, stoppedLive,
           downOverLive, N>>
@@ -165,6 +186,7 @@ TypeOK ==
     /\ downOverLive \in BOOLEAN
     /\ nrun \in {"none", "preparing", "ready", "removed"} /\ nrunBoot \in 0..MaxBoot
     /\ nowner \in {"none", "live", "dead"} /\ nbound \in BOOLEAN /\ nwasted \in BOOLEAN
+    /\ nstartedFor \in BOOLEAN /\ nunconfirmed \in BOOLEAN /\ forcedOwner \in BOOLEAN
 
 Init ==
     /\ pool = "stopped" /\ boot = 0 /\ run = "none" /\ runBoot = 0
@@ -174,6 +196,7 @@ Init ==
     /\ restart = "none" /\ stoppedLive = FALSE /\ downOverLive = FALSE
     /\ nrun = "none" /\ nrunBoot = 0 /\ nowner = "none"
     /\ nbound = FALSE /\ nwasted = FALSE
+    /\ nstartedFor = FALSE /\ nunconfirmed = FALSE /\ forcedOwner = FALSE
 
 CanBoot == boot < MaxBoot
 \* Recovery of a dead owner's ready run in the current boot `b`.
@@ -219,7 +242,15 @@ RuntimeDownRefused ==
 RuntimeDownForce ==
     /\ Fault /\ pool = "running"
     /\ pool' = "stopped" /\ faults' = faults + 1
-    /\ UNCHANGED <<boot, run, runBoot, owner, pub, recovering>> /\ UNCHANGED H
+    \* A ready native run's owner, as a host process, outlives the pool. With
+    \* OwnerWatchesPool it notices and exits, and the forced stop waits for it.
+    /\ LET left == nrun = "ready" /\ nowner = "live"
+       IN /\ nowner' = IF left /\ OwnerWatchesPool THEN "dead" ELSE nowner
+          /\ forcedOwner' = (forcedOwner \/ (left /\ ~OwnerWatchesPool))
+    /\ UNCHANGED <<boot, run, runBoot, owner, pub, recovering>>
+    /\ UNCHANGED <<https, httpsBoot, fin, finBoot, port, overListener, restart,
+                   stoppedLive, downOverLive>>
+    /\ UNCHANGED <<nrun, nrunBoot, nbound, nwasted, nstartedFor, nunconfirmed>>
 \* The VM or its provider dies (or the host reboots).
 Crash ==
     /\ Fault /\ pool = "running"
@@ -398,25 +429,25 @@ NativeStart ==
     /\ nowner = "none"
     /\ nrun' = "preparing" /\ nrunBoot' = boot /\ nowner' = "live"
     /\ nbound' \in (IF NativeBoundState THEN BOOLEAN ELSE {FALSE})
-    /\ UNCHANGED nwasted /\ UNCHANGED NU /\ UNCHANGED NH
+    /\ UNCHANGED nwasted /\ UNCHANGED NU /\ UNCHANGED NH /\ UNCHANGED X
 \* The start completes in its own boot.
 NativeReady ==
     /\ nrun = "preparing" /\ nowner = "live" /\ pool = "running" /\ nrunBoot = boot
     /\ nrun' = "ready"
-    /\ UNCHANGED <<nrunBoot, nowner, nbound, nwasted>> /\ UNCHANGED NU /\ UNCHANGED NH
+    /\ UNCHANGED <<nrunBoot, nowner, nbound, nwasted>> /\ UNCHANGED NU /\ UNCHANGED NH /\ UNCHANGED X
 \* The start's guest went away (forced stop, crash): the start fails, its own
 \* cleanup cannot reach the engine, and its owner exits keeping its publication.
 NativeStartFails ==
     /\ nrun = "preparing" /\ nowner = "live" /\ (pool /= "running" \/ nrunBoot /= boot)
     /\ nowner' = "dead"
-    /\ UNCHANGED <<nrun, nrunBoot, nbound, nwasted>> /\ UNCHANGED NU /\ UNCHANGED NH
+    /\ UNCHANGED <<nrun, nrunBoot, nbound, nwasted>> /\ UNCHANGED NU /\ UNCHANGED NH /\ UNCHANGED X
 NativeProgress == NativeReady \/ NativeStartFails
 \* The ready run's owner is killed (a bounded fault). An owner killed mid-start in a
 \* running boot is outside this model: that same-boot case is unchanged.
 NativeOwnerCrash ==
     /\ Fault /\ nrun = "ready" /\ nowner = "live"
     /\ nowner' = "dead" /\ faults' = faults + 1
-    /\ UNCHANGED <<nrun, nrunBoot, nbound, nwasted>>
+    /\ UNCHANGED <<nrun, nrunBoot, nbound, nwasted>> /\ UNCHANGED X
     /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, recovering>> /\ UNCHANGED NH
 \* `runtime up`, which the refusal of its start on a stopped pool names: only when
 \* it would start (the code names it nowhere else).
@@ -434,6 +465,7 @@ NativeStop ==
        \/ OwnerStopsEndedBoot /\ EndedRecoverable
     /\ nrun' = "removed" /\ nowner' = "none"
     /\ UNCHANGED <<nrunBoot, nbound, nwasted>> /\ UNCHANGED NU /\ UNCHANGED NH
+    /\ nstartedFor' = FALSE /\ UNCHANGED <<nunconfirmed, forcedOwner>>
 \* Its dead-owner recovery (`hack down --recover`, or plain `hack down` once the
 \* owner is gone) on a running pool: the cleanup removes the run, data kept, and
 \* retires the publication. A ready run in its own boot; a run of an ended boot with
@@ -444,14 +476,16 @@ NativeRecover ==
     /\ \/ nrun = "ready" /\ nrunBoot = boot
        \/ NativeCrossBoot /\ nrunBoot /= boot /\ EndedRecoverable
     /\ nrun' = "removed" /\ nowner' = "none"
-    /\ UNCHANGED <<nrunBoot, nbound, nwasted>> /\ UNCHANGED NU /\ UNCHANGED NH
+    /\ UNCHANGED <<nrunBoot, nbound, nwasted>> /\ UNCHANGED NU /\ UNCHANGED NH /\ UNCHANGED X
 \* HACK-2715: with the pool stopped, that `hack down` first starts it
 \* (`startStoppedPoolForAuthoredRecovery`), then stops or recovers as above. With
 \* NativeChecksFirst only when the run's receipt shows the cleanup can proceed; a
 \* start that the stop or recovery then cannot use is `nwasted`.
 NativeDownStartsPool ==
     /\ TwoProjects /\ NativeStartsPool /\ pool = "stopped" /\ CanBoot
-    /\ \/ nrun = "ready" /\ nowner = "live"
+    \* With OwnerStopFirst a live owner is asked to stop first (NativeStopEnded),
+    \* so the pool starts only for the dead-owner recovery.
+    /\ \/ nrun = "ready" /\ nowner = "live" /\ ~OwnerStopFirst
        \/ nrun \in {"preparing", "ready"} /\ nowner = "dead"
     /\ NativeChecksFirst => EndedRecoverable
     /\ pool' = "running" /\ boot' = boot + 1
@@ -460,20 +494,43 @@ NativeDownStartsPool ==
                                                     ELSE NativeCrossBoot))
     /\ UNCHANGED <<run, runBoot, owner, pub, faults, recovering>> /\ UNCHANGED NH
     /\ UNCHANGED <<nrun, nrunBoot, nowner, nbound>>
-\* Its `hack down` of a boot-bound run of an ended boot with a live owner (review
-\* round 2): the owner's stop needs no pool. Its cleanup refuses without an effect
-\* (`native_graph_ended_boot_unsupported`, or no engine on a stopped pool), the
-\* owner exits keeping its publication as evidence, and the command names the
-\* refusal; nothing else changes. `startStoppedPoolForAuthoredRecovery` refuses
-\* before any stop only on a pool it proves stopped, so without OwnerStopFirst the
-\* stop still goes out on a running or crashed pool.
-NativeStopBound ==
-    /\ TwoProjects /\ nrun = "ready" /\ nowner = "live" /\ nbound /\ NativeEnded
-    /\ (pool /= "stopped" \/ OwnerStopFirst)
+    /\ nstartedFor' = (nowner = "live") /\ UNCHANGED <<nunconfirmed, forcedOwner>>
+\* Its `hack down` of a run of an ended boot with a live owner whose stop cannot
+\* clear it (review round 2): on a stopped pool with OwnerStopFirst for every run,
+\* elsewhere for a boot-bound one. The stop needs no pool. Its cleanup refuses
+\* without an effect (no engine on a stopped pool, or
+\* `native_graph_ended_boot_unsupported`), the owner exits keeping its
+\* publication as evidence, and the command goes on to the dead-owner recovery
+\* (NativeDownStartsPool, NativeRecover) or names the refusal. Without
+\* OwnerStopFirst `startStoppedPoolForAuthoredRecovery` ran first, refusing a
+\* bound run before any stop on a pool it proved stopped, and starting the pool
+\* for any other.
+NativeStopEnded ==
+    /\ TwoProjects /\ nrun = "ready" /\ nowner = "live" /\ NativeEnded
+    /\ IF pool = "stopped" THEN OwnerStopFirst ELSE nbound
     /\ nowner' = "dead"
-    /\ UNCHANGED <<nrun, nrunBoot, nbound, nwasted>> /\ UNCHANGED NU /\ UNCHANGED NH
+    /\ UNCHANGED <<nrun, nrunBoot, nbound, nwasted>> /\ UNCHANGED NU /\ UNCHANGED NH /\ UNCHANGED X
+\* The order before the fix: the owner's stop right after this `hack down` started
+\* the pool for it. On a real VM it did not confirm: the owner exited, the command
+\* reported "stop is unconfirmed" and the run was left, so `up -d` was refused.
+NativeStopAfterStartFails ==
+    /\ TwoProjects /\ nstartedFor /\ pool = "running" /\ nrun = "ready"
+    /\ nowner = "live"
+    /\ nowner' = "dead" /\ nunconfirmed' = TRUE /\ nstartedFor' = FALSE
+    /\ UNCHANGED <<nrun, nrunBoot, nbound, nwasted, forcedOwner>>
+    /\ UNCHANGED NU /\ UNCHANGED NH
+\* OwnerWatchesPool: a ready run's owner notices from the pool record that its
+\* boot ended (the pool stopped, or booted again) and exits without a cleanup
+\* effect, keeping its publication. A crashed pool still records it running; the
+\* owner notices once `hack native recover` records it stopped.
+NativeOwnerNotices ==
+    /\ TwoProjects /\ OwnerWatchesPool /\ nrun = "ready" /\ nowner = "live"
+    /\ pool /= "crashed" /\ NativeEnded
+    /\ nowner' = "dead"
+    /\ UNCHANGED <<nrun, nrunBoot, nbound, nwasted>> /\ UNCHANGED NU /\ UNCHANGED NH /\ UNCHANGED X
 NativeUp == NativeStart \/ NativeRuntimeUp
-NativeDown == NativeStop \/ NativeRecover \/ NativeDownStartsPool \/ NativeStopBound
+NativeDown == NativeStop \/ NativeRecover \/ NativeDownStartsPool \/ NativeStopEnded
+              \/ NativeStopAfterStartFails
 NativeUser == NativeUp \/ NativeDown \/ PoolRecover
 
 \* `hack up` = Start, or (Fixed) recovery of a dead owner's run then Start on
@@ -485,7 +542,7 @@ User == Up \/ Down \/ PoolRecover \/ (ByHand /\ RuntimeUp)
 PoolDown == RuntimeDown \/ RuntimeDownRefused \/ RuntimeDownForce
 Next == PoolDown \/ Crash \/ OwnerCrash \/ OwnerNotices \/ OwnerRetire \/ RuntimeUp
         \/ TimeWaitEnds \/ Listen \/ ListenerExits \/ User \/ Restart
-        \/ NativeUser \/ NativeProgress \/ NativeOwnerCrash
+        \/ NativeUser \/ NativeProgress \/ NativeOwnerCrash \/ NativeOwnerNotices
 Spec == Init /\ [][Next]_vars
 \* User commands keep being tried; the owner notices its guest is gone.
 FairSpec == Spec /\ WF_vars(Up) /\ WF_vars(Down) /\ WF_vars(PoolRecover)
@@ -493,7 +550,7 @@ FairSpec == Spec /\ WF_vars(Up) /\ WF_vars(Down) /\ WF_vars(PoolRecover)
             /\ WF_vars(TimeWaitEnds) /\ WF_vars(ListenerExits)
             /\ (ByHand => WF_vars(RuntimeUp))
             /\ WF_vars(NativeUp) /\ WF_vars(NativeDown)
-            /\ WF_vars(NativeProgress)
+            /\ WF_vars(NativeProgress) /\ WF_vars(NativeOwnerNotices)
 
 \* Up: the run is ready in the current boot with a live owner. Down: nothing
 \* is running for it and no publication blocks a start.
@@ -528,12 +585,17 @@ CanComeUp == ThisUp \/ ENABLED (Start \/ RecoverStopped \/ RecoverRunning \/ Poo
 \* accepted exception: it is refused by name with its data kept (`NativeStranded`).
 NativeUpNow == pool = "running" /\ nrun = "ready" /\ nowner = "live" /\ nrunBoot = boot
 NativeCanComeUp == ~TwoProjects \/ NativeUpNow \/ NativeStranded \/ ENABLED NativeUser
-                   \/ ENABLED NativeProgress
+                   \/ ENABLED NativeProgress \/ ENABLED NativeOwnerNotices
 \* Its settled states: up in the current boot, down with nothing left, or refused.
 NativeSettled == NativeUpNow \/ (nrun \in {"none", "removed"} /\ nowner = "none")
                  \/ NativeStranded
 \* HACK-2715 review: `hack down` never starts a pool its stop or recovery cannot use.
 NoWastedPoolStart == ~nwasted
+\* HACK-2715 review round 2: `hack down` never ends with an unconfirmed stop that
+\* leaves the run behind (seen on a real VM).
+DownConfirms == ~nunconfirmed
+\* HACK-2715 review round 2: `runtime down --force` leaves no native owner running.
+NoOwnerLeftByForce == ~forcedOwner
 NativeRecovers == []<>NativeSettled
 \* The boot bound is a model limit, not a dead end: it must never be what stops a command.
 BootBoundUnreached == CanBoot

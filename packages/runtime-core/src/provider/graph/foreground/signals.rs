@@ -266,9 +266,10 @@ impl Events {
         }
         Ok(())
     }
-    /// Untimed wait: `true` for a termination signal. The compose foreground
-    /// loop uses [`Self::wait_until`] for its bounded refresh retries.
-    #[cfg(any(test, feature = "native-config-plan"))]
+    /// Untimed wait: `true` for a termination signal (tests). The foreground loops
+    /// use [`Self::wait_until`]: Compose for its bounded refresh retries, the native
+    /// owner to notice its pool boot ended (HACK-2715 review round 2).
+    #[cfg(test)]
     pub fn wait(&self) -> Result<bool, CandidateError> {
         Ok(matches!(
             self.wait_until(None)?,

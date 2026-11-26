@@ -506,7 +506,7 @@ fn compact_add_replays_the_converted_share_after_record_commit() {
         f.owner.project_share.clone(),
     )
     .unwrap();
-    lifecycle::down(&candidate).unwrap();
+    lifecycle::down(&candidate, lifecycle::LiveRuns::Interrupt).unwrap();
 
     add_project_share(&candidate, &f.second.project, true).unwrap();
     let owner = Owner::load(&candidate).unwrap();

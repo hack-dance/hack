@@ -62,7 +62,11 @@ fn a_stopped_pool_with_a_pruned_provider_tree_goes_down_and_is_repaired() {
     );
 
     // The installer's quiescence check: status, down, status, all without the tree.
-    for observed in [status(candidate), down(candidate), status(candidate)] {
+    for observed in [
+        status(candidate),
+        down(candidate, LiveRuns::Refuse),
+        status(candidate),
+    ] {
         let observed = observed.unwrap();
         assert_eq!(observed.phase, "stopped");
         assert_eq!(observed.process_alive, None);
@@ -111,7 +115,7 @@ fn a_pool_that_is_not_proven_stopped_keeps_verifying_and_refuses_repair() {
     tree_fixture::prune_empty_directories(&candidate.state_root.join("providers/test-tree-1.0.0"));
     // Stopping an unproven provider reaches the tree, so down still verifies it first.
     assert_eq!(
-        down(candidate).err().unwrap().code,
+        down(candidate, LiveRuns::Refuse).err().unwrap().code,
         "artifact_digest_mismatch"
     );
     assert_eq!(

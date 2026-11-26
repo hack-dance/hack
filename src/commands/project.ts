@@ -122,7 +122,6 @@ import {
 } from "../backends/native-profile-selection.ts";
 import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import {
-  NATIVE_RECOVERY_RUNTIME_STARTED_NOTE,
   nativeDownEnvironment,
   nativeProjectDown,
 } from "../backends/native-project-down.ts";
@@ -160,6 +159,7 @@ import {
   nativeForeignHomeRefusal,
   nativeProjectStartupPending,
 } from "../backends/native-project-run.ts";
+import { NATIVE_RECOVERY_RUNTIME_STARTED_NOTE } from "../backends/native-project-runtime-up.ts";
 import {
   nativeAdaptationCandidates,
   resolveNativeAdaptationSelection,

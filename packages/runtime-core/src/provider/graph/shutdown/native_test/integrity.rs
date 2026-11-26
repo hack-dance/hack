@@ -51,7 +51,7 @@ impl Drop for OwnedFixture<'_> {
                     error.code
                 );
             }
-            if let Err(error) = provider::down(self.candidate) {
+            if let Err(error) = provider::down(self.candidate, provider::LiveRuns::Interrupt) {
                 eprintln!(
                     "Integrity fixture retained VM inspection gate: {}",
                     error.code
@@ -470,7 +470,9 @@ fn owned_named_volume_integrity_survives_container_restart() {
     }
     assert_same_provider(&candidate, &owner, &boot);
     assert_eq!(
-        provider::down(&candidate).unwrap().process_alive,
+        provider::down(&candidate, provider::LiveRuns::Interrupt)
+            .unwrap()
+            .process_alive,
         Some(false)
     );
     guard.done = true;

@@ -471,7 +471,7 @@ class Acceptance:
 
     def dispose(self):
         """Owned disposal with readbacks. Any refusal keeps the remaining state."""
-        self.runtime("dispose-down", "runtime", "down", "--json", timeout=180)
+        self.runtime("dispose-down", "runtime", "down", "--force", "--json", timeout=180)
         status = self.observe("dispose-status", "runtime", "status", "--json")
         if status.get("process_alive") is not False:
             raise Failure(f"pool not confirmed stopped: {json.dumps(status)[:300]}")

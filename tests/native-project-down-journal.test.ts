@@ -165,6 +165,9 @@ test("down on a live graph skips a down.before the frontend already completed", 
   await nativeProjectDown({ ...opts, ...recorded });
   expect(recorded.calls).toEqual([
     "inspect",
+    // The lock-free owner selection asks whether the run's pool boot ended
+    // (HACK-2715 review round 6); no hint here, so the hooks run as before.
+    "foreground-owner",
     "inspect",
     "cleanup",
     "inspect",

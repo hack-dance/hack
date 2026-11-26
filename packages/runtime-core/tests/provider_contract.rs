@@ -42,7 +42,7 @@ fn status_down_and_recovery_of_an_uninitialized_candidate_create_no_state() {
     let candidate = Candidate::discover(&fixture.0).unwrap();
     for status in [
         provider::status(&candidate).unwrap(),
-        provider::down(&candidate).unwrap(),
+        provider::down(&candidate, provider::LiveRuns::Refuse).unwrap(),
         provider::recover(&candidate).unwrap(),
     ] {
         assert_eq!(status.phase, "uninitialized");

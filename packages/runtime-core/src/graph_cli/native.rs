@@ -9,7 +9,7 @@ use std::{
 fn refused() -> CandidateError {
     CandidateError::new(
         "native_graph_arguments",
-        "Use graph native plan --source-file FILE, run|serve --source-file FILE --expect-review SHA [--environment-stdin] [--timeout-seconds 1..300] [--storage-witness-tool FILE --expect-storage-witness-tool SHA], inspect|cleanup|recovery-selection --run-id ID, recover-live-owner --run-id ID --expect-receipt SHA --expect-owner SHA, or logs --run-id ID --service SERVICE [--tail 1..1000], exec|one-off --run-id ID --service SERVICE [--workdir DIR] -- CMD..., or control --run-id ID --action status|cleanup; optional --json. Foreground ownership and its recovery require macOS. Native source and private envelopes require their exact kind/version; values omitted.",
+        "Use graph native plan --source-file FILE, run|serve --source-file FILE --expect-review SHA [--environment-stdin] [--timeout-seconds 1..300] [--storage-witness-tool FILE --expect-storage-witness-tool SHA], inspect|cleanup|recovery-selection|boot --run-id ID, recover-live-owner --run-id ID --expect-receipt SHA --expect-owner SHA, or logs --run-id ID --service SERVICE [--tail 1..1000], exec|one-off --run-id ID --service SERVICE [--workdir DIR] -- CMD..., or control --run-id ID --action status|cleanup; optional --json. Foreground ownership and its recovery require macOS. Native source and private envelopes require their exact kind/version; values omitted.",
     )
 }
 fn hex(value: &str, len: usize) -> bool {
@@ -130,6 +130,18 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
             let _ = (run, receipt, owner);
             return Err(foreground_unavailable());
         }
+    }
+    if *action == "boot" {
+        // Read-only and lock-free (HACK-2715): which pool boot a run's receipt belongs to,
+        // and whether the cleanup from an ended boot admits it. It needs no running pool.
+        if private || singles.len() != 1 {
+            return Err(refused());
+        }
+        let run = *singles
+            .get("--run-id")
+            .filter(|run| hex(run, 32))
+            .ok_or_else(refused)?;
+        return serde_json::to_value(native::boot_check(candidate, run)?).map_err(|_| refused());
     }
     if *action == "recovery-selection" {
         if private || singles.len() != 1 {

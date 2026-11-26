@@ -1,15 +1,17 @@
 ----------------------------- MODULE DownHooks -----------------------------
 EXTENDS Naturals
-CONSTANTS EnforceJournal, EnforceUnknownBlock, RevertOwed
+CONSTANTS EnforceJournal, EnforceUnknownBlock, RevertOwed, ForfeitOnBootEnd
 VARIABLES graph, jState, jGen, fpc, dpc, dRuns, dSaved, interrupts,
           upInterrupted, beforeOpen, beforeOk, afterOpen, afterDone, fHooks,
-          newGen, unsafeBefore, unsafeAfter, unsafeGen, unsafeOwe
+          newGen, unsafeBefore, unsafeAfter, unsafeGen, unsafeOwe, ended,
+          unsafeBoot
 vars == <<graph, jState, jGen, fpc, dpc, dRuns, dSaved, interrupts,
           upInterrupted, beforeOpen, beforeOk, afterOpen, afterDone, fHooks,
-          newGen, unsafeBefore, unsafeAfter, unsafeGen, unsafeOwe>>
+          newGen, unsafeBefore, unsafeAfter, unsafeGen, unsafeOwe, ended,
+          unsafeBoot>>
 journal == <<jState, jGen>>
 counters == <<beforeOpen, beforeOk, afterOpen, afterDone>>
-flags == <<unsafeBefore, unsafeAfter, unsafeGen, unsafeOwe>>
+flags == <<unsafeBefore, unsafeAfter, unsafeGen, unsafeOwe, ended, unsafeBoot>>
 
 \* One native Compose-import generation whose project declares down hooks.
 \* The frontend F has authenticated readiness and is running up.after. One
@@ -22,7 +24,8 @@ Init == /\ graph = "upAfter" /\ jState = "absent" /\ jGen = "none"
         /\ upInterrupted = FALSE /\ beforeOpen = 0 /\ beforeOk = FALSE
         /\ afterOpen = 0 /\ afterDone = FALSE /\ fHooks = FALSE
         /\ newGen = FALSE /\ unsafeBefore = FALSE /\ unsafeAfter = FALSE
-        /\ unsafeGen = FALSE /\ unsafeOwe = FALSE
+        /\ unsafeGen = FALSE /\ unsafeOwe = FALSE /\ ended = FALSE
+        /\ unsafeBoot = FALSE
 
 Live == graph \in {"upAfter", "ready"}
 Started == jState \in {"beforeStarted", "afterStarted"}
@@ -30,16 +33,21 @@ DActive == dpc \in {"before", "cleanup", "after", "afterRunning"}
 
 \* An intent record precedes each hook spawn. A start is unsafe when another
 \* start is still running or unknown, or a known success already exists.
+\* After the run's pool boot ended its services are gone, so a start then is
+\* unsafe too (HACK-2715, real VM at efcec5d3).
 StartBefore(g) ==
   /\ jState' = "beforeStarted" /\ jGen' = g
   /\ beforeOpen' = beforeOpen + 1
   /\ unsafeBefore' = (unsafeBefore \/ beforeOpen > 0 \/ beforeOk)
+  /\ unsafeBoot' = (unsafeBoot \/ ended)
+  /\ UNCHANGED ended
 \* down.after requires Removed (stopped) and a known successful down.before.
 StartAfter(g) ==
   /\ jState' = "afterStarted" /\ jGen' = g
   /\ afterOpen' = afterOpen + 1
   /\ unsafeAfter' = (unsafeAfter \/ afterOpen > 0 \/ afterDone
                      \/ graph # "stopped" \/ ~beforeOk)
+  /\ UNCHANGED <<ended, unsafeBoot>>
 
 \* ---------------------------------------------------------------- frontend
 \* up.after succeeded: owe the down hooks only when no record exists (a
@@ -68,7 +76,7 @@ FInterruptAtPublish ==
        ELSE UNCHANGED journal
   /\ unsafeOwe' = (jState' = "owed" /\ jGen' = "F")
   /\ UNCHANGED <<graph, dpc, dRuns, dSaved, counters, fHooks, newGen,
-                 unsafeBefore, unsafeAfter, unsafeGen>>
+                 unsafeBefore, unsafeAfter, unsafeGen, ended, unsafeBoot>>
 \* Ctrl-C while up.after runs: the forced stop never owes or runs down hooks.
 FUpAfterInterrupted ==
   /\ fpc = "upAfter" /\ interrupts = 0 /\ ~newGen
@@ -143,6 +151,17 @@ FCrash ==
   /\ fpc' = "dead"
   /\ UNCHANGED <<graph, journal, dpc, dRuns, dSaved, interrupts,
                  upInterrupted, counters, fHooks, newGen, flags>>
+\* The pool boot ends under a ready run (`runtime down --force`, a crash, or a
+\* boot another project replaced): its services go with the boot and the
+\* frontend's pool watch ends it as a crash would. The journal keeps the ready
+\* run's owed record.
+BootEnds ==
+  /\ ~ended /\ ~newGen /\ ~DActive /\ graph = "ready"
+  /\ fpc \in {"publishing", "serving"}
+  /\ ended' = TRUE /\ graph' = "stopped" /\ fpc' = "dead"
+  /\ UNCHANGED <<journal, dpc, dRuns, dSaved, interrupts, upInterrupted,
+                 counters, fHooks, newGen, unsafeBefore, unsafeAfter, unsafeGen,
+                 unsafeOwe, unsafeBoot>>
 \* A dead frontend's graph may finish stopping, or be stopped by recovery.
 OrphanStops ==
   /\ fpc = "dead" /\ graph # "stopped" /\ ~DActive
@@ -157,8 +176,18 @@ OrphanStops ==
 DClaims ==
   IF ~EnforceJournal THEN TRUE
   ELSE jState = "owed" \/ (Live /\ jState = "absent")
+\* After the boot ended, the ready run's owed record is retired, not run
+\* (`bootEnded` in `openNativeDownHookSession`). An `afterOwed` record still
+\* runs through DStart.
+Forfeits == ForfeitOnBootEnd /\ ended /\ jState = "owed"
+DForfeit ==
+  /\ Forfeits /\ ~DActive /\ dRuns < 2 /\ ~newGen
+  /\ dRuns' = dRuns + 1 /\ dpc' = "done"
+  /\ jState' = "absent" /\ jGen' = "none"
+  /\ UNCHANGED <<graph, fpc, dSaved, interrupts, upInterrupted, counters,
+                 fHooks, newGen, flags>>
 DStart ==
-  /\ ~DActive /\ dRuns < 2 /\ ~newGen
+  /\ ~DActive /\ dRuns < 2 /\ ~newGen /\ ~Forfeits
   /\ Live \/ fpc \in {"done", "dead"}
   /\ dRuns' = dRuns + 1
   /\ IF EnforceJournal /\ Started
@@ -226,11 +255,13 @@ NewUp ==
   /\ newGen' = TRUE /\ unsafeGen' = Started
   /\ jState' = "absent" /\ jGen' = "none"
   /\ UNCHANGED <<graph, fpc, dpc, dRuns, dSaved, interrupts, upInterrupted,
-                 counters, fHooks, unsafeBefore, unsafeAfter, unsafeOwe>>
+                 counters, fHooks, unsafeBefore, unsafeAfter, unsafeOwe, ended,
+                 unsafeBoot>>
 
 Next == FOwe \/ FPublish \/ FInterruptAtPublish \/ FUpAfterInterrupted \/ FInterrupt \/ FBeforeFinish
         \/ FCancelBefore \/ FGraphEnds \/ FCleanup \/ FAfter \/ FAfterDone
-        \/ FCrash \/ OrphanStops \/ DStart \/ DBeforeFinish \/ DCleanup
+        \/ FCrash \/ BootEnds \/ OrphanStops \/ DForfeit \/ DStart
+        \/ DBeforeFinish \/ DCleanup
         \/ DAfter \/ DAfterDone \/ DCrash \/ NewUp
 Spec == Init /\ [][Next]_vars
 
@@ -248,14 +279,20 @@ TypeOK == /\ graph \in {"upAfter", "ready", "stopped"}
           /\ afterOpen \in 0..2 /\ afterDone \in BOOLEAN /\ fHooks \in BOOLEAN
           /\ newGen \in BOOLEAN /\ unsafeBefore \in BOOLEAN
           /\ unsafeAfter \in BOOLEAN /\ unsafeGen \in BOOLEAN
-          /\ unsafeOwe \in BOOLEAN
+          /\ unsafeOwe \in BOOLEAN /\ ended \in BOOLEAN
+          /\ unsafeBoot \in BOOLEAN
 \* down.before starts at most once except to retry a known failure;
 \* down.after only after Removed and a known successful down.before, once;
 \* a started-unknown phase blocks a new generation;
-\* Ctrl-C during up.after never runs, or leaves owed, the frontend's down hooks.
+\* Ctrl-C during up.after never runs, or leaves owed, the frontend's down hooks;
+\* no down.before starts after the run's pool boot ended.
 Safe == /\ ~unsafeBefore /\ ~unsafeAfter /\ ~unsafeGen /\ ~unsafeOwe
+        /\ ~unsafeBoot
         /\ (upInterrupted => ~fHooks)
 NeverComplete == ~(jState = "complete" /\ afterDone)
 \* Reachability: after a frontend crash, down runs the owed hooks once.
 NeverRecovered == ~(fpc = "dead" /\ jState = "complete" /\ jGen = "D")
+\* Reachability: a down.after that an earlier down left owed still runs once
+\* after the boot ended.
+NeverAfterPostBoot == ~(ended /\ jState = "complete" /\ jGen = "D")
 =============================================================================

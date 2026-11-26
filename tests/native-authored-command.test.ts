@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +13,7 @@ import {
   NativeAuthoredReservedStartError,
   NativeAuthoredStopUnavailableError,
 } from "../src/backends/native-authored-stop-errors.ts";
+import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { CliUsageError } from "../src/cli/command.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 import {
@@ -244,6 +245,468 @@ macTest(
     expect(result).toHaveProperty("code", "E_LIFECYCLE_FAILED");
     expect(String(result)).not.toContain("Private diagnostic");
     expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);
+
+macTest(
+  "HACK-2715: down --recover starts a stopped pool before the recovery and names an ended-boot run it cannot recover",
+  async () => {
+    const selected = await fixture();
+    const options = {
+      ...selected.options,
+      operation: "down" as const,
+      recover: true,
+    };
+    const order: string[] = [];
+    const run = (recover: () => Promise<unknown>) =>
+      tryNativeAuthoredCommand({
+        ...selected,
+        options,
+        serve: () => {
+          throw new Error("Recovery cannot invoke startup.");
+        },
+        unreservedSelected: () => Promise.resolve(false),
+        nothingToRecover: () => Promise.resolve(false),
+        startStoppedPool: (value) => {
+          order.push(`pool:${value.projectRoot}`);
+          return Promise.resolve(true);
+        },
+        recover: () => {
+          order.push("recover");
+          return recover() as ReturnType<typeof recoverNativeAuthoredProject>;
+        },
+      }).catch((error: unknown) => error);
+    expect(await run(() => Promise.resolve({}))).toBe(0);
+    expect(order).toEqual([`pool:${selected.root}`, "recover"]);
+    order.length = 0;
+    const refused = await run(() =>
+      Promise.reject(
+        new NativeRuntimeRequestError({
+          message: "refused",
+          nativeCode: "native_graph_ended_boot_unsupported",
+        })
+      )
+    );
+    expect(order).toEqual([`pool:${selected.root}`, "recover"]);
+    expect(refused).toBeInstanceOf(HackCliError);
+    expect(refused).toHaveProperty("code", "E_LIFECYCLE_FAILED");
+    expect(String((refused as HackCliError).message)).toContain(
+      "recovery from an ended pool boot does not support"
+    );
+    // Nothing to recover never starts the pool.
+    order.length = 0;
+    expect(
+      await tryNativeAuthoredCommand({
+        ...selected,
+        options,
+        unreservedSelected: () => Promise.resolve(false),
+        nothingToRecover: () => Promise.resolve(true),
+        startStoppedPool: () => {
+          order.push("pool");
+          return Promise.resolve(true);
+        },
+      })
+    ).toBe(0);
+    expect(order).toEqual([]);
+  }
+);
+
+macTest(
+  "HACK-2715 review round 2: plain down on a stopped pool asks the live owner to stop first, then settles the run by recovery in the same command",
+  async () => {
+    const selected = await fixture();
+    const options = { ...selected.options, operation: "down" as const };
+    const { logger } = await import("../src/ui/logger.ts");
+    const { NATIVE_RECOVERY_RUNTIME_STARTED_NOTE } = await import(
+      "../src/backends/native-project-runtime-up.ts"
+    );
+    const { NativeAuthoredStopOwnerExitedError } = await import(
+      "../src/backends/native-authored-stop-errors.ts"
+    );
+    const order: string[] = [];
+    const run = (opts: {
+      readonly found: "none" | "recoverable";
+      readonly stop: () => Promise<void>;
+      readonly recover?: () => Promise<unknown>;
+    }) =>
+      tryNativeAuthoredCommand({
+        ...selected,
+        options,
+        serve: () => {
+          throw new Error("A stop cannot invoke startup.");
+        },
+        unreservedSelected: () => Promise.resolve(false),
+        nothingToRecover: () => Promise.resolve(false),
+        stoppedPoolRun: (value) => {
+          order.push(`found:${value.projectRoot}`);
+          return Promise.resolve(opts.found);
+        },
+        startPool: () => {
+          order.push("pool");
+          return Promise.resolve();
+        },
+        startStoppedPool: () => {
+          throw new Error("plain down does not check the pool twice (L4)");
+        },
+        endedBootRefusal: () => {
+          order.push("check");
+          return Promise.resolve(undefined);
+        },
+        stop: () => {
+          order.push("stop");
+          return opts.stop();
+        },
+        recover: () => {
+          order.push("recover");
+          return (opts.recover ?? (() => Promise.resolve({})))() as ReturnType<
+            typeof recoverNativeAuthoredProject
+          >;
+        },
+      }).catch((error: unknown) => error);
+    const info = spyOn(logger, "info");
+    try {
+      const notes = () =>
+        info.mock.calls.filter(
+          ([input]) => input.message === NATIVE_RECOVERY_RUNTIME_STARTED_NOTE
+        ).length;
+      const found = `found:${selected.root}`;
+      // Seen on a real VM: the live owner outlives a forced stop. Its stop is
+      // sent on the stopped pool (it needs none); its cleanup refuses and the
+      // owner exits. The same command then starts the pool and recovers the
+      // run, so a later `up -d` is not refused.
+      expect(
+        await run({
+          found: "recoverable",
+          stop: () => Promise.reject(new NativeAuthoredStopOwnerExitedError()),
+        })
+      ).toBe(0);
+      expect(order).toEqual([found, "stop", "pool", "recover"]);
+      expect(notes()).toBe(0);
+      // An owner whose stop removed the run needs nothing more.
+      order.length = 0;
+      expect(
+        await run({ found: "recoverable", stop: () => Promise.resolve() })
+      ).toBe(0);
+      expect(order).toEqual([found, "stop"]);
+      // An owner that is gone goes straight to the recovery, which reports
+      // the pool it started when it fails.
+      order.length = 0;
+      const failed = await run({
+        found: "recoverable",
+        stop: () => Promise.reject(new NativeAuthoredStopUnavailableError()),
+        recover: () => Promise.reject(new Error("refused")),
+      });
+      expect(failed).toBeInstanceOf(HackCliError);
+      expect(order).toEqual([found, "stop", "pool", "recover"]);
+      expect(notes()).toBe(1);
+      // An owner that neither removed its run nor exited is reported as an
+      // unconfirmed stop, and no pool is started under it.
+      order.length = 0;
+      const unconfirmed = await run({
+        found: "recoverable",
+        stop: () => Promise.reject(new Error("refused")),
+      });
+      expect(String((unconfirmed as HackCliError).message)).toContain(
+        "stop is unconfirmed"
+      );
+      // A hook owner (no recorded original to wait for) may still be exiting.
+      expect(String((unconfirmed as HackCliError).message)).toMatch(
+        /run hack down again\.$/
+      );
+      expect(order).toEqual([found, "stop"]);
+      expect(notes()).toBe(1);
+      // On a running pool an owner that exited without removing its run is
+      // recovered without any pool start.
+      order.length = 0;
+      expect(
+        await run({
+          found: "none",
+          stop: () => Promise.reject(new NativeAuthoredStopOwnerExitedError()),
+        })
+      ).toBe(0);
+      expect(order).toEqual([found, "stop", "recover"]);
+      // Any other failed stop there is checked once for a boot-bound run.
+      order.length = 0;
+      await run({
+        found: "none",
+        stop: () => Promise.reject(new Error("refused")),
+      });
+      expect(order).toEqual([found, "stop", "check"]);
+      expect(notes()).toBe(1);
+    } finally {
+      info.mockRestore();
+    }
+  }
+);
+
+macTest(
+  "HACK-2715 review round 2: a boot-bound run's live owner is asked to stop on a stopped pool, then the refusal is named and no pool starts",
+  async () => {
+    const selected = await fixture();
+    const options = { ...selected.options, operation: "down" as const };
+    const RUN = "c".repeat(32);
+    const {
+      startStoppedPoolForAuthoredRecovery,
+      nativeAuthoredEndedBootRefusal,
+      nativeAuthoredStoppedPoolRun,
+    } = await import("../src/backends/native-authored-stopped-pool.ts");
+    const { NativeAuthoredStopOwnerExitedError } = await import(
+      "../src/backends/native-authored-stop-errors.ts"
+    );
+    const { logger } = await import("../src/ui/logger.ts");
+    const { NATIVE_RECOVERY_RUNTIME_STARTED_NOTE } = await import(
+      "../src/backends/native-project-runtime-up.ts"
+    );
+    const check = {
+      version: 1,
+      kind: "native-graph-boot",
+      run: RUN,
+      phase: "ready-observed",
+      ended_boot: true,
+      ended_boot_recoverable: false,
+    };
+    const run = (opts: {
+      readonly pool: "stopped" | "running";
+      readonly stop: () => Promise<void>;
+    }) => {
+      const calls: string[] = [];
+      const invoke = ((request: { readonly args: readonly string[] }) => {
+        calls.push(request.args.slice(0, 3).join(" "));
+        if (request.args[1] === "status") {
+          return Promise.resolve(
+            opts.pool === "stopped"
+              ? { phase: "stopped", process_alive: false }
+              : { phase: "running", process_alive: true }
+          );
+        }
+        if (request.args[2] === "boot") {
+          return Promise.resolve(check);
+        }
+        return Promise.reject(new Error("no other runtime call"));
+      }) as Parameters<typeof startStoppedPoolForAuthoredRecovery>[0]["invoke"];
+      const result = tryNativeAuthoredCommand({
+        ...selected,
+        options,
+        serve: () => {
+          throw new Error("A stop cannot invoke startup.");
+        },
+        unreservedSelected: () => Promise.resolve(false),
+        nothingToRecover: () => Promise.resolve(false),
+        stoppedPoolRun: (value) =>
+          nativeAuthoredStoppedPoolRun({
+            ...value,
+            run: () => Promise.resolve(RUN),
+            invoke,
+          }),
+        startPool: () => {
+          calls.push("runtime up");
+          return Promise.resolve();
+        },
+        startStoppedPool: (value) =>
+          startStoppedPoolForAuthoredRecovery({
+            ...value,
+            run: () => Promise.resolve(RUN),
+            invoke,
+            notice: () => calls.push("notice"),
+          }),
+        endedBootRefusal: (value) =>
+          nativeAuthoredEndedBootRefusal({
+            ...value,
+            run: () => Promise.resolve(RUN),
+            invoke,
+          }),
+        stop: () => {
+          calls.push("stop");
+          return opts.stop();
+        },
+        recover: () => {
+          calls.push("recover");
+          return Promise.resolve({}) as ReturnType<
+            typeof recoverNativeAuthoredProject
+          >;
+        },
+      }).catch((error: unknown) => error);
+      return { calls, result };
+    };
+    const named = (error: unknown) => {
+      expect(error).toBeInstanceOf(HackCliError);
+      expect(error).toHaveProperty("code", "E_LIFECYCLE_FAILED");
+      expect((error as HackCliError).detail).toEqual({
+        nativeCode: "native_graph_ended_boot_unsupported",
+      });
+      const message = String((error as HackCliError).message);
+      expect(message).toContain(
+        "recovery from an ended pool boot does not support"
+      );
+      expect(message).toContain("was asked to stop first");
+      expect(message).toContain("nothing was removed");
+    };
+    const info = spyOn(logger, "info");
+    try {
+      // The live owner's cleanup refuses without an effect and the owner exits:
+      // the stop is sent on the stopped pool, the refusal is named after it,
+      // and no `runtime up` is sent.
+      const alive = run({
+        pool: "stopped",
+        stop: () =>
+          Promise.reject(
+            new Error(
+              "Native stop outcome is retained or unavailable; values omitted."
+            )
+          ),
+      });
+      named(await alive.result);
+      expect(alive.calls).toEqual([
+        "runtime status --json",
+        "graph native boot",
+        "stop",
+      ]);
+      // An owner confirmed gone after its stop gets the same refusal, and no
+      // recovery or pool start.
+      const exited = run({
+        pool: "stopped",
+        stop: () => Promise.reject(new NativeAuthoredStopOwnerExitedError()),
+      });
+      named(await exited.result);
+      expect(exited.calls).toEqual([
+        "runtime status --json",
+        "graph native boot",
+        "stop",
+      ]);
+      // With no owner left to ask, the same refusal, without the recovery.
+      const gone = run({
+        pool: "stopped",
+        stop: () => Promise.reject(new NativeAuthoredStopUnavailableError()),
+      });
+      named(await gone.result);
+      expect(gone.calls).toEqual([
+        "runtime status --json",
+        "graph native boot",
+        "stop",
+      ]);
+      // On a running pool the stop is sent as before, and the failed stop
+      // names the same refusal.
+      const running = run({
+        pool: "running",
+        stop: () => Promise.reject(new Error("refused")),
+      });
+      named(await running.result);
+      expect(running.calls).toEqual([
+        "runtime status --json",
+        "stop",
+        "graph native boot",
+      ]);
+      expect(
+        info.mock.calls.filter(
+          ([input]) => input.message === NATIVE_RECOVERY_RUNTIME_STARTED_NOTE
+        )
+      ).toEqual([]);
+    } finally {
+      info.mockRestore();
+    }
+  }
+);
+
+macTest(
+  "HACK-2715 review round 2 (Codex P2): plain down and down --recover after a provider crash recover the pool record first and settle the run in one command",
+  async () => {
+    const selected = await fixture();
+    const RUN = "e".repeat(32);
+    const {
+      nativeAuthoredStoppedPoolRun,
+      startStoppedPoolForAuthoredRecovery,
+    } = await import("../src/backends/native-authored-stopped-pool.ts");
+    const { NativeAuthoredStopOwnerExitedError } = await import(
+      "../src/backends/native-authored-stop-errors.ts"
+    );
+    const run = (recover: boolean) => {
+      const calls: string[] = [];
+      // The provider died: its record still says running until `runtime recover`.
+      let recovered = false;
+      const invoke = ((request: { readonly args: readonly string[] }) => {
+        calls.push(request.args.slice(0, 3).join(" "));
+        if (request.args[1] === "status") {
+          return Promise.resolve(
+            recovered
+              ? { phase: "recovered-unclean", process_alive: false }
+              : { phase: "process-exited", process_alive: false }
+          );
+        }
+        if (request.args[1] === "recover") {
+          recovered = true;
+          return Promise.resolve({ phase: "recovered-unclean" });
+        }
+        if (request.args[2] === "boot") {
+          // Before the recovery the record names the receipt's boot as running.
+          return Promise.resolve({
+            version: 1,
+            kind: "native-graph-boot",
+            run: RUN,
+            phase: "ready-observed",
+            ended_boot: recovered,
+            ended_boot_recoverable: recovered,
+          });
+        }
+        return Promise.resolve({ phase: "running" });
+      }) as Parameters<typeof nativeAuthoredStoppedPoolRun>[0]["invoke"];
+      const seam = <T extends { readonly projectRoot: string }>(value: T) => ({
+        ...value,
+        run: () => Promise.resolve(RUN),
+        invoke,
+        notice: () => calls.push("notice"),
+      });
+      const result = tryNativeAuthoredCommand({
+        ...selected,
+        options: { ...selected.options, operation: "down" as const, recover },
+        serve: () => {
+          throw new Error("A stop cannot invoke startup.");
+        },
+        unreservedSelected: () => Promise.resolve(false),
+        nothingToRecover: () => Promise.resolve(false),
+        stoppedPoolRun: (value) => nativeAuthoredStoppedPoolRun(seam(value)),
+        startStoppedPool: (value) =>
+          startStoppedPoolForAuthoredRecovery(seam(value)),
+        startPool: () => {
+          calls.push("runtime up");
+          return Promise.resolve();
+        },
+        stop: () => {
+          calls.push("stop");
+          return Promise.reject(new NativeAuthoredStopOwnerExitedError());
+        },
+        recover: () => {
+          calls.push("recover-run");
+          return Promise.resolve({}) as ReturnType<
+            typeof recoverNativeAuthoredProject
+          >;
+        },
+      }).catch((error: unknown) => error);
+      return { calls, result };
+    };
+    const plain = run(false);
+    expect(await plain.result).toBe(0);
+    expect(plain.calls).toEqual([
+      "runtime status --json",
+      "runtime status --json",
+      "runtime recover --json",
+      "notice",
+      "graph native boot",
+      "stop",
+      "runtime up",
+      "recover-run",
+    ]);
+    const explicit = run(true);
+    expect(await explicit.result).toBe(0);
+    expect(explicit.calls).toEqual([
+      "runtime status --json",
+      "runtime status --json",
+      "runtime recover --json",
+      "notice",
+      "graph native boot",
+      "notice",
+      "runtime up --json",
+      "recover-run",
+    ]);
   }
 );
 

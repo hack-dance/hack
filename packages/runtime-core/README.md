@@ -649,6 +649,39 @@ start time, user and executable, without guest quiescence, and record `recovered
 guest that answers keeps the normal clean stop, and `recover` still refuses it. Both refuse with
 `provider_busy` while a native image build holds its fence; finishing or canceling that build
 (Ctrl-C its `hack up`) releases the fence, also when a build process was killed.
+`runtime down` of a running pool also refuses, before any effect, while a graph run's receipt
+is live (`runtime_down_live_runs`, with the run ids in `live_runs`) or the receipts cannot be
+read (`runtime_down_runs_unreadable`). Only a pool that really runs is refused (owner record
+`running`, recorded provider alive, observed under the lease): a provider that died under the
+pool and a stalled `quiescing` stop get the down they had before. `runtime down --force` stops the pool under such runs
+and reports them in `interrupted_runs` (HACK-2477). In code, `provider::down` takes
+`LiveRuns::Refuse` or `LiveRuns::Interrupt` explicitly. Both the refusal's stderr line and
+the forced stop's name, per run, what recovers it (`provider::after_forced_stop`, HACK-2715):
+`hack up` for a ready Compose run, the explicit `graph recover-cleanup` for one caught starting or
+stopping; `hack down`, then `hack up`, for a native-authored graph2 run in any phase, whose own
+live owner's stop or dead-owner recovery accepts a run of an ended boot of the pool
+(`runtime::cleanup_journal`, `journal::load_for_recovery`; a start caught mid-way only from an
+ended boot); `hack down` alone for such a start caught mid-way with a container or network
+whose create it never recorded, which clears it only if that member is absent
+(`HackDownUnlessUnrecorded`); and nothing for a native run with persistent data, a live source, a
+custom topology or a managed environment, which refuses with
+`native_graph_ended_boot_unsupported`, data kept, before any recovery state is written (`hack
+down` still sends its live owner the stop first; it needs no pool). `graph native boot --run-id RUN --json` reports, read-only
+and without a running pool, whether a run's receipt belongs to an ended boot and whether that
+cleanup admits it. Graph admission counts an ended boot's native run by its present containers
+(by recorded id or exact name) instead of refusing it, the storage checks read every boot, and
+such a run is not live for `runtime down` or the idle check, nor in a stopped pool's
+`live_runs`. A native foreground owner reads the pool record about once a second and, after
+two readings that its boot ended, exits with `native_graph_pool_ended` and no cleanup effect,
+keeping its publication for the dead-owner recovery; a start fails at its next check. A record
+that still says `running` while the provider it names is proven gone (a crash, `process-exited`)
+also counts as an ended boot (`journal::boot_of`); the native `hack down` runs `runtime recover`
+on such a pool first. `runtime
+down --force` waits up to 10 seconds, after the stop and outside the lease, for the owners of
+the native runs it interrupted (the owner lock probe) and reports them in
+`interrupted_owners` (`exited`, `running`). `runtime down` waits up to 5 seconds for a held
+provider lease before it refuses `provider_busy`. A cleanup bound to a run's receipt (its
+owner's or the recovery's) waits for a briefly held lease as the Compose owner's does.
 
 SmolVM seeds a machine's disks during its first start (`machine create` makes none) from expanded
 `*-template.ext4` files that it creates from the verified compressed templates and then reuses.

@@ -2322,6 +2322,324 @@ fn old_boot_removed_history_releases_capacity_only_after_strict_owner_and_remova
     assert!(check().is_err());
 }
 
+const ENDED_BOOT_NEXT: &str = "87654321-abcd-abcd-abcd-123456789abc";
+
+/// The guest of the run's boot stopped (`runtime down --force`, a crash or a host
+/// reboot): the engine keeps its containers on the pool's disk, stopped, and the next
+/// boot's engine reports them as a real engine does after an unclean restart (HACK-2715
+/// review): exited with code 255 and no health, every network endpoint released (empty
+/// endpoint, address and network id on the container), and no members on its networks.
+/// Native containers have no restart policy.
+fn end_boot(session: &Session<'_, Fake>) {
+    let mut state = session.backend.state.borrow_mut();
+    for value in state.containers.values_mut() {
+        value["State"] = json!({
+            "Running": false, "Status": "exited", "Pid": 0, "ExitCode": 255,
+            "OOMKilled": false, "Dead": false, "Paused": false, "Restarting": false,
+        });
+        if let Some(networks) = value["NetworkSettings"]["Networks"].as_object_mut() {
+            for attachment in networks.values_mut() {
+                attachment["NetworkID"] = json!("");
+                attachment["EndpointID"] = json!("");
+                attachment["IPAddress"] = json!("");
+            }
+        }
+    }
+    for network in state.networks.values_mut() {
+        network["Containers"] = json!({});
+    }
+}
+
+/// HACK-2715, seen on a real VM: after `runtime down --force` stopped the pool under a
+/// native-authored run and a Compose run, the Compose project's `hack up` recovered its
+/// own run but its new start was refused (`native_graph_receipt`), because admission
+/// refused the native run's receipt of the boot that ended. Now that run reserves only
+/// the containers it still has, and nothing blocks the start.
+#[test]
+fn an_ended_boots_ready_run_reserves_its_present_containers_and_never_blocks_admission() {
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
+    assert_eq!(session.receipt.phase, Phase::ReadyObserved);
+    end_boot(&session);
+    // The old rule, kept for every same-boot use: another boot's live receipt refuses.
+    assert_eq!(
+        journal::load_admission(&fixture.candidate, RUN, OWNER, ENDED_BOOT_NEXT)
+            .unwrap_err()
+            .code,
+        "native_graph_receipt"
+    );
+    let count = |boot: &str| {
+        let mut counted = 0;
+        reservations_using(
+            &fixture.candidate,
+            OWNER,
+            boot,
+            true,
+            |receipt, resource| inspected(&session.backend, receipt, resource),
+            |value| {
+                assert!(value["HostConfig"]["Memory"].is_u64());
+                counted += 1;
+                Ok(())
+            },
+        )
+        .map(|()| counted)
+    };
+    assert_eq!(count(ENDED_BOOT_NEXT).unwrap(), 1);
+    // A container the engine no longer has reserves nothing.
+    session.backend.state.borrow_mut().containers.clear();
+    assert_eq!(count(ENDED_BOOT_NEXT).unwrap(), 0);
+    // Another pool owner's receipt still refuses, in any boot.
+    assert!(
+        reservations_using(
+            &fixture.candidate,
+            &"e".repeat(32),
+            ENDED_BOOT_NEXT,
+            true,
+            |_, _| unreachable!(),
+            |_| unreachable!()
+        )
+        .is_err()
+    );
+    // HACK-2715 review (M1): a start caught mid-way still refuses in its own boot, where
+    // its effects may still land, but no longer blocks starts once its boot has ended
+    // (`an_ended_boots_start_caught_mid_way_reserves_what_is_present`).
+    session.receipt.phase = Phase::Preparing;
+    journal::save(&session.root, &session.receipt).unwrap();
+    assert_eq!(count(BOOT).unwrap_err().code, "native_graph_admission");
+    assert_eq!(count(ENDED_BOOT_NEXT).unwrap(), 0);
+}
+
+/// HACK-2715 review (M1): a start caught mid-way by the end of its boot reserves what it
+/// may have created. Nothing of that boot can land any more, so each member not yet
+/// removed is looked up by its recorded id or, without one, by its exact name (ownership
+/// checked as always): a present one reserves its limits, an absent one nothing.
+#[test]
+fn an_ended_boots_start_caught_mid_way_reserves_what_is_present() {
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
+    end_boot(&session);
+    session.receipt.phase = Phase::Preparing;
+    let web = session.receipt.resources.get_mut("container:web").unwrap();
+    web.id = None;
+    web.phase = "create-intent".into();
+    journal::save(&session.root, &session.receipt).unwrap();
+    let count = || {
+        let mut counted = 0;
+        reservations_using(
+            &fixture.candidate,
+            OWNER,
+            ENDED_BOOT_NEXT,
+            true,
+            |receipt, resource| inspected(&session.backend, receipt, resource),
+            |_| {
+                counted += 1;
+                Ok(())
+            },
+        )
+        .map(|()| counted)
+    };
+    // The create landed before the boot ended, but its id was never recorded.
+    assert_eq!(count().unwrap(), 1);
+    session.backend.state.borrow_mut().containers.clear();
+    assert_eq!(count().unwrap(), 0);
+}
+
+/// HACK-2715 review (M2): the storage checks of a new start read every boot of this
+/// owner. A data-bearing run of an ended boot, which its recovery refuses by name, no
+/// longer blocks another project's start with storage; it still keeps its own volumes
+/// from any new consumer, and a pending helper call still refuses.
+#[test]
+fn an_ended_boots_data_run_blocks_only_its_own_volumes() {
+    let fixture = Fixture::new(basic());
+    let receipt = witnessed_receipt(&fixture);
+    let root = journal::directory(&fixture.candidate, RUN).unwrap();
+    // In its own boot a start in progress refuses, as before.
+    assert!(storage_attempt_preflight(&fixture.candidate, OWNER, BOOT).is_err());
+    // The old rule refused any run of another boot that was not removed.
+    assert!(journal::load_admission(&fixture.candidate, RUN, OWNER, ENDED_BOOT_NEXT).is_err());
+    assert!(
+        storage_attempt_preflight(&fixture.candidate, OWNER, ENDED_BOOT_NEXT)
+            .unwrap()
+            .is_none()
+    );
+    // Its own volumes stay protected; another project's volumes are not blocked.
+    assert!(prior_data_retired(&fixture.candidate, OWNER, ENDED_BOOT_NEXT, &receipt.data).is_err());
+    prior_data_retired(&fixture.candidate, OWNER, ENDED_BOOT_NEXT, &BTreeMap::new()).unwrap();
+    // Another pool owner's receipt still refuses.
+    assert!(
+        storage_attempt_preflight(&fixture.candidate, &"e".repeat(32), ENDED_BOOT_NEXT).is_err()
+    );
+    // A pending helper call refuses in any boot.
+    fs::write(
+        root.join("storage-call.pending"),
+        b"native-storage-call-v1\n",
+    )
+    .unwrap();
+    assert!(storage_attempt_preflight(&fixture.candidate, OWNER, ENDED_BOOT_NEXT).is_err());
+}
+
+/// HACK-2715 review (L6) and the real-VM failure: the cross-boot gate every cleanup
+/// passes before any effect (`cleanup_journal`, called by `cleanup_inner`, so by
+/// `cleanup_recovery` and the owner's `cleanup_guarded`). The run's own live owner (its
+/// bound receipt) and the explicit recovery may clear a run of an ended boot; the
+/// unbound cleanup may not. A start caught mid-way is admitted to the recovery only from
+/// an ended boot, while the owner's own failed-start cleanup keeps its same-boot path.
+#[test]
+fn the_cross_boot_gate_admits_only_bound_cleanups_and_mid_start_only_from_an_ended_boot() {
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
+    end_boot(&session);
+    let ready = session.receipt.clone();
+    let gate = |boot: &str, expected: Option<&Receipt>, recovery: bool| {
+        cleanup_journal(&fixture.candidate, RUN, OWNER, boot, expected, recovery)
+            .map(|(_, _, which)| which)
+    };
+    use journal::ReceiptBoot::{Current, Ended};
+    assert!(gate(ENDED_BOOT_NEXT, None, false).is_err());
+    assert_eq!(gate(ENDED_BOOT_NEXT, Some(&ready), false).unwrap(), Ended);
+    assert_eq!(gate(ENDED_BOOT_NEXT, Some(&ready), true).unwrap(), Ended);
+    assert_eq!(gate(BOOT, None, false).unwrap(), Current);
+    assert_eq!(gate(BOOT, Some(&ready), true).unwrap(), Current);
+    // A cleanup bound to another receipt refuses.
+    let mut other = ready.clone();
+    other.boot = ENDED_BOOT_NEXT.into();
+    assert!(gate(ENDED_BOOT_NEXT, Some(&other), false).is_err());
+    let mut preparing = ready.clone();
+    preparing.phase = Phase::Preparing;
+    journal::save(&session.root, &preparing).unwrap();
+    assert!(gate(BOOT, Some(&preparing), true).is_err());
+    assert_eq!(gate(BOOT, Some(&preparing), false).unwrap(), Current);
+    assert_eq!(
+        gate(ENDED_BOOT_NEXT, Some(&preparing), true).unwrap(),
+        Ended
+    );
+}
+
+/// HACK-2715 review (M1): the cleanup in a new boot clears a start caught mid-way by the
+/// end of its boot. A member whose create was never recorded is looked up by its exact
+/// name: absent, it is recorded removed; present, it cannot be attributed (labels never
+/// authorize adoption), so the cleanup refuses before any effect and keeps it.
+#[test]
+fn an_ended_boots_start_caught_mid_way_is_cleared_unless_a_member_is_unattributed() {
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
+    end_boot(&session);
+    session.receipt.phase = Phase::Preparing;
+    let web = session.receipt.resources.get_mut("container:web").unwrap();
+    web.id = None;
+    web.phase = "create-intent".into();
+    journal::save(&session.root, &session.receipt).unwrap();
+    let before = fs::read(session.root.join("state.json")).unwrap();
+    let effects = session.backend.state.borrow().effects.len();
+    let mut receipt = session.receipt.clone();
+    assert!(cleanup_using(&session.backend, &mut receipt, &session.root).is_err());
+    assert_eq!(fs::read(session.root.join("state.json")).unwrap(), before);
+    assert_eq!(session.backend.state.borrow().effects.len(), effects);
+    session.backend.state.borrow_mut().containers.clear();
+    let mut receipt = session.receipt.clone();
+    cleanup_using(&session.backend, &mut receipt, &session.root).unwrap();
+    assert_eq!(receipt.phase, Phase::Removed);
+    assert!(
+        receipt
+            .resources
+            .values()
+            .all(|resource| resource.phase == "removed")
+    );
+    assert!(session.backend.state.borrow().networks.is_empty());
+}
+
+/// HACK-2715: the explicit dead-owner recovery of a native-authored run accepts the run
+/// of an ended boot of this pool. Its stopped containers are removed by the same
+/// cleanup without a stop request, the receipt reaches `removed` with its data kept,
+/// and the removed run is then inspectable in the new boot. Every other cleanup, and
+/// a run with boot-bound state, stays same-boot.
+#[test]
+fn recovery_removes_an_ended_boots_stopped_run_and_only_recovery_may() {
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
+    end_boot(&session);
+    let load = |boot: &str, recovery: bool| {
+        journal::load_for_recovery(&fixture.candidate, RUN, OWNER, boot, recovery)
+            .map(|(_, _, which)| which)
+    };
+    assert_eq!(load(BOOT, false).unwrap(), journal::ReceiptBoot::Current);
+    assert_eq!(load(BOOT, true).unwrap(), journal::ReceiptBoot::Current);
+    assert_eq!(
+        load(ENDED_BOOT_NEXT, false).unwrap_err().code,
+        "native_graph_receipt"
+    );
+    assert_eq!(
+        load(ENDED_BOOT_NEXT, true).unwrap(),
+        journal::ReceiptBoot::Ended
+    );
+    assert!(load("not-a-boot", true).is_err());
+    assert!(
+        archive::load_inspection(&fixture.candidate, RUN, OWNER, ENDED_BOOT_NEXT).is_err(),
+        "a live run of an ended boot is not inspectable in the new boot"
+    );
+    let stops = session.backend.state.borrow().stop_batches;
+    cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
+    assert_eq!(session.receipt.phase, Phase::Removed);
+    {
+        let state = session.backend.state.borrow();
+        assert!(
+            state.stop_selections[stops..]
+                .iter()
+                .all(|selected| *selected == 0),
+            "a stopped instance gets no stop request"
+        );
+        assert!(state.containers.is_empty());
+        assert!(
+            !state
+                .effects
+                .iter()
+                .any(|effect| effect.starts_with("stop:"))
+        );
+    }
+    let (removed, _) =
+        archive::load_inspection(&fixture.candidate, RUN, OWNER, ENDED_BOOT_NEXT).unwrap();
+    assert_eq!(removed.phase, Phase::Removed);
+    assert_eq!(
+        removed.boot, BOOT,
+        "the receipt keeps the boot it belonged to"
+    );
+}
+
+/// HACK-2715: persistent data is bound to the guest boot that enrolled it, and nothing
+/// rolls it over to a new boot, so a data-bearing run of an ended boot is refused by
+/// name, with its data and evidence kept; in its own boot it is recovered as before.
+#[test]
+fn an_ended_boots_run_with_persistent_data_is_refused_by_name() {
+    let fixture = Fixture::new(basic());
+    let receipt = witnessed_receipt(&fixture);
+    let root = journal::directory(&fixture.candidate, RUN).unwrap();
+    let before = fs::read(root.join("state.json")).unwrap();
+    assert_eq!(
+        journal::load_for_recovery(&fixture.candidate, RUN, OWNER, ENDED_BOOT_NEXT, true)
+            .unwrap_err()
+            .code,
+        "native_graph_ended_boot_unsupported"
+    );
+    assert_eq!(
+        journal::ended_boot_recoverable(&fixture.candidate, &receipt)
+            .unwrap_err()
+            .code,
+        "native_graph_ended_boot_unsupported"
+    );
+    journal::load_for_recovery(&fixture.candidate, RUN, OWNER, BOOT, true).unwrap();
+    assert_eq!(fs::read(root.join("state.json")).unwrap(), before);
+}
+
 // This owned synthetic fixture never approves a share or initializes a provider
 // pool. The caller must use the explicit development project-share setup first.
 #[cfg(target_os = "macos")]

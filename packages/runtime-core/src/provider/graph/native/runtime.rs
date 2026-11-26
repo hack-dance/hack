@@ -2112,7 +2112,10 @@ fn reservations_using_except(
 /// progress refuses. The ended boot's guest is gone, so nothing more can land: each
 /// member not yet removed is looked up by its recorded id or, without one, by its exact
 /// name, with ownership checked as always, and what is present reserves its limits.
-/// Such a run never blocks another project's start (HACK-2715 review).
+/// Such a run does not block another project's start (HACK-2715 review), unless a
+/// member found by its exact name fails that ownership check, its journal cannot be
+/// loaded (a `state.pending` left by a crash mid-save), or it has a pending helper
+/// call: admission then refuses, as it does for any such run (review round 2).
 fn ended_boot_reservations(
     receipt: &Receipt,
     inspect: &mut impl FnMut(&Receipt, &Resource) -> Result<Option<Value>, CandidateError>,

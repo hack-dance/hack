@@ -15,10 +15,12 @@
  * belongs to an ended boot and that the cleanup from an ended boot admits gets
  * a stopped pool started, with the arguments every project start sends, and the
  * command says so once. A run that cleanup refuses (persistent data, a live
- * source, a custom network or a managed environment) is refused by name before
- * any pool is started. A running pool, an unreadable status or check, and a run
- * of the current boot are left as they are; the stop or recovery then reports
- * its own result.
+ * source, a custom network or a managed environment) gets the named refusal and
+ * no pool start. Its owner's stop needs no pool, so `hack down` still sends that
+ * stop first, then reports the refusal (HACK-2715 review round 2). A project with
+ * no selected run makes no runtime call here. A running pool, an unreadable
+ * status or check, and a run of the current boot are left as they are; the stop
+ * or recovery then reports its own result.
  *
  * Starting the pool grants nothing: the owner's cleanup and the recovery still
  * prove the binding, the owner and the boot before any cleanup effect.
@@ -71,23 +73,75 @@ function parseBootCheck(value: unknown, run: string): BootCheck | undefined {
   };
 }
 
-/**
- * Start the pool when `runtime status` proves it stopped and `graph native
- * boot` proves the run's receipt belongs to an ended boot that its cleanup
- * admits. Returns whether it started it. Throws the named refusal for a run of
- * an ended boot that cleanup does not support, without starting anything. A
- * failed `runtime up` throws its own error.
- */
-export async function startStoppedPoolForAuthoredRecovery(opts: {
+type CheckOptions = {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
   /** The project's selected run id, or null when it has none. */
   readonly run: () => Promise<string | null>;
   readonly invoke?: typeof invokeNativeRuntime;
-  readonly notice?: (line: string) => void;
-}): Promise<boolean> {
+};
+
+async function selectedRun(opts: CheckOptions): Promise<string | null> {
+  const run = await opts.run().catch(() => null);
+  return run !== null && RUN.test(run) ? run : null;
+}
+
+async function bootCheck(
+  opts: CheckOptions,
+  run: string
+): Promise<BootCheck | undefined> {
+  return parseBootCheck(
+    await (opts.invoke ?? invokeNativeRuntime)({
+      runtime: opts.runtime,
+      cwd: opts.projectRoot,
+      args: ["graph", "native", "boot", "--run-id", run, "--json"],
+      timeoutMs: 15_000,
+    }).catch(() => undefined),
+    run
+  );
+}
+
+/** A run of an ended boot that no cleanup from an ended boot admits. */
+function boundToEndedBoot(check: BootCheck | undefined): boolean {
+  return (
+    check?.endedBoot === true &&
+    check.phase !== "removed" &&
+    !check.endedBootRecoverable
+  );
+}
+
+function endedBootRefusal(): NativeRuntimeRequestError {
+  return new NativeRuntimeRequestError({
+    message: "Native project recovery from an ended pool boot is refused.",
+    nativeCode: NATIVE_GRAPH_ENDED_BOOT_UNSUPPORTED,
+  });
+}
+
+/** Whether `error` is the named refusal of a boot-bound run of an ended boot. */
+export function isNativeAuthoredEndedBootRefusal(
+  error: unknown
+): error is NativeRuntimeRequestError {
+  return (
+    error instanceof NativeRuntimeRequestError &&
+    error.nativeCode === NATIVE_GRAPH_ENDED_BOOT_UNSUPPORTED
+  );
+}
+
+/**
+ * Start the pool when `runtime status` proves it stopped and `graph native
+ * boot` proves the run's receipt belongs to an ended boot that its cleanup
+ * admits. Returns whether it started it. Throws the named refusal for a run of
+ * an ended boot that cleanup does not support, without starting anything. A
+ * failed `runtime up` throws its own error. The selected run is read first, so a
+ * project with no run makes no runtime call (HACK-2715 review round 2, L4).
+ */
+export async function startStoppedPoolForAuthoredRecovery(
+  opts: CheckOptions & { readonly notice?: (line: string) => void }
+): Promise<boolean> {
   const invoke = opts.invoke ?? invokeNativeRuntime;
+  const run = await selectedRun(opts);
   if (
+    run === null ||
     !(await nativeRuntimePoolStopped({
       runtime: opts.runtime,
       projectRoot: opts.projectRoot,
@@ -96,27 +150,12 @@ export async function startStoppedPoolForAuthoredRecovery(opts: {
   ) {
     return false;
   }
-  const run = await opts.run().catch(() => null);
-  if (run === null || !RUN.test(run)) {
-    return false;
+  const check = await bootCheck(opts, run);
+  if (boundToEndedBoot(check)) {
+    throw endedBootRefusal();
   }
-  const check = parseBootCheck(
-    await invoke({
-      runtime: opts.runtime,
-      cwd: opts.projectRoot,
-      args: ["graph", "native", "boot", "--run-id", run, "--json"],
-      timeoutMs: 15_000,
-    }).catch(() => undefined),
-    run
-  );
   if (!check?.endedBoot || check.phase === "removed") {
     return false;
-  }
-  if (!check.endedBootRecoverable) {
-    throw new NativeRuntimeRequestError({
-      message: "Native project recovery from an ended pool boot is refused.",
-      nativeCode: NATIVE_GRAPH_ENDED_BOOT_UNSUPPORTED,
-    });
   }
   (opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)))(
     NATIVE_AUTHORED_STOPPED_POOL_NOTICE
@@ -127,4 +166,21 @@ export async function startStoppedPoolForAuthoredRecovery(opts: {
     args: [...nativeProjectRuntimeUpArgs(opts.projectRoot), "--json"],
   });
   return true;
+}
+
+/**
+ * After the owner's stop failed on a pool this command did not start (HACK-2715
+ * review round 2): the named refusal when `graph native boot` shows that the
+ * run's receipt belongs to an ended boot and no cleanup from an ended boot
+ * admits it. `hack down` then names the refusal whatever the pool's state was.
+ * Read-only; `undefined` for any other run, no run or an unreadable check.
+ */
+export async function nativeAuthoredEndedBootRefusal(
+  opts: CheckOptions
+): Promise<NativeRuntimeRequestError | undefined> {
+  const run = await selectedRun(opts);
+  if (run !== null && boundToEndedBoot(await bootCheck(opts, run))) {
+    return endedBootRefusal();
+  }
+  return;
 }

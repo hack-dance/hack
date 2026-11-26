@@ -35,7 +35,9 @@ import {
   NativeAuthoredStopUnavailableError,
 } from "../backends/native-authored-stop-errors.ts";
 import {
+  isNativeAuthoredEndedBootRefusal,
   NATIVE_GRAPH_ENDED_BOOT_UNSUPPORTED,
+  nativeAuthoredEndedBootRefusal,
   startStoppedPoolForAuthoredRecovery,
 } from "../backends/native-authored-stopped-pool.ts";
 import {
@@ -48,7 +50,6 @@ import { parseNativeHttpsSelection } from "../backends/native-project-start.ts";
 import {
   isNativeRuntimeNotRunning,
   NATIVE_RUNTIME_NOT_RUNNING,
-  NativeRuntimeRequestError,
   nativeCodesReportRuntimeNotRunning,
   resolveNativeRuntimeSelection,
 } from "../backends/native-runtime-client.ts";
@@ -511,14 +512,16 @@ function commandFailure(options: {
     if (options.signal.aborted) {
       return options.signal.reason === 143 ? 143 : 130;
     }
-    if (
-      options.error instanceof NativeRuntimeRequestError &&
-      options.error.nativeCode === NATIVE_GRAPH_ENDED_BOOT_UNSUPPORTED
-    ) {
+    if (isNativeAuthoredEndedBootRefusal(options.error)) {
+      // HACK-2715 review round 2 (M1): plain `hack down` sends a still-running
+      // owner its stop before it reports this refusal; the stop needs no pool.
+      const owner =
+        options.mode === "stop"
+          ? " Its owner, if it still ran, was asked to stop first (that needs no running pool); it exits without removing anything and leaves its owner record as evidence."
+          : "";
       throw new HackCliError({
         code: "E_LIFECYCLE_FAILED",
-        message:
-          "Native project recovery is not supported for this run: its pool stopped under it (runtime down --force, a crash or a host reboot), and it keeps persistent data, a live source, a custom network or a managed environment, which recovery from an ended pool boot does not support. Its containers, data and evidence are kept; nothing was removed.",
+        message: `Native project recovery is not supported for this run: its pool stopped under it (runtime down --force, a crash or a host reboot), and it keeps persistent data, a live source, a custom network or a managed environment, which recovery from an ended pool boot does not support.${owner} Its containers, data and evidence are kept; nothing was removed.`,
         detail: { nativeCode: NATIVE_GRAPH_ENDED_BOOT_UNSUPPORTED },
       });
     }
@@ -560,6 +563,8 @@ type Seams = {
   readonly nothingToRecover?: typeof nativeAuthoredProjectNothingToRecover;
   /** Starts a stopped pool before a stop or recovery of an ended boot's run (HACK-2715). */
   readonly startStoppedPool?: typeof startStoppedPoolForAuthoredRecovery;
+  /** Names a boot-bound ended-boot run after a failed stop (HACK-2715 review round 2). */
+  readonly endedBootRefusal?: typeof nativeAuthoredEndedBootRefusal;
   readonly observe?: typeof nativeAuthoredProjectPs;
   readonly logs?: typeof nativeAuthoredProjectLogs;
   readonly stop?: typeof stopNativeAuthoredProject;
@@ -617,6 +622,27 @@ async function startPoolForEndedBoot(input: LifecycleInput): Promise<boolean> {
   });
 }
 
+/** The pool check `runStop` already made, passed to its recovery fallback. */
+type PoolChecked = { readonly started: boolean };
+
+/**
+ * After a failed owner's stop on a pool this command did not start: the named
+ * refusal of a boot-bound run of an ended boot, if the read-only check shows
+ * one (HACK-2715 review round 2), so a running pool and a stopped one report
+ * the same outcome. An unreadable check names nothing.
+ */
+async function endedBootRefusalAfterStop(
+  input: LifecycleInput
+): Promise<unknown> {
+  return await (input.seams.endedBootRefusal ?? nativeAuthoredEndedBootRefusal)(
+    {
+      runtime: input.runtime,
+      projectRoot: input.scope.projectRoot,
+      run: () => nativeAuthoredSelectedRun(input.scope),
+    }
+  ).catch(() => undefined);
+}
+
 /**
  * Run a stop or recovery that may follow a pool this command started. If it
  * fails, the pool is left running and the note says so (HACK-2715 review M3),
@@ -640,7 +666,7 @@ async function noteStartedPoolOnFailure<T>(
 
 async function runRecovery(
   input: LifecycleInput,
-  poolStarted = false
+  checked?: PoolChecked
 ): Promise<number> {
   if (
     await (
@@ -687,8 +713,10 @@ async function runRecovery(
   }
   // HACK-2715: a run whose pool stopped under it (runtime down --force, a crash
   // or a host reboot) is recovered in a new boot, so a stopped pool starts
-  // first, but only when the run's receipt shows the recovery can proceed.
-  const started = (await startPoolForEndedBoot(input)) || poolStarted;
+  // first, but only when the run's receipt shows the recovery can proceed. A
+  // plain `hack down` that already checked the pool (its owner was gone) does
+  // not check it again: nothing it did since could change the result (L4).
+  const started = checked?.started ?? (await startPoolForEndedBoot(input));
   await noteStartedPoolOnFailure(started, () =>
     (input.seams.recover ?? recoverNativeAuthoredProject)({
       runtime: input.runtime,
@@ -708,7 +736,21 @@ async function runStop(input: LifecycleInput): Promise<number> {
   // HACK-2715: after the pool stopped under the run, its detached owner may
   // still run (seen on a real VM). Its own stop clears the run in a new boot, so
   // a stopped pool starts first when the run's receipt shows that can proceed.
-  const started = await startPoolForEndedBoot(input);
+  let started = false;
+  let refusal: unknown;
+  try {
+    started = await startPoolForEndedBoot(input);
+  } catch (error) {
+    if (!isNativeAuthoredEndedBootRefusal(error)) {
+      throw error;
+    }
+    // HACK-2715 review round 2 (M1): a boot-bound run of an ended boot is
+    // refused by name, but its owner may still run with its publication. Its
+    // stop needs no pool: the owner's cleanup refuses without an effect and the
+    // owner exits. So the stop is still sent first, on a pool that stays
+    // stopped, and the refusal is reported after it.
+    refusal = error;
+  }
   try {
     await (input.seams.stop ?? stopNativeAuthoredProject)({
       scope: input.scope,
@@ -716,16 +758,23 @@ async function runStop(input: LifecycleInput): Promise<number> {
       signal: input.signal,
     });
   } catch (error) {
-    if (
-      input.signal.aborted ||
-      !(error instanceof NativeAuthoredStopUnavailableError)
-    ) {
-      if (started) {
-        logger.info({ message: NATIVE_RECOVERY_RUNTIME_STARTED_NOTE });
-      }
+    if (input.signal.aborted) {
       throw error;
     }
-    return await runRecovery(input, started);
+    if (refusal !== undefined) {
+      // With the owner asked to stop, or none left to ask, the dead-owner
+      // recovery would only repeat this refusal.
+      throw refusal;
+    }
+    if (!(error instanceof NativeAuthoredStopUnavailableError)) {
+      if (started) {
+        logger.info({ message: NATIVE_RECOVERY_RUNTIME_STARTED_NOTE });
+        throw error;
+      }
+      // A running pool sent the stop as well: name the same refusal there.
+      throw (await endedBootRefusalAfterStop(input)) ?? error;
+    }
+    return await runRecovery(input, { started });
   }
   writeLifecycleStopped(performance.now() - startedAt, { retained: true });
   return 0;

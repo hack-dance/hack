@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
 import {
+  isNativeAuthoredEndedBootRefusal,
   NATIVE_AUTHORED_STOPPED_POOL_NOTICE,
   NATIVE_GRAPH_ENDED_BOOT_UNSUPPORTED,
+  nativeAuthoredEndedBootRefusal,
   startStoppedPoolForAuthoredRecovery,
 } from "../src/backends/native-authored-stopped-pool.ts";
 import {
@@ -129,6 +131,7 @@ test("HACK-2715 review: the receipt is checked before any pool is started", asyn
     ).toBe(false);
     expect(calls).toEqual([["runtime", "status", "--json"], BOOT]);
   }
+  // HACK-2715 review round 2 (L4): with no selected run, no runtime call is made.
   for (const run of [
     () => Promise.resolve(null),
     () => Promise.resolve("not-a-run"),
@@ -143,7 +146,16 @@ test("HACK-2715 review: the receipt is checked before any pool is started", asyn
         invoke,
       })
     ).toBe(false);
-    expect(calls).toEqual([["runtime", "status", "--json"]]);
+    expect(calls).toEqual([]);
+    expect(
+      await nativeAuthoredEndedBootRefusal({
+        runtime,
+        projectRoot,
+        run,
+        invoke,
+      })
+    ).toBeUndefined();
+    expect(calls).toEqual([]);
   }
   const { calls, invoke } = invoker(stopped, () =>
     boot({ ended_boot_recoverable: false })
@@ -162,4 +174,43 @@ test("HACK-2715 review: the receipt is checked before any pool is started", asyn
     NATIVE_GRAPH_ENDED_BOOT_UNSUPPORTED
   );
   expect(calls).toEqual([["runtime", "status", "--json"], BOOT]);
+});
+
+// HACK-2715 review round 2 (M1): after a failed stop on a pool `hack down` did
+// not start, the read-only check names a boot-bound run of an ended boot
+// whatever the pool's state, without a status call or a pool start. Any other
+// check names nothing.
+test("HACK-2715 review round 2: a failed stop names a boot-bound ended-boot run from the receipt alone", async () => {
+  const running = () => ({ phase: "running", process_alive: true });
+  const { calls, invoke } = invoker(running, () =>
+    boot({ ended_boot_recoverable: false })
+  );
+  const refusal = await nativeAuthoredEndedBootRefusal({
+    runtime,
+    projectRoot,
+    run: () => Promise.resolve(RUN),
+    invoke,
+  });
+  expect(refusal).toBeInstanceOf(NativeRuntimeRequestError);
+  expect(isNativeAuthoredEndedBootRefusal(refusal)).toBe(true);
+  expect(calls).toEqual([BOOT]);
+  for (const check of [
+    () => boot({}),
+    () => boot({ ended_boot: false, ended_boot_recoverable: false }),
+    () => boot({ phase: "removed", ended_boot_recoverable: false }),
+    () => boot({ run: "b".repeat(32), ended_boot_recoverable: false }),
+    () => Promise.reject(new Error("no journal")),
+  ]) {
+    const other = invoker(running, check);
+    expect(
+      await nativeAuthoredEndedBootRefusal({
+        runtime,
+        projectRoot,
+        run: () => Promise.resolve(RUN),
+        invoke: other.invoke,
+      })
+    ).toBeUndefined();
+    expect(other.calls).toEqual([BOOT]);
+  }
+  expect(isNativeAuthoredEndedBootRefusal(new Error("other"))).toBe(false);
 });

@@ -245,10 +245,30 @@ pub enum AfterForcedStop {
     /// `hack down` in its project starts the pool and clears it (through its owner if
     /// that still runs, else the dead-owner recovery), then `hack up` starts it again.
     HackDownThenUp,
+    /// The same native-authored run, caught mid-start with a container or network
+    /// whose create was started but never recorded (no id, phase past `reserved`). The
+    /// cleanup looks such a member up by its exact name: absent, `hack down` clears the
+    /// run as above; present, nothing attributes it (labels never authorize adoption),
+    /// so `hack down` refuses before any effect and keeps it, and no command clears it
+    /// yet. The stderr line says so instead of promising `hack down`, then `hack up`
+    /// (HACK-2715 review round 2).
+    HackDownUnlessUnrecorded,
     /// Nothing recovers it from an ended boot: a native-authored run with boot-bound
     /// state (`native_graph_ended_boot_unsupported`), a Compose run caught restoring or
     /// restarting, or a receipt that cannot be read. Stop it with `hack down` before the
-    /// pool stops. Its data is kept either way, and it does not block other projects.
+    /// pool stops. Its data is kept either way.
+    ///
+    /// A boot-bound native run of an ended boot blocks no other project's start or
+    /// plain `runtime down`, except that it keeps its own volumes from any new consumer.
+    /// Some runs still block other projects until they are cleared (HACK-2715 review
+    /// round 2):
+    /// - a Compose run caught restoring or restarting stays live for a plain
+    ///   `runtime down` and the idle stop ([`live_graph_runs`]), as does a Compose run
+    ///   in an [`AfterForcedStop::ExplicitCleanup`] phase until that cleanup clears it;
+    /// - a native run left with a `state.pending` by a crash mid-save cannot be loaded,
+    ///   so graph admission refuses every start until it is inspected;
+    /// - a native start caught mid-way whose unrecorded member is found by its exact
+    ///   name and fails the ownership check refuses graph admission too.
     StopFirst,
 }
 
@@ -320,11 +340,27 @@ pub fn after_forced_stop(state_root: &Path, run: &str) -> AfterForcedStop {
         && BOOT_BOUND_FIELDS
             .iter()
             .all(|field| receipt.get(field).is_none());
-    if graph2 && native_environment_names(state_root, run) == Some(false) {
-        AfterForcedStop::HackDownThenUp
-    } else {
-        AfterForcedStop::StopFirst
+    if !graph2 || native_environment_names(state_root, run) != Some(false) {
+        return AfterForcedStop::StopFirst;
     }
+    if unrecorded_member(&receipt) {
+        AfterForcedStop::HackDownUnlessUnrecorded
+    } else {
+        AfterForcedStop::HackDownThenUp
+    }
+}
+
+/// Whether a native receipt has a container or network whose create was started but
+/// never recorded: no id, and a phase past `reserved` that is not `removed`. Only a
+/// start caught mid-way leaves one; the cleanup can attribute it only by its absence.
+fn unrecorded_member(receipt: &serde_json::Value) -> bool {
+    receipt["resources"].as_object().is_some_and(|resources| {
+        resources.values().any(|resource| {
+            matches!(resource["kind"].as_str(), Some("container" | "network"))
+                && resource["id"].is_null()
+                && !matches!(resource["phase"].as_str(), Some("reserved" | "removed"))
+        })
+    })
 }
 
 /// The refusal code of `runtime down` while graph runs are live (HACK-2477).
@@ -631,6 +667,46 @@ mod tests {
                 "native {phase}"
             );
         }
+        // HACK-2715 review round 2 (L3): a start caught mid-way with a member whose
+        // create was started but never recorded is not promised `hack down`, then
+        // `hack up`. Recorded, reserved and removed members keep the promise.
+        let member = |kind: &str, id: serde_json::Value, phase: &str| {
+            serde_json::json!({
+                "version": 2,
+                "phase": "preparing",
+                "resources": { "member": { "kind": kind, "id": id, "phase": phase } },
+            })
+        };
+        for (receipt, expected) in [
+            (
+                member("container", serde_json::Value::Null, "create-intent"),
+                AfterForcedStop::HackDownUnlessUnrecorded,
+            ),
+            (
+                member("network", serde_json::Value::Null, "create-intent"),
+                AfterForcedStop::HackDownUnlessUnrecorded,
+            ),
+            (
+                member("container", serde_json::json!("abc"), "created"),
+                AfterForcedStop::HackDownThenUp,
+            ),
+            (
+                member("container", serde_json::Value::Null, "reserved"),
+                AfterForcedStop::HackDownThenUp,
+            ),
+            (
+                member("container", serde_json::Value::Null, "removed"),
+                AfterForcedStop::HackDownThenUp,
+            ),
+        ] {
+            write("run/native-graphs", &native, receipt.clone());
+            assert_eq!(kind(&native), expected, "{receipt}");
+        }
+        write(
+            "run/native-graphs",
+            &native,
+            serde_json::json!({ "version": 2, "phase": "ready-observed" }),
+        );
         for run in [&data, &topology, &environment, &unread, &absent] {
             assert_eq!(kind(run), AfterForcedStop::StopFirst, "{run}");
         }

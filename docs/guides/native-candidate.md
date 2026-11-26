@@ -1024,16 +1024,22 @@ The command depends on the kind of run and on the phase its receipt was in:
   after the boot ends. A member whose create the start never recorded is looked up by
   its exact name: absent, it is recorded removed; present, it cannot be attributed
   (labels never authorize adoption), so the cleanup refuses before any effect and
-  keeps it.
+  keeps it, and no command clears it yet. For a start caught mid-way with such a
+  member, the forced-stop line says this instead of promising `hack down`, then
+  `hack up`.
 - A native-authored run with persistent data, a live source, a custom network or a
   managed environment: nothing recovers it from an ended boot yet, because that state
-  is bound to the boot that made it. `hack down` refuses it by name
-  (`native_graph_ended_boot_unsupported`) before it starts any pool, and the recovery
-  refuses it before it writes any recovery state. Its containers, data and evidence
-  are kept. Stop such a run with `hack down` before the pool stops.
+  is bound to the boot that made it. `hack down` never starts a pool for it. If its
+  owner still runs, `hack down` first asks that owner to stop, because the stop needs
+  no pool: the owner's cleanup refuses without any effect, and the owner exits and
+  leaves its record as evidence. `hack down` then refuses the run by name
+  (`native_graph_ended_boot_unsupported`), on a stopped pool and on a running one
+  alike. The recovery refuses it before it writes any recovery state. Its containers,
+  data and evidence are kept. Stop such a run with `hack down` before the pool stops.
 
 A plain `runtime down` refusal names the same command for each live run before you
-pass `--force`. A native-authored run of an ended boot never blocks other projects:
+pass `--force`. A native-authored run of an ended boot does not block other projects,
+except in the cases listed after these points:
 
 - It is not live any more: its guest stopped, so it does not keep a plain `runtime
   down` refused in the new boot.
@@ -1044,6 +1050,18 @@ pass `--force`. A native-authored run of an ended boot never blocks other projec
 - A start with persistent storage reads such a run's saved state without waiting for
   it. A pending helper call still refuses, and the run keeps its own volumes from any
   new consumer until its own recovery; volumes it does not name are not blocked.
+
+These runs still block other projects until they are cleared:
+
+- A Compose run caught restoring or restarting stays live, so a plain `runtime down`
+  and the idle stop of another project's `hack up` refuse until it is stopped.
+- A Compose run caught starting or stopping (`failed-retained`, `preparing`,
+  `cleanup-intent`) stays live the same way until the explicit dead-owner cleanup
+  clears it.
+- A native run that a crash left with a `state.pending` beside its receipt cannot be
+  read, so graph admission refuses every project's start until it is inspected.
+- A native start caught mid-way whose unrecorded member is found by its exact name
+  but fails the ownership check also makes graph admission refuse every start.
 
 In its own boot, a start that is still in progress keeps refusing other starts, as
 before, because its effects may still land. Hack's own scripts pass `--force` only
@@ -1158,10 +1176,12 @@ stateDiagram-v2
     end note
     note right of nrefused
         Data, source, custom network
-        or managed env: refused by
-        name before any pool start or
-        recovery state, data kept.
-        Blocks no other project.
+        or managed env: no pool start.
+        A live owner is asked to stop
+        first (that needs no pool),
+        then the run is refused by
+        name, data kept. It blocks
+        only its own volumes.
     end note
 
     class ready ok

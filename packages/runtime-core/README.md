@@ -661,9 +661,12 @@ the forced stop's name, per run, what recovers it (`provider::after_forced_stop`
 stopping; `hack down`, then `hack up`, for a native-authored graph2 run in any phase, whose own
 live owner's stop or dead-owner recovery accepts a run of an ended boot of the pool
 (`runtime::cleanup_journal`, `journal::load_for_recovery`; a start caught mid-way only from an
-ended boot); and nothing for a native run with persistent data, a live source, a custom topology
-or a managed environment, which refuses with `native_graph_ended_boot_unsupported`, data kept,
-before any recovery state is written. `graph native boot --run-id RUN --json` reports, read-only
+ended boot); `hack down` alone for such a start caught mid-way with a container or network
+whose create it never recorded, which clears it only if that member is absent
+(`HackDownUnlessUnrecorded`); and nothing for a native run with persistent data, a live source, a
+custom topology or a managed environment, which refuses with
+`native_graph_ended_boot_unsupported`, data kept, before any recovery state is written (`hack
+down` still sends its live owner the stop first; it needs no pool). `graph native boot --run-id RUN --json` reports, read-only
 and without a running pool, whether a run's receipt belongs to an ended boot and whether that
 cleanup admits it. Graph admission counts an ended boot's native run by its present containers
 (by recorded id or exact name) instead of refusing it, the storage checks read every boot, and

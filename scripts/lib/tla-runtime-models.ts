@@ -3224,7 +3224,7 @@ const contracts: readonly ModelContract[] = [
       // VM). Its controls: a start caught mid-way refused by admission and
       // recovery; the live owner's stop same-boot only; `hack down` starting a
       // stopped pool without checking the receipt first.
-      { name: "two-projects", negative: false, states: 5705 },
+      { name: "two-projects", negative: false, states: 6019 },
       {
         name: "admission-ended-boot",
         negative: true,
@@ -3275,6 +3275,22 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NoWastedPoolStart",
         fields: ["nwasted = TRUE", "nbound = TRUE", 'pool = "running"'],
+      },
+      // HACK-2715 review round 2: a boot-bound run of an ended boot is refused
+      // by name, but its live owner must still be asked to stop (that needs no
+      // pool). The old ordering refused before the stop on a stopped pool, so
+      // the owner and its publication stayed up: `NativeStranded` no longer
+      // accepts a live owner.
+      {
+        name: "native-bound-owner",
+        negative: true,
+        invariant: "NativeCanComeUp",
+        fields: [
+          'pool = "stopped"',
+          'nrun = "ready"',
+          'nowner = "live"',
+          "nbound = TRUE",
+        ],
       },
     ],
   },

@@ -92,10 +92,12 @@ stateDiagram-v2
     end note
     note right of nrefused
         Data, source, custom network
-        or managed env: refused by
-        name before any pool start or
-        recovery state, data kept.
-        Blocks no other project.
+        or managed env: no pool start.
+        A live owner is asked to stop
+        first (that needs no pool),
+        then the run is refused by
+        name, data kept. It blocks
+        only its own volumes.
     end note
 
     class ready ok

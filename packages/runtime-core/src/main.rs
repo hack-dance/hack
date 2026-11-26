@@ -1588,6 +1588,12 @@ fn forced_stop_plan(runs: &[String], kind: impl Fn(&str) -> AfterForcedStop) -> 
             "hack down, then hack up, in its project recovers {native} (native-authored) with its data kept"
         ));
     }
+    let unrecorded = group(AfterForcedStop::HackDownUnlessUnrecorded);
+    if !unrecorded.is_empty() {
+        parts.push(format!(
+            "hack down in its project clears {unrecorded} (a native-authored start caught mid-way), data kept, only if no container or network whose create it never recorded is present; if one is, hack down refuses and keeps it, and no command clears it yet"
+        ));
+    }
     let stranded = group(AfterForcedStop::StopFirst);
     if !stranded.is_empty() {
         parts.push(format!(
@@ -2396,16 +2402,18 @@ mod usage_tests {
     #[test]
     fn the_forced_stop_plan_names_the_command_that_works_for_each_run() {
         use super::{AfterForcedStop, CandidateError, forced_stop_plan, live_runs_refusal_line};
-        let (compose, native, stranded, starting) = (
+        let (compose, native, stranded, starting, unrecorded) = (
             "a".repeat(32),
             "b".repeat(32),
             "c".repeat(32),
             "d".repeat(32),
+            "e".repeat(32),
         );
         let kind = |run: &str| match run.as_bytes()[0] {
             b'a' => AfterForcedStop::HackUp,
             b'b' => AfterForcedStop::HackDownThenUp,
             b'd' => AfterForcedStop::ExplicitCleanup,
+            b'e' => AfterForcedStop::HackDownUnlessUnrecorded,
             _ => AfterForcedStop::StopFirst,
         };
         let runs = vec![
@@ -2413,6 +2421,7 @@ mod usage_tests {
             native.clone(),
             stranded.clone(),
             starting.clone(),
+            unrecorded.clone(),
         ];
         let plan = forced_stop_plan(&runs, kind);
         assert!(plan.contains(&format!(
@@ -2424,13 +2433,24 @@ mod usage_tests {
         assert!(plan.contains(&format!("nothing recovers {stranded} from a stopped pool")));
         assert!(plan.contains(&format!("hack up does not recover {starting}")));
         assert!(plan.contains("graph recover-cleanup"));
-        for run in [&compose, &native, &stranded, &starting] {
+        assert!(plan.contains(&format!(
+            "hack down in its project clears {unrecorded} (a native-authored start caught mid-way)"
+        )));
+        for run in [&compose, &native, &stranded, &starting, &unrecorded] {
             assert_eq!(plan.matches(run.as_str()).count(), 1, "{run}");
         }
         // A native-authored run is never promised that hack up alone recovers it.
         let only_native = forced_stop_plan(std::slice::from_ref(&native), kind);
         assert!(!only_native.contains("hack up in its project recovers"));
         assert!(!only_native.contains("nothing recovers"));
+        // HACK-2715 review round 2 (L3): a mid-start run with an unrecorded member is
+        // not promised hack down, then hack up; the line says what hack down does.
+        let only_unrecorded = forced_stop_plan(std::slice::from_ref(&unrecorded), kind);
+        assert!(
+            !only_unrecorded.contains("then hack up"),
+            "{only_unrecorded}"
+        );
+        assert!(only_unrecorded.contains("hack down refuses and keeps it"));
         let refused = CandidateError::new("runtime_down_live_runs", "x").with_live_runs(runs);
         let line = live_runs_refusal_line(&refused, kind).unwrap();
         assert!(line.ends_with(&plan), "{line}");

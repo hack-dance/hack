@@ -94,7 +94,9 @@
 \* nbound   - the run keeps state bound to its boot (persistent data, a live source,
 \*            a custom network or a managed environment): no cleanup from an ended
 \*            boot admits it (`journal::ended_boot_recoverable`), so it is refused
-\*            by name and kept: the accepted outcome `NativeStranded`.
+\*            by name and kept: the accepted outcome `NativeStranded`, once its
+\*            owner is no longer live (review round 2: a live owner left running
+\*            with its publication is not an accepted outcome).
 \* nwasted  - a `hack down` started a stopped pool that its stop or recovery then
 \*            could not use.
 \*   TwoProjects     - the native project exists (FALSE in every older control).
@@ -123,12 +125,21 @@
 \*                     FALSE: it started the pool and then refused, leaving it
 \*                     running: `native-start-unchecked`.
 \*   NativeBoundState - the native run may keep boot-bound state (`nbound`).
+\* The second review round of HACK-2715 (TRUE is this change):
+\*   OwnerStopFirst  - `hack down` sends a boot-bound run's live owner its stop even
+\*                     on a stopped pool, then names the refusal: the stop needs no
+\*                     pool (the owner's cleanup refuses without an effect and the
+\*                     owner exits). FALSE: the refusal came before the stop on a
+\*                     stopped pool, so the owner and its publication stayed up
+\*                     until host reboot, while a running or crashed pool still
+\*                     got the stop: `native-bound-owner`.
 EXTENDS Naturals
 CONSTANTS Fixed, Strict, ByHand, OtherBoots, RecoveryFaults, MaxBoot, MaxFaults,
           Https, OwnerRetires, ArchiveWorks, FinalizeStopped, FinishAnyBoot,
           ReuseBind, ListenerCheck, IdleRestart, SecondCheck, DownRefuses,
           TwoProjects, AdmitEndedBoot, NativeCrossBoot, NativeStartsPool,
-          NativeMidStart, OwnerStopsEndedBoot, NativeChecksFirst, NativeBoundState
+          NativeMidStart, OwnerStopsEndedBoot, NativeChecksFirst, NativeBoundState,
+          OwnerStopFirst
 
 VARIABLES pool, boot, run, runBoot, owner, pub, faults, recovering, https,
           httpsBoot, fin, finBoot, port, overListener, restart, stoppedLive,
@@ -184,8 +195,9 @@ NativeLive == nrun \in {"preparing", "ready"} /\ nrunBoot = boot
 NativeEnded == nrun \in {"preparing", "ready"} /\ (pool /= "running" \/ nrunBoot /= boot)
 \* What the cleanup from an ended boot admits (`journal::ended_boot_recoverable`).
 EndedRecoverable == ~nbound /\ (nrun = "ready" \/ NativeMidStart)
-\* A boot-bound run of an ended boot: refused by name, data kept (the named outcome).
-NativeStranded == nbound /\ NativeEnded
+\* A boot-bound run of an ended boot: refused by name, data kept (the named outcome),
+\* with no live owner left running (HACK-2715 review round 2).
+NativeStranded == nbound /\ NativeEnded /\ nowner /= "live"
 \* Either project's run is live.
 AnyLive == LiveRun \/ NativeLive
 \* `runtime down` typed by hand (HACK-2477). It checks the live runs under the
@@ -448,8 +460,20 @@ NativeDownStartsPool ==
                                                     ELSE NativeCrossBoot))
     /\ UNCHANGED <<run, runBoot, owner, pub, faults, recovering>> /\ UNCHANGED NH
     /\ UNCHANGED <<nrun, nrunBoot, nowner, nbound>>
+\* Its `hack down` of a boot-bound run of an ended boot with a live owner (review
+\* round 2): the owner's stop needs no pool. Its cleanup refuses without an effect
+\* (`native_graph_ended_boot_unsupported`, or no engine on a stopped pool), the
+\* owner exits keeping its publication as evidence, and the command names the
+\* refusal; nothing else changes. `startStoppedPoolForAuthoredRecovery` refuses
+\* before any stop only on a pool it proves stopped, so without OwnerStopFirst the
+\* stop still goes out on a running or crashed pool.
+NativeStopBound ==
+    /\ TwoProjects /\ nrun = "ready" /\ nowner = "live" /\ nbound /\ NativeEnded
+    /\ (pool /= "stopped" \/ OwnerStopFirst)
+    /\ nowner' = "dead"
+    /\ UNCHANGED <<nrun, nrunBoot, nbound, nwasted>> /\ UNCHANGED NU /\ UNCHANGED NH
 NativeUp == NativeStart \/ NativeRuntimeUp
-NativeDown == NativeStop \/ NativeRecover \/ NativeDownStartsPool
+NativeDown == NativeStop \/ NativeRecover \/ NativeDownStartsPool \/ NativeStopBound
 NativeUser == NativeUp \/ NativeDown \/ PoolRecover
 
 \* `hack up` = Start, or (Fixed) recovery of a dead owner's run then Start on

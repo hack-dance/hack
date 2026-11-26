@@ -1371,6 +1371,23 @@ impl HackApp {
         let active = sessions.active_index();
         let kinds: Vec<TabKind> = sessions.kinds(cx).iter().map(tab_kind).collect();
         let left_running = sessions.left_running();
+        let t = if panel.state == PanelState::Collapsed {
+            let p = ui.p;
+            TermPalette {
+                strip: p.surface_1,
+                strip_border: p.border_strong,
+                bg: p.selection,
+                fg: p.text_primary,
+                tab_fg: p.text_secondary,
+                badge_warn_bg: p.states.degraded.bg,
+                badge_warn_fg: p.states.degraded.fg,
+                badge_bg: p.surface_2,
+                badge_fg: p.text_secondary,
+                ..t
+            }
+        } else {
+            t
+        };
         let mut tabs = div().flex().items_stretch().min_w_0().overflow_hidden();
         for (i, kind) in kinds.iter().enumerate() {
             let sel = active == Some(i);

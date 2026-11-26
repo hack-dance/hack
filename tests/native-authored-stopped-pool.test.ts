@@ -271,3 +271,40 @@ test("HACK-2715 review round 2: a failed stop names a boot-bound ended-boot run 
   }
   expect(isNativeAuthoredEndedBootRefusal(new Error("other"))).toBe(false);
 });
+
+// Codex P2 on #1257: the command's cancellation reaches every runtime request
+// of the stopped-pool path, and a canceled command never starts the pool.
+test("HACK-2715 review round 2: a canceled hack down never starts the stopped pool", async () => {
+  const controller = new AbortController();
+  const signals: (AbortSignal | undefined)[] = [];
+  const calls: string[][] = [];
+  const invoke = ((request: {
+    readonly args: readonly string[];
+    readonly signal?: AbortSignal;
+  }) => {
+    calls.push([...request.args]);
+    signals.push(request.signal);
+    if (request.args[1] === "status") {
+      return Promise.resolve({ phase: "stopped", process_alive: false });
+    }
+    if (request.args[2] === "boot") {
+      // The cancel arrives while the read-only check is pending.
+      controller.abort();
+      return Promise.resolve(boot({}));
+    }
+    return Promise.resolve({ phase: "running" });
+  }) as unknown as typeof invokeNativeRuntime;
+  const refused = await startStoppedPoolForAuthoredRecovery({
+    runtime,
+    projectRoot,
+    run: () => Promise.resolve(RUN),
+    invoke,
+    signal: controller.signal,
+    notice: () => {
+      throw new Error("no notice");
+    },
+  }).catch((error: unknown) => error);
+  expect(refused).toBeInstanceOf(NativeRuntimeRequestError);
+  expect(calls).toEqual([["runtime", "status", "--json"], BOOT]);
+  expect(signals).toEqual([controller.signal, controller.signal]);
+});

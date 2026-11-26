@@ -81,7 +81,19 @@ type CheckOptions = {
   readonly invoke?: typeof invokeNativeRuntime;
   /** Where the one-line notices go; stderr by default. */
   readonly notice?: (line: string) => void;
+  /** The command's cancellation; every runtime request observes it. */
+  readonly signal?: AbortSignal;
 };
+
+/** Refuse before a pool start once the command was canceled (Codex P2). */
+function requireNotCanceled(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new NativeRuntimeRequestError({
+      message:
+        "Native project stop or recovery was canceled before the runtime was started; nothing was started.",
+    });
+  }
+}
 
 async function selectedRun(opts: CheckOptions): Promise<string | null> {
   const run = await opts.run().catch(() => null);
@@ -98,6 +110,7 @@ async function bootCheck(
       cwd: opts.projectRoot,
       args: ["graph", "native", "boot", "--run-id", run, "--json"],
       timeoutMs: 15_000,
+      signal: opts.signal,
     }).catch(() => undefined),
     run
   );
@@ -148,14 +161,17 @@ export async function nativeAuthoredStoppedPoolRun(
     cwd: opts.projectRoot,
     args: ["runtime", "status", "--json"],
     timeoutMs: 30_000,
+    signal: opts.signal,
   }).catch(() => undefined);
   if (isRecord(status) && status.phase === "process-exited") {
+    requireNotCanceled(opts.signal);
     if (
       !(await recoverExitedNativeRuntime({
         runtime: opts.runtime,
         cwd: opts.projectRoot,
         invoke,
         notice: opts.notice,
+        signal: opts.signal,
       }))
     ) {
       return "none";
@@ -187,7 +203,9 @@ export async function startNativeRuntimeForAuthoredRecovery(opts: {
   readonly projectRoot: string;
   readonly invoke?: typeof invokeNativeRuntime;
   readonly notice?: (line: string) => void;
+  readonly signal?: AbortSignal;
 }): Promise<void> {
+  requireNotCanceled(opts.signal);
   (opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)))(
     NATIVE_AUTHORED_STOPPED_POOL_NOTICE
   );
@@ -195,6 +213,7 @@ export async function startNativeRuntimeForAuthoredRecovery(opts: {
     runtime: opts.runtime,
     cwd: opts.projectRoot,
     args: ["runtime", "up", "--json"],
+    signal: opts.signal,
   });
 }
 

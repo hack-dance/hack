@@ -628,6 +628,7 @@ async function startPoolForEndedBoot(input: LifecycleInput): Promise<boolean> {
     runtime: input.runtime,
     projectRoot: input.scope.projectRoot,
     run: () => nativeAuthoredSelectedRun(input.scope),
+    signal: input.signal,
   });
 }
 
@@ -652,6 +653,7 @@ async function startPoolFor(
   await (input.seams.startPool ?? startNativeRuntimeForAuthoredRecovery)({
     runtime: input.runtime,
     projectRoot: input.scope.projectRoot,
+    signal: input.signal,
   });
   return true;
 }
@@ -670,6 +672,7 @@ async function endedBootRefusalAfterStop(
       runtime: input.runtime,
       projectRoot: input.scope.projectRoot,
       run: () => nativeAuthoredSelectedRun(input.scope),
+      signal: input.signal,
     }
   ).catch(() => undefined);
 }
@@ -781,6 +784,7 @@ async function runStop(input: LifecycleInput): Promise<number> {
     runtime: input.runtime,
     projectRoot: input.scope.projectRoot,
     run: () => nativeAuthoredSelectedRun(input.scope),
+    signal: input.signal,
   });
   try {
     await (input.seams.stop ?? stopNativeAuthoredProject)({

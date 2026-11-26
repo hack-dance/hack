@@ -50,6 +50,8 @@ export const HACK_ERROR_CODES = [
   "E_COMPOSE_FAILED",
   "E_COMPOSE_OUTPUT_INVALID",
   "E_STARTUP_INCOMPLETE",
+  // Native: a service's own process exited during startup (HACK-2194).
+  "E_SERVICE_EXITED",
   "E_NATIVE_STILL_STARTING",
   "E_NATIVE_START_OUTCOME_UNKNOWN",
   "E_DOWN_INCOMPLETE",

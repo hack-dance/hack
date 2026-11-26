@@ -2596,6 +2596,162 @@ test("down after the pool boot ended still runs a down.after an earlier down lef
   expect(phases).toEqual(["after"]);
 });
 
+/**
+ * The state a ready detached Compose start leaves when its pool boot ends
+ * under it, as kept in the real-VM homes at efcec5d3 (`p1257-hooks`,
+ * `p1257-hooksb`): the start wrote the ready run's `owed` down-hook record,
+ * and its frontend exited (with the pool watch) without completing its
+ * finalization.
+ */
+async function endedBootReadyRun(scope: NativeProjectRunScope): Promise<void> {
+  const { replaceNativeDownHookRecord } = await import(
+    "../src/backends/native-project-down-hooks.ts"
+  );
+  expect(
+    await replaceNativeDownHookRecord(scope, null, {
+      run: run.run,
+      generation: "f".repeat(32),
+      state: "owed",
+    })
+  ).toBe(true);
+  const module = join(
+    import.meta.dir,
+    "../src/backends/native-project-finalization.ts"
+  );
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      `const { beginNativeProjectFinalization } = await import(${JSON.stringify(module)});
+       await beginNativeProjectFinalization(JSON.parse(process.argv[1]));`,
+      JSON.stringify({ scope, run }),
+    ],
+    { stdout: "ignore", stderr: "pipe" }
+  );
+  expect(await child.exited).toBe(0);
+}
+
+// HACK-2715, real VM at efcec5d3: `runtime down --force` (`p1257-hooks`), or
+// another project's down that started the stopped pool again (`p1257-hooksb`),
+// then this project's plain `hack down`. With the frontend gone the down
+// selects the owner, `graph foreground-owner` gives its dead-owner recovery hint
+// (the homes' `dead-owner-cleanup.json` records it as `original_sha256`, from
+// the ended boot to the new one), `recover-cleanup` stops the run, and the
+// stopped path ran the ready run's `owed` record as `down.before` and
+// `down.after`. The services had stopped with the ended boot: neither runs, and
+// the record is retired so a later down does not run them either.
+for (const poolStopped of [true, false]) {
+  test(`down of a ready run whose pool boot ended runs no owed down hook (${poolStopped ? "after runtime down --force" : "after another project restarted the pool"})`, async () => {
+    const opts = await fixture();
+    await endedBootReadyRun(opts.scope);
+    const { loadNativeDownHookRecord } = await import(
+      "../src/backends/native-project-down-hooks.ts"
+    );
+    const phases: string[] = [];
+    const calls: string[] = [];
+    let pool = !poolStopped;
+    let cleaned = false;
+    const down = () =>
+      nativeProjectDown({
+        ...opts,
+        poolBootEnded: async () => false,
+        hooks: {
+          configured: true,
+          run: async ({ phase }) => {
+            phases.push(phase);
+          },
+        },
+        invoke: async (request) => {
+          const command = request.args[1]!;
+          calls.push(command);
+          if (command === "up") {
+            pool = true;
+            return { phase: "running" };
+          }
+          if (command === "foreground-owner") {
+            return cleaned
+              ? ownerSelection("absent", "stopped-data-retained")
+              : {
+                  ...ownerSelection("exited", "ready-observed"),
+                  dead_owner_recovery: pool ? "3".repeat(64) : null,
+                  dead_owner_recovery_complete: false,
+                };
+          }
+          if (!pool) {
+            throw poolStoppedError();
+          }
+          if (command === "recover-cleanup") {
+            expect(request.args).toContain("3".repeat(64));
+            cleaned = true;
+            return { run: run.run, recovered: true, data_retained: true };
+          }
+          if (command === "retire-recovered-publisher") {
+            return {
+              run: run.run,
+              publisher_retired: true,
+              data_retained: true,
+            };
+          }
+          if (command === "managed-hostname-authority") {
+            return { authority: { present: false } };
+          }
+          expect(command).toBe("inspect");
+          return snapshot(cleaned);
+        },
+      });
+    const result = await down();
+    expect(result.status).toBe("stopped");
+    expect(result.runtimeStarted === true).toBe(poolStopped);
+    expect(calls.filter((call) => call === "recover-cleanup")).toHaveLength(1);
+    expect(phases).toEqual([]);
+    expect(await loadNativeDownHookRecord(opts.scope)).toBeNull();
+    // A later down of the stopped run has nothing owed either.
+    expect((await down()).status).toBe("stopped");
+    expect(phases).toEqual([]);
+  });
+}
+
+// The same boot: a frontend crash on a running pool is recovered by the
+// same-boot recovery, which gives no dead-owner hint. The ready run's owed
+// hooks then run once on the stopped graph, as before.
+test("down of a ready run whose frontend crashed on the same boot still runs its owed down hooks", async () => {
+  const opts = await fixture();
+  await endedBootReadyRun(opts.scope);
+  const phases: string[] = [];
+  let recovered = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    hooks: {
+      configured: true,
+      run: async ({ phase }) => {
+        phases.push(phase);
+      },
+    },
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      if (command === "foreground-owner") {
+        return ownerSelection("exited", "ready-observed");
+      }
+      if (command === "recover-live-owner") {
+        recovered = true;
+        return {
+          run: run.run,
+          recovered: true,
+          data_retained: true,
+          publisher_retired: true,
+        };
+      }
+      if (command === "managed-hostname-authority") {
+        return { authority: { present: false } };
+      }
+      return snapshot(recovered);
+    },
+  });
+  expect(result.status).toBe("stopped");
+  expect(recovered).toBe(true);
+  expect(phases).toEqual(["before", "after"]);
+});
+
 test("plain down on a stopped pool with a dead owner also starts the pool to recover", async () => {
   const opts = await fixture();
   const calls: string[] = [];

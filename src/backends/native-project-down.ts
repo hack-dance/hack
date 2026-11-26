@@ -10,7 +10,10 @@ import {
   nativeFrontendGone,
   nativeFrontendGoneSettled,
 } from "./native-frontend-identity.ts";
-import { openNativeDownHookSession } from "./native-project-down-hooks.ts";
+import {
+  type NativeDownHookSession,
+  openNativeDownHookSession,
+} from "./native-project-down-hooks.ts";
 import {
   captureNativeProjectFinalization,
   inspectNativeProjectFinalizationLifetime,
@@ -1007,6 +1010,43 @@ async function downRun(opts: {
   );
 }
 
+/**
+ * The live path's down-hook session (HACK-2715). No live-path `down.before`
+ * runs once the run's pool boot has ended: `bootEnded` when this down already
+ * knows it, or else the owner selection's dead-owner recovery hint, which the
+ * runtime gives only for a run its boot evidence places in an earlier boot, so
+ * it holds however the pool came back, another project's restart included. A
+ * plain down selects the owner here, lock-free, only when hooks are configured,
+ * after the hook journal was read (an unknown completion still refuses first).
+ * Without boot evidence (no hint, the pool not running) the hooks run as
+ * before. A boot-ended session retires the ready run's `owed` record and runs
+ * only a `down.after` an earlier down left owed.
+ */
+async function openLiveDownHookSession(opts: {
+  readonly scope: NativeProjectRunScope;
+  readonly run: NativeProjectRun;
+  readonly configured: boolean;
+  readonly bootEnded: boolean;
+  readonly selection: ForegroundOwnerSelection | undefined;
+  readonly selectOwner: () => Promise<ForegroundOwnerSelection>;
+}): Promise<NativeDownHookSession> {
+  const open = (bootEnded: boolean) =>
+    openNativeDownHookSession({
+      scope: opts.scope,
+      run: opts.run,
+      graphStopped: false,
+      configured: opts.configured,
+      bootEnded,
+    });
+  const session = await open(opts.bootEnded);
+  if (opts.bootEnded || !opts.configured) {
+    return session;
+  }
+  const selection =
+    opts.selection ?? (await opts.selectOwner().catch(() => undefined));
+  return selection?.deadOwnerRecovery == null ? session : await open(true);
+}
+
 async function nativeProjectDownOnce(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
@@ -1181,6 +1221,14 @@ async function nativeProjectDownOnce(opts: {
           verb,
         })
       : undefined;
+  // Whether the run's pool boot ended under it, so its services stopped with
+  // that boot: this down started the pool or recovered an exited provider, or
+  // it just recovered a dead owner by the selection's dead-owner recovery hint,
+  // which the runtime gives only for a run its boot evidence places in an
+  // earlier boot. Seen on a real VM at efcec5d3: with the frontend gone, both
+  // the forced-stop row and another project's restart reached the stopped path
+  // through that recovery, and ran the `owed` hooks of the ready run.
+  let bootEnded = opts.bootEnded === true;
   if (
     selection &&
     (await resumeSelectedOwner({
@@ -1192,6 +1240,7 @@ async function nativeProjectDownOnce(opts: {
       verb,
     }))
   ) {
+    bootEnded ||= selection.deadOwnerRecovery !== null;
     initial = await inspect();
     verify(initial, run, false);
   }
@@ -1266,8 +1315,9 @@ async function nativeProjectDownOnce(opts: {
       return;
     }
   };
-  // Owed phases a healthy down left journaled still run once (review round 6);
-  // only the live path below skips its hooks after the pool boot ended.
+  // Owed phases journaled for this run run once. After the pool boot ended, the
+  // ready run's own `owed` record is retired instead of run (its services went
+  // with the boot); a `down.after` an earlier down left owed still runs.
   const hooks = opts.hooks;
   const owedAfterStop = async () => {
     if (!hooks) {
@@ -1279,6 +1329,7 @@ async function nativeProjectDownOnce(opts: {
       run,
       graphStopped: true,
       configured: hooks.configured,
+      bootEnded,
     });
     await session.before(() =>
       hooks.run({ phase: "before", run, graphStopped: true })
@@ -1372,44 +1423,27 @@ async function nativeProjectDownOnce(opts: {
       dataPreserved: true,
     } as const;
   }
-  // HACK-2715 review round 6: no live-path down hook runs once the run's pool
-  // boot has ended. This down knows it when it started the pool or recovered an
-  // exited provider (`bootEnded`), or when the owner selection carries a
-  // dead-owner recovery hint: the runtime gives one only for a run its boot
-  // evidence places in an earlier boot (or with a matching recovery intent), so
-  // this holds however the pool came back, another project's restart included.
-  // A plain down selects the owner here, lock-free, only when hooks are
-  // configured, after the hook journal was read (an unknown completion still
-  // refuses first). Without boot evidence (no hint, the pool not running) the
-  // hooks run as before.
-  const openedSession =
-    hooks && opts.bootEnded !== true
-      ? await openNativeDownHookSession({
-          scope: opts.scope,
-          run,
-          graphStopped: false,
-          configured: hooks.configured,
-        })
-      : undefined;
-  const hookSelection =
-    openedSession && hooks?.configured === true && selection === undefined
-      ? await selectForegroundOwner({
-          runtime: opts.runtime,
-          projectRoot: opts.scope.projectRoot,
-          run,
-          invoke,
-          verb,
-        }).catch(() => undefined)
-      : selection;
-  const liveHooks =
-    openedSession && hookSelection?.deadOwnerRecovery == null
-      ? hooks
-      : undefined;
-  const session = liveHooks ? openedSession : undefined;
+  const session = hooks
+    ? await openLiveDownHookSession({
+        scope: opts.scope,
+        run,
+        configured: hooks.configured,
+        bootEnded,
+        selection,
+        selectOwner: () =>
+          selectForegroundOwner({
+            runtime: opts.runtime,
+            projectRoot: opts.scope.projectRoot,
+            run,
+            invoke,
+            verb,
+          }),
+      })
+    : undefined;
   await opts.before?.(run);
-  if (liveHooks && session) {
+  if (hooks && session) {
     await session.before(() =>
-      liveHooks.run({ phase: "before", run, graphStopped: false })
+      hooks.run({ phase: "before", run, graphStopped: false })
     );
   }
   // Recheck after hooks, which may run arbitrary user-authorized commands.
@@ -1437,9 +1471,9 @@ async function nativeProjectDownOnce(opts: {
   verify(await inspect(), run, true);
   await opts.retireHostProcesses?.(run);
   await opts.after?.(run);
-  if (liveHooks && session) {
+  if (hooks && session) {
     await session.after(() =>
-      liveHooks.run({ phase: "after", run, graphStopped: true })
+      hooks.run({ phase: "after", run, graphStopped: true })
     );
   }
   await wait();

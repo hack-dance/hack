@@ -1249,7 +1249,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-foreground-down-hooks",
     module: "DownHooks",
-    states: 1246,
+    states: 1288,
     invariant: "Safe",
     fields: [
       "unsafeBefore = TRUE",
@@ -1300,6 +1300,30 @@ const contracts: readonly ModelContract[] = [
           'jState = "complete"',
           'jGen = "D"',
           "unsafeBefore = FALSE",
+          "unsafeAfter = FALSE",
+        ],
+      },
+      {
+        // HACK-2715, real VM at efcec5d3: without the boot-ended forfeit, a
+        // down claims the ready run's owed record after the boot ended.
+        name: "owed-after-boot-end",
+        negative: true,
+        fields: [
+          "unsafeBoot = TRUE",
+          "ended = TRUE",
+          'jState = "beforeStarted"',
+          'jGen = "D"',
+        ],
+      },
+      {
+        name: "after-owed-post-boot-reachable",
+        negative: true,
+        invariant: "NeverAfterPostBoot",
+        fields: [
+          "ended = TRUE",
+          'jState = "complete"',
+          'jGen = "D"',
+          "unsafeBoot = FALSE",
           "unsafeAfter = FALSE",
         ],
       },

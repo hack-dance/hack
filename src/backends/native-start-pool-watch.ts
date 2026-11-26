@@ -328,17 +328,28 @@ export async function classifyNativeLostProvider(opts: {
     : undefined;
 }
 
+/** A sentence of a native error that advises running `hack down --recover`. */
+const RECOVER_ADVICE = /\s*Run hack down --recover\b[^.]*\./g;
+
 /**
  * The failed start's own message as one bounded line, appended to a lost-VM
  * error so a misclassification can still be diagnosed (HACK-2096 review). The
- * text is the closed message the CLI would have printed anyway.
+ * text is the closed message the CLI would have printed anyway. For a stage
+ * where no command retires the run (`requested`, HACK-2714), the cause's own
+ * "Run hack down --recover …" sentence is dropped: that step refuses there.
  */
-export function nativeLostVmCauseLine(cause: unknown): string | undefined {
+export function nativeLostVmCauseLine(
+  cause: unknown,
+  opts: { readonly dropRecoverAdvice?: boolean } = {}
+): string | undefined {
   let message = "";
   if (cause instanceof Error) {
     message = cause.message;
   } else if (typeof cause === "string") {
     message = cause;
+  }
+  if (opts.dropRecoverAdvice) {
+    message = message.replace(RECOVER_ADVICE, " ");
   }
   const line = message.replace(/\s+/g, " ").trim();
   if (line === "") {

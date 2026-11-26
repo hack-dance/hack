@@ -5124,7 +5124,9 @@ export class NativeForegroundVmLostError extends ClosedCliError {
     readonly loss: NativeForegroundLossStage;
     readonly cause: unknown;
   }) {
-    const cause = nativeLostVmCauseLine(opts.cause);
+    const cause = nativeLostVmCauseLine(opts.cause, {
+      dropRecoverAdvice: opts.loss.stage === "requested",
+    });
     super(
       [
         nativeForegroundPoolEndMessage(opts.end, opts.loss),

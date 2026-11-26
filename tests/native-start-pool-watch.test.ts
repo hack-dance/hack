@@ -552,6 +552,21 @@ test("only a running record with a live provider vetoes; a dead pid is lost in a
   ).toBeUndefined();
 });
 
+test("a cause line for a stage no command retires drops the cause's down --recover advice", () => {
+  // Real-VM row 2 (HACK-2714): the cause quoted "Run hack down --recover …",
+  // a step that refuses in that state.
+  const cause = new Error(
+    "Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Run hack down --recover to resume this run's confirmed cleanup with data retained. Startup diagnostic: Native graph startup failed (process_identity_unavailable)."
+  );
+  const dropped = nativeLostVmCauseLine(cause, { dropRecoverAdvice: true });
+  expect(dropped).toBe(
+    "(cause: Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Startup diagnostic: Native graph startup failed (process_identity_unavailable).)"
+  );
+  expect(dropped).not.toContain("hack down");
+  // Other stages keep the whole message.
+  expect(nativeLostVmCauseLine(cause)).toContain("Run hack down --recover");
+});
+
 test("the cause line keeps the start's own message, bounded to one line", () => {
   expect(
     nativeLostVmCauseLine(new Error("Image preparation failed.\n- web (x): y"))

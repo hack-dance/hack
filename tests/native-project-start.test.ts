@@ -8357,6 +8357,8 @@ test.each([
     expect(lost.loss).toEqual({ stage: "requested" });
     expect(advice).not.toContain("hack down");
     expect(advice).toContain("Keep this native home unchanged");
+    // HACK-2714: nothing retires the run, so the cause names no step either.
+    expect(causeLine).not.toContain("hack down");
   } else {
     expect(lost.loss).toEqual({ stage: "ready" });
     expect(advice).toContain(

@@ -262,8 +262,9 @@ impl Receipt {
     /// evidence. Any validated phase, including a start caught mid-way: the guest that
     /// held its pending effects stopped, so none can still land. The cleanup observes each
     /// member by recorded id or exact name and refuses a present one with no recorded id.
-    /// Only graph2 receipts reach it ([`ended_boot_recoverable`]).
-    #[cfg(any(target_os = "macos", test))]
+    /// Only graph2 receipts reach it ([`ended_boot_recoverable`]). Its one caller, the
+    /// foreground recovery, is macOS-only.
+    #[cfg(target_os = "macos")]
     pub(super) fn require_ended_boot_settled(&self) -> Result<(), CandidateError> {
         self.validate(self.review.scope().run, &self.owner)?;
         if self.version != 2 {

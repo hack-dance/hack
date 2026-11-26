@@ -245,20 +245,24 @@ fn service_exec_inner(
 ) -> Result<ServiceExecResult, CandidateError> {
     validate(&options)?;
     // Waits out a brief holder, such as the ready owner's restart supervision,
-    // instead of refusing `provider_busy` at random (HACK-2669). The exec's own
-    // timeout starts after acquisition. Fresh per-command values have their own
-    // delivery lifetime, which started when the CLI received them: the wait stops
-    // once it has passed, before admission, rather than admit a command whose
-    // values can no longer be delivered.
+    // instead of refusing `provider_busy` at random (HACK-2669), and another
+    // project's stop, for up to `COMMAND_REQUEST_LEASE_WAIT` (HACK-2729): this runs
+    // in the requesting `graph exec` process, which blocks no owner loop. The
+    // lease is the first thing this exec takes, so its own `provider_busy` means
+    // nothing was started. The exec's own timeout starts after acquisition.
+    // Fresh per-command values have their own delivery lifetime, which started
+    // when the CLI received them: the wait stops once it has passed, before
+    // admission, rather than admit a command whose values can no longer be
+    // delivered.
     let check = || match managed {
         Some(managed) => {
             super::super::managed_environment::remaining_until(managed.deadline()).map(|_| ())
         }
         None => Ok(()),
     };
-    let engine = Engine::connect_command(
+    let engine = Engine::connect_command_request(
         candidate,
-        std::time::Instant::now() + super::super::lifecycle::COMMAND_LEASE_WAIT,
+        std::time::Instant::now() + super::super::lifecycle::COMMAND_REQUEST_LEASE_WAIT,
         &check,
     )?;
     let (receipt, root) = load(candidate, &engine, options.run)?;

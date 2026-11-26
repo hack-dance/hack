@@ -29,6 +29,35 @@ export const INSPECT_BUSY_WAIT_MS = 15_000;
 /** Read-only observers report a busy runtime quickly instead of waiting. */
 export const OBSERVER_BUSY_WAIT_MS = 2000;
 
+/**
+ * Run one read-only native request, retrying only provider-lease contention
+ * (`provider_busy`: nothing was admitted) until `deadline` (a
+ * `performance.now()` time) or until `signal` aborts. Any other outcome,
+ * including a refusal after the lease was taken, returns or throws at once, so
+ * nothing past acquisition is ever replayed. At the deadline the last refusal,
+ * which names the holder, is thrown.
+ */
+export async function withNativeProviderBusyWait<T>(opts: {
+  readonly request: () => Promise<T>;
+  readonly deadline: number;
+  readonly signal?: AbortSignal;
+}): Promise<T> {
+  for (;;) {
+    try {
+      return await opts.request();
+    } catch (error) {
+      if (
+        !isNativeProviderBusy(error) ||
+        performance.now() >= opts.deadline ||
+        opts.signal?.aborted
+      ) {
+        throw error;
+      }
+      await Bun.sleep(50);
+    }
+  }
+}
+
 /** Concurrent cleanup observers share a provider lease. Retry only read-only lease contention. */
 export async function inspectNativeProjectGraph(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -40,12 +69,13 @@ export async function inspectNativeProjectGraph(opts: {
   readonly busyWaitMs?: number;
   readonly startupWait?: boolean;
 }): Promise<unknown> {
-  const deadline =
-    performance.now() +
-    (opts.startupWait ? 0 : (opts.busyWaitMs ?? INSPECT_BUSY_WAIT_MS));
-  for (;;) {
-    try {
-      return await (opts.invoke ?? invokeNativeRuntime)({
+  return await withNativeProviderBusyWait({
+    deadline:
+      performance.now() +
+      (opts.startupWait ? 0 : (opts.busyWaitMs ?? INSPECT_BUSY_WAIT_MS)),
+    signal: opts.signal,
+    request: () =>
+      (opts.invoke ?? invokeNativeRuntime)({
         runtime: opts.runtime,
         cwd: opts.projectRoot,
         args: [
@@ -58,18 +88,8 @@ export async function inspectNativeProjectGraph(opts: {
         ],
         timeoutMs: 30_000,
         signal: opts.signal,
-      });
-    } catch (error) {
-      if (
-        !isNativeProviderBusy(error) ||
-        performance.now() >= deadline ||
-        opts.signal?.aborted
-      ) {
-        throw error;
-      }
-      await Bun.sleep(50);
-    }
-  }
+      }),
+  });
 }
 
 /**

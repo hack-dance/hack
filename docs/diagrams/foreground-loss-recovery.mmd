@@ -1,0 +1,67 @@
+---
+title: ForegroundLossRecovery
+---
+stateDiagram-v2
+  direction TB
+  [*] --> Preparing
+  Preparing --> Requested : Request
+  Requested --> GraphReady : GraphReady [mapped]
+  GraphReady --> Serving : Serve / retire intent, lock
+  Preparing --> Dead : Die
+  Requested --> Dead : Die
+  GraphReady --> Dead : Die
+  Serving --> Dead : Die
+  Dead --> Lost : Watch / release lock
+  Dead --> Lost : StartFails / same message
+  state advice <<choice>>
+  Lost --> advice
+  advice --> Inspect : [lostAt = Requested]
+  advice --> Down : [run recorded]
+  advice --> Up : [fresh up, Preparing]
+  Down --> Up : down --recover
+  Up --> Recovered : hack up
+  Inspect --> [*]
+  Recovered --> [*]
+
+  note right of Preparing
+    Images, review, restore
+    selection; nothing requested.
+    A restart holds its lock.
+  end note
+  note right of GraphReady
+    Ready and mapped. A restart
+    still holds its cleaned
+    intent and its lock.
+  end note
+  note right of Dead
+    The watch and the start's
+    own error race; both print
+    the stage message.
+  end note
+  note left of Inspect
+    No command can retire it
+    yet (HACK-2714): none named.
+    INV NoNeedlessWithholding
+  end note
+  note right of Down
+    Removes containers a lost
+    VM brought back, then
+    confirms the stop.
+  end note
+  note right of Recovered
+    INV NoRefusedAdvice
+    Every named command is
+    accepted, for up and restart.
+  end note
+
+  classDef live stroke-width:1.6px
+  classDef wait stroke-width:1.6px
+  classDef ok stroke-width:1.6px
+  classDef fail stroke-width:1.6px
+  classDef idle stroke-width:1.6px
+  class Preparing,Requested,GraphReady wait
+  class Serving live
+  class Dead,Lost fail
+  class Down,Up wait
+  class Recovered ok
+  class Inspect idle

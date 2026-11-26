@@ -308,6 +308,34 @@ const NOT_RUNNING: &str = "The native runtime is not in its running state, so th
 /// a finite `graph inspect` (presentation `ps` takes no provider lease).
 pub(super) const STARTUP_LEASE_WAIT: Duration = Duration::from_secs(5);
 
+/// How long a one-shot service command (`hack exec`, and the dependency refresh that
+/// `hack exec` and `hack run` send first) waits for a provider lease another operation
+/// holds. A ready foreground owner takes the lease briefly and often, for example
+/// once a second to supervise restarts of a routed service, so a nonblocking
+/// acquisition refused such a command at random with `provider_busy` (HACK-2669).
+/// Acquisition admits nothing; on expiry the refusal still names the holder. The
+/// authored owner-side commands (`exec`, interactive `exec`, one-off `run`) also
+/// wait, inside their fixed 30 s budget. Every waiter passes its caller's check
+/// (owner signals, client disconnect, frontend liveness), which runs before each
+/// attempt, so an owner loop that waits still sees a shutdown signal.
+pub(super) const COMMAND_LEASE_WAIT: Duration = Duration::from_secs(15);
+
+/// How long the shared HTTPS owner's hostname authority waits for the provider lease
+/// at startup. The authority starts at a run's ready line after `hack up -d` returned,
+/// which is exactly when that run's first commands and a `hack down` arrive. A
+/// `hack down` holds the lease for the whole graph stop (about 12 s for a routed
+/// project), longer than [`STARTUP_LEASE_WAIT`], and an authority that gave up left
+/// the shared owner's startup failure retained: plain `down` then exited 1 and the
+/// next `up` refused `E_RECOVERY_REQUIRED` (HACK-2707). The authority therefore
+/// waits as long as owned cleanup does. Waiting admits nothing: the pool identity is
+/// reloaded after acquisition, and the wait ends early once the authority's owner is
+/// gone (a non-blocking read of its stdin FIFO sees end of file). On expiry the
+/// refusal still names the holder. A stop can hold the lease longer than this (its
+/// stop budget reaches 540 s); that expiry admitted nothing, and the lease's
+/// recovery retires the failed owner generation (`retireUnadmittedNativeHttpsOwner`
+/// in `native-https-owner.ts`), so the outcome does not depend on the stop's length.
+pub(super) const AUTHORITY_STARTUP_LEASE_WAIT: Duration = Duration::from_secs(30);
+
 /// Startup's provider lease. Everything `start_pool` does before taking it is read-only
 /// validation, admission sampling and RAII guards, so waiting for a briefly held lease admits
 /// nothing early, and on expiry it refuses `provider_busy` with nothing admitted.

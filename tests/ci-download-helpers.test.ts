@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
   chmod,
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -65,6 +66,91 @@ async function lines(path: string): Promise<string[]> {
   }
   return (await readFile(path, "utf8")).split("\n").filter(Boolean);
 }
+
+test("prerelease Zig checks cache contents before running the compiler", async () => {
+  const workflow = Bun.YAML.parse(
+    await Bun.file(join(repoRoot, ".github/workflows/prerelease.yml")).text()
+  ) as {
+    jobs: { build: { steps: Array<{ id?: string; run?: string }> } };
+  };
+  const script = workflow.jobs.build.steps.find(
+    (step) => step.id === "zig"
+  )?.run;
+  if (!script) {
+    throw new Error("Missing prerelease Zig step");
+  }
+  const fixture = await workDir();
+  const archiveName = "zig-aarch64-macos-0.15.2.tar.xz";
+  const source = join(fixture, "zig-release");
+  await mkdir(source);
+  const compiler = '#!/bin/sh\necho SOURCE >> "$TRACE"\necho 0.15.2\n';
+  const verified = join(fixture, "verified.tar");
+  const invalid = join(fixture, "invalid.tar");
+  for (const [archive, label] of [
+    [verified, "cached"],
+    [invalid, "unexpected"],
+  ] as const) {
+    await executable(join(source, "zig"), compiler.replace("SOURCE", label));
+    expect(
+      run({ cmd: ["tar", "-cf", archive, "zig-release"], dir: fixture })
+        .exitCode
+    ).toBe(0);
+  }
+  const sha256 = createHash("sha256")
+    .update(await readFile(verified))
+    .digest("hex");
+  const signedCompiler = join(fixture, "signed-zig");
+  await executable(signedCompiler, compiler.replace("SOURCE", "signed"));
+
+  for (const cached of [verified, invalid, undefined]) {
+    const dir = await workDir();
+    const trace = join(dir, "trace");
+    const output = join(dir, "output");
+    if (cached) {
+      await copyFile(cached, join(dir, archiveName));
+    }
+    await executable(
+      join(dir, "bin/mise"),
+      `#!/bin/sh
+set -eu
+case "$1" in
+  config) echo 0.15.2 ;;
+  install)
+    test "$MISE_ALWAYS_KEEP_DOWNLOAD" = 1
+    echo install >> "$TRACE"
+    mkdir -p "$MISE_INSTALLS_DIR/zig/0.15.2/bin" "$MISE_DOWNLOADS_DIR/zig/0.15.2"
+    cp "$SIGNED_ZIG" "$MISE_INSTALLS_DIR/zig/0.15.2/bin/zig"
+    cp "$VERIFIED_ARCHIVE" "$MISE_DOWNLOADS_DIR/zig/0.15.2/$HACK_PRERELEASE_ZIG_ARCHIVE"
+    ;;
+  where) echo "$MISE_INSTALLS_DIR/zig/0.15.2" ;;
+  *) exit 2 ;;
+esac
+`
+    );
+    const result = run({
+      cmd: ["bash", "-c", script],
+      dir,
+      env: {
+        RUNNER_TEMP: dir,
+        TRACE: trace,
+        GITHUB_OUTPUT: output,
+        GITHUB_PATH: join(dir, "path"),
+        HACK_PRERELEASE_ZIG_ARCHIVE: archiveName,
+        HACK_PRERELEASE_ZIG_SHA256: sha256,
+        ZIG_ARCHIVE_CACHE_HIT: cached ? "true" : "",
+        SIGNED_ZIG: signedCompiler,
+        VERIFIED_ARCHIVE: verified,
+      },
+    });
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(await lines(trace)).toEqual(
+      cached === verified ? ["cached"] : ["install", "signed"]
+    );
+    expect(await lines(output)).toEqual(cached ? [] : ["archive-ready=true"]);
+    expect(await lines(join(dir, "path"))).toHaveLength(1);
+  }
+});
 
 describe("scripts/mise-install-retry.sh", () => {
   const script = join(repoRoot, "scripts/mise-install-retry.sh");

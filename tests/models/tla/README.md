@@ -812,13 +812,23 @@ whether a run record exists while preparing: a resumed retained run or a
 restart's old run has one, a fresh `up` has none. `leftover` is a recorded
 run whose containers a lost VM brought back, stopped, because the guest
 engine's removal by the previous `hack down` had not reached its disk
-(real-VM row 8). Command acceptance follows the code and depends on the
-stage, not on the message: `hack down --recover` accepts a run lost while
-preparing (the stopped retained run, or `not_started` for a fresh `up`) or once
-ready, and refuses one lost in between (no cross-boot retirement yet,
-HACK-2714), or one with brought-back containers it does not remove; `hack up`
-refuses a pending restart and an unconfirmed cleanup; `hack restart` refuses
-while its lock is held and a stopped run with nothing pending.
+(real-VM row 8); with `StorageBarrier` (HACK-2719: a cleanup flushes the guest
+disk before it records the removal) a lost VM brings nothing back. `ports` says
+whether the project publishes a port, so its ready run holds bridge routes.
+Command acceptance follows the code and depends on the stage, not on the
+message: `hack down --recover` accepts a run lost while preparing (the stopped
+retained run, or `not_started` for a fresh `up`); otherwise it starts the pool
+and the runtime retires the run across the boot with data kept, once ready
+always and lost in between only for a recorded run whose lost start the
+runtime retires (`CrossBootStart`, HACK-2714). That start's receipt (`left`) is
+`failed-retained` when the owner's own unwind ran, and stays `restoring` when the
+owner died without it (killed, crashed, or taken down with the CLI); the runtime
+admits both, since a restore's failure path changes only that phase. Both need the dead owner's relay
+proved: by the run's routes, or without a published port by the relay's clean
+exit (`RouteProof = "exit"`, HACK-2711). It refuses brought-back containers it
+does not remove. `hack up` refuses a pending restart and an unconfirmed
+cleanup; `hack restart` refuses while its lock is held and a stopped run with
+nothing pending.
 
 ![Foreground loss recovery state chart](../../../docs/diagrams/foreground-loss-recovery.png)
 [SVG](../../../docs/diagrams/foreground-loss-recovery.svg) ·
@@ -826,14 +836,18 @@ while its lock is held and a stopped run with nothing pending.
 
 | Control | Result |
 | --- | --- |
-| `positive` | `NoRefusedAdvice`, `NoNeedlessWithholding`, `NoFalseLoss` and `NoMissedLoss` hold across 176 reachable states, whichever of the watch and the start error ends the start, whether the record still says `running` or is stuck mid-stop when the VM dies, and when an ordinary failure on a live VM ends it. |
+| `positive` | `NoRefusedAdvice`, `NoNeedlessWithholding`, `NoFalseLoss` and `NoMissedLoss` hold across 416 reachable states, with and without a published port, whether a lost start's owner unwound or not, whichever of the watch and the start error ends the start, whether the record still says `running` or is stuck mid-stop when the VM dies, and when an ordinary failure on a live VM ends it. A recorded run lost after its services were requested is told `hack down --recover`, then `hack up`. |
 | `negative` | PR #1253 at `cd0ebff10`: the message names `hack restart` while an intent is pending and `hack down --recover` otherwise, at every stage; the lost start leaves the restart lock held; `hack down --recover` keeps the intent and the brought-back containers; a start error keeps its own text. `NoRefusedAdvice` fails. |
 | `keep-intent` | Only `hack down --recover` keeps the cleaned intent: a lost restart is sent to `hack up`, which refuses the pending restart. |
 | `leak-lock` | Only the lock stays held after the watch's exit: `hack down --recover` cannot retire the intent under it, and `hack up` refuses. |
 | `intent-message` | Only the old intent rule, where it differs (once ready): a restart lost at `GraphReady` is told `hack down --recover`, then `hack restart`, which refuses once the down retired its intent. |
 | `withhold-preparing` | PR #1253 at `a6c4cba`: no command before the graph was ready. A start lost while preparing is told nothing, though `hack down --recover` and `hack up` (or `hack up` alone) work: `NoNeedlessWithholding` fails. |
 | `generic-error` | PR #1253 at `a8705a39` on a real VM: the start's error wins the race with its own text. Image preparation's "retry `hack up`" is refused by a pending restart or an unconfirmed cleanup. |
-| `keep-leftover` | Real-VM row 8: `hack down --recover` does not remove the brought-back containers, so it cannot confirm the cleanup, and the named sequence stops there. |
+| `keep-leftover` | Real-VM row 8 before HACK-2719: no storage barrier, and `hack down --recover` does not remove the brought-back containers, so it cannot confirm the cleanup, and the named sequence stops there. |
+| `pinned-relay` | HACK-2711 (the runtime before this fix): a run with no published port proves its dead owner's relay only by a published endpoint, which the owner's unwind removed. `hack down --recover` refuses (`relay_owner_refused`) once the run was requested: `NoRefusedAdvice` fails. |
+| `no-cross-boot` | HACK-2714 (the runtime before this fix): no cross-boot retirement of a start lost before ready, so a recorded run lost at `Requested` and told down, then up, is refused (`runtime_not_running`): `NoRefusedAdvice` fails. |
+| `failed-only` | `01ab67fa` (review of #1273): the runtime admits only a `failed-retained` lost start. An owner that died mid-restore without its unwind leaves `restoring`, and the `hack down --recover` the message names is refused: `NoRefusedAdvice` fails. |
+| `withhold-requested` | PR #1253's message on the fixed runtime: a recorded run lost at `Requested` is told no command, though `hack down --recover` and `hack up` now work: `NoNeedlessWithholding` fails. |
 | `code-without-veto` | `38347515`: a lost-provider code alone counts as a lost VM. An ordinary failure on a healthy VM (the runtime also reports `process_identity_unavailable` there) gets lost-VM advice: `NoFalseLoss` fails. |
 | `transitional-veto` | `c624229e`: only a `running` record's pid is read, and any record naming the boot vetoes the code. A provider that died with the record stuck in `quiescing` or `stopping` (a `runtime down` from another terminal, another project's idle stop) gets the start error's own text: `NoMissedLoss` fails. |
 | `restart-recovers` | Reachability witness: `NoRestartRecovery` fails, so a lost restart is recovered by following its message. |
@@ -844,18 +858,20 @@ while its lock is held and a stopped run with nothing pending.
 | `Request` | `graph.onRequested` where `servicesRequested` is set, just before the serve request. |
 | `GraphReady` | `graph.onReady` in the serve `onReady` handler, after `ensureMapping` saved the run mapping (the runtime's `graph_foreground_ready` frame, or the started line of a started return). |
 | `Serve` | The restart's `onReady` (`removeNativeRestartIntent`, lock release) runs inside the start's readiness work, before `ready` progress sets `serving`. |
-| `Die` | The provider VM dies; `leftover` only for a recorded run lost while preparing; `stale` when the record is stuck in a transitional phase that still names the boot. |
+| `Die` | The provider VM dies; `leftover` only for a recorded run lost while preparing, and never once `cleanup_owned_fenced` runs `storage_barrier` before the receipt records the removal; `stale` when the record is stuck in a transitional phase that still names the boot. |
 | `OrdinaryFail` | A start error on a healthy VM: the watched boot is still recorded with a live provider, so `classifyNativeLostProvider` returns nothing and the error keeps its own message, whatever code it carries. |
 | `Watch` | `onEnded` in `startNativeProject`: `nativeForegroundPoolEndMessage(end, loss)`, then `beforeLostExit` (the restart passes `releaseLock`), then exit 1. |
 | `StartFails` | The `catch` in `startNativeProject`: `lostVmFailure` asks `classifyNativeLostProvider` (the same pool reading as the watch, `nativePoolBootEnd`: a gone provider pid in any phase, or an ended boot; only a `running` record with a live pid vetoes a lost-provider code) and throws `NativeForegroundVmLostError` with the same stage message and a `(cause: …)` line; the restart's `finally` releases its lock. |
-| `Step` (`down`) | `nativeProjectDown` with `recover`: brought-back containers (`lostContainerRemovals`) are removed by `graph cleanup` before the stopped run is confirmed; after a stopped result, `retireCleanedNativeRestart` re-reads the intent and re-inspects the run (`stopped-data-retained`) under `withNativeRestartLock`, removes a `cleaned` intent of the same run, and prints `NATIVE_RECOVERED_RESTART_NOTE` (or one line for whatever it kept). |
+| `Step` (`down`) | `nativeProjectDown` with `recover`: on a stopped pool, `deadOwnerOfLiveRun` starts it for a ready run or a lost start (`CROSS_BOOT_START_PHASES`); the runtime's `recover-cleanup` admits a lost start (`unconfirmed_start`) and, with no route, the clean exit of the dead owner's relay (`select_predecessor`, `exited_predecessor`, `routeless_successor`). Brought-back containers (`lostContainerRemovals`) are removed by `graph cleanup` (`repair_lost_removals` under the retired owner's lock) before the stopped run is confirmed; after a stopped result, `retireCleanedNativeRestart` re-reads the intent and re-inspects the run (`stopped-data-retained`) under `withNativeRestartLock`, removes a `cleaned` intent of the same run, and prints `NATIVE_RECOVERED_RESTART_NOTE` (or one line for whatever it kept). |
 | `Step` (`up`, `restart`) | `refusePendingFreshStart` and the unsafe-mapping refusal in native start; `withNativeRestartLock` and `activeReceipt` (`needs an active graph`) in restart. |
 
 Bounds: one start, one loss, at most two user commands. Not modeled: the Rust
-runtime's own recovery proofs (a cross-boot recovery that refuses for another
-reason, as HACK-2711 found for a project without a published port, is outside
-this model), why a guest engine's removal can be lost (the model only allows
-it), `up.after` commands that outlive the exit, a `hack restart` lost in its
+runtime's own recovery proofs (the model takes `RouteProof` and
+`CrossBootStart` as given; the Rust unit tests check them), including that no
+proof can be forged (the exit proof's binding to the dead process and boot, the
+repair's exact ids), why a guest engine's
+removal can be lost (the model only allows it), a fresh `up` lost at
+`Requested` (no record, so no command is named), `up.after` commands that outlive the exit, a `hack restart` lost in its
 preflight (before it saves its intent; the old run is still the live run, so
 the code gives it the ready-stage message), and real VM timing. The
 real-VM check is the gate for the runtime half.

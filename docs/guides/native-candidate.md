@@ -2892,19 +2892,31 @@ code 1, and what to run next, which depends on how far the start got:
 
 - Ready (the runtime reported the run's graph ready and the run mapping is
   saved): `hack down --recover`, which retires the run with its data kept
-  (running `runtime recover` first when the provider exited), then `hack up`,
-  which starts it again.
+  (running `runtime recover` first when the provider exited, and starting the
+  pool), then `hack up`, which starts it again. This holds with or without a
+  published port: a run with no port has no bridge routes, and the runtime
+  then proves its dead owner's relay by that relay's clean exit (HACK-2711).
 - Before any service was requested (while it resolved, reviewed, built or
   pulled images, or selected the restore): for a run with a record (a resumed
   stopped run, or a restart's old run), the same `hack down --recover`, then
   `hack up`. A fresh `hack up` has no record yet, so the message names only
   `hack up`.
-- After its services were requested and before it was ready and mapped: no
-  supported retirement yet (HACK-2714: `hack down --recover` and `hack up` refuse
-  it), so the message names neither command and says to keep the native home
-  for inspection. A plain `hack up` that returned at "Project started" is in
-  this stage until its services report ready: the runtime has not confirmed
-  that start yet.
+- After its services were requested and before it was ready and mapped: for a
+  run with a record, the same `hack down --recover`, then `hack up`
+  (HACK-2714). The start's owner leaves the run `failed-retained` when its own
+  unwind runs, or `preparing` or `restoring` when it dies without one (killed,
+  or taken down with the CLI), and the down starts the pool and retires that
+  start across the boot with its data kept. The runtime admits it only with a
+  settled relay and host dependency startup and no cleanup marker, and the down
+  starts the pool only then. The lost start asks the runtime for that once the VM
+  is gone, and names `hack down --recover` only when it holds; otherwise, as for
+  a restart in progress (`restarting`), which has no such retirement yet, it
+  names no command. A fresh `hack up` has no record yet for the down to
+  find, so the message names no command and says to keep the native home for
+  inspection. A plain `hack up` that returned at "Project started" is in this
+  stage until its services report ready: the runtime has not confirmed that
+  start yet. A `hack up` run against such a run names `hack down --recover`
+  too (`graph_foreground_owner_exited_unadmitted`).
 
 A `hack restart` lost while it checks and pulls the new images, before it
 stops anything, gets the ready-stage message: its old run is still the live
@@ -2933,15 +2945,18 @@ carries that code, because the runtime also reports it for failures on a
 healthy VM. A VM lost
 seconds after a `hack down` can also bring that down's removed containers back,
 stopped, on the next boot (the guest engine's removal had not reached its
-disk). Where the runtime can remove them without the run's foreground owner,
-`hack down --recover` removes them again, says so in one line, and then
-confirms the run stopped with its data kept; a plain `hack down` still refuses
-that state, and nothing is removed while any of them runs. A run whose cleanup
-goes through its foreground owner (a relay-enrolled run) cannot yet: the owner
-is gone, and the runtime has no owner-less removal that keeps data. `hack down
---recover` then says so, names no command, and leaves the data and the home as
-they are for inspection; `hack up` refuses that run until the containers are
-gone. This is a runtime gap, not fixed here.
+disk). A cleanup now flushes the guest disk before it records any removal, so
+a down made by this version does not leave that state behind (HACK-2719). For
+one an earlier version left, `hack down --recover` removes them again, says so
+in one line, and then confirms the run stopped with its data kept: the
+runtime removes exactly the recorded, stopped containers (and networks) by
+their recorded ids, under the retired foreground owner's lock, without the
+owner. It keeps the named volumes and the run's data; a container's anonymous
+volumes go with it, as in the original down. A plain `hack down` still refuses that state, and nothing is removed
+while any of them runs. If the runtime cannot prove the owner retired or a
+container's identity, `hack down --recover` says so, names no command, and
+leaves the data and the home as they are for inspection; `hack up` refuses that
+run until the containers are gone.
 
 The start exits within about a
 second once it is ready, or about 11 seconds later while it is still starting or

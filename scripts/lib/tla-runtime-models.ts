@@ -27,6 +27,12 @@ type ModelContract = {
     readonly invariant?: string;
     readonly fields?: WitnessFields;
     readonly alternativeWitnesses?: readonly WitnessFields[];
+    /**
+     * TLC workers for this control (default 2). One worker makes breadth-first
+     * search report the shortest violation, for a control whose invariant other
+     * longer traces also break.
+     */
+    readonly workers?: 1;
   }[];
 };
 
@@ -2290,6 +2296,11 @@ const contracts: readonly ModelContract[] = [
           ['fin = "confirmed"', 'https = "authority"'],
           ['fin = "confirmed"', 'https = "verify"'],
         ],
+        // With two workers a loaded runner may report a longer violation first:
+        // a cleanup that starts once the acquisition moved on leaves
+        // `fin = "unconfirmed"`, the bug cleanup-before-settled isolates (hosted
+        // CI, PR #1273). One worker reports this control's own shortest trace.
+        workers: 1,
       },
       {
         // The waits stay bounded: a holder that outlasts the read's wait
@@ -3814,10 +3825,14 @@ const contracts: readonly ModelContract[] = [
     // brought-back containers unrepaired); keep-intent, leak-lock,
     // intent-message, generic-error and keep-leftover each restore one old
     // rule, and withhold-preparing is a6c4cba (no command before ready).
+    // pinned-relay (HACK-2711), no-cross-boot (HACK-2714), failed-only
+    // (01ab67fa: only a `failed-retained` lost start) and withhold-requested
+    // (#1253's message on the fixed runtime) restore one rule of the runtime or
+    // message before the VM-loss recovery fix.
     // restart-recovers is the reachability witness of a recovered restart.
     name: "foreground-loss-recovery",
     module: "ForegroundLossRecovery",
-    states: 176,
+    states: 416,
     invariant: "NoRefusedAdvice",
     fields: ['outcome = "refused"', 'lostAt = "Preparing"'],
     alternativeWitnesses: [['outcome = "refused"', 'lostAt = "Requested"']],
@@ -3897,6 +3912,64 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NoNeedlessWithholding",
         fields: ['msg = "inspect"', 'lostAt = "Preparing"'],
+      },
+      {
+        // HACK-2711 (real VM): a run with no published port proves its dead
+        // owner's relay only by a still-published endpoint, which the owner's
+        // unwind removed, so `hack down --recover` refuses
+        // (`relay_owner_refused`) once the run was requested.
+        name: "pinned-relay",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          "ports = FALSE",
+          'msg = "downUp"',
+          'lostAt = "Requested"',
+        ],
+        alternativeWitnesses: [
+          [
+            'outcome = "refused"',
+            "ports = FALSE",
+            'msg = "downUp"',
+            'lostAt = "GraphReady"',
+          ],
+        ],
+      },
+      {
+        // HACK-2714 (real VM, row 2): no cross-boot retirement of a start lost
+        // before ready, so the down keeps `runtime_not_running`.
+        name: "no-cross-boot",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          "recorded = TRUE",
+          'msg = "downUp"',
+          'lostAt = "Requested"',
+        ],
+      },
+      {
+        // 01ab67fa (review of #1273): an owner killed mid-restore without its
+        // unwind leaves `restoring`, which that runtime did not admit, so the
+        // down --recover the message names is refused.
+        name: "failed-only",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          'left = "restoring"',
+          'msg = "downUp"',
+          'lostAt = "Requested"',
+        ],
+      },
+      {
+        // PR #1253's Requested message once the runtime retires that run: a
+        // recorded run is told no command though down --recover works.
+        name: "withhold-requested",
+        negative: true,
+        invariant: "NoNeedlessWithholding",
+        fields: ['msg = "inspect"', 'lostAt = "Requested"', "recorded = TRUE"],
       },
       {
         name: "restart-recovers",

@@ -63,6 +63,7 @@ import {
   NativeForegroundVmLostError,
   NativeStartupCanceledError,
   type NativeStartupProgress,
+  nativeLostStartRetirable,
   nativeReadinessArgs,
   nativeReadySummary,
   nativeStoppedNotice,
@@ -8203,8 +8204,9 @@ test("the foreground lost-VM bound covers one pool check and the grace", () => {
  * - `ready-unmapped`: a started return whose runtime frame came, but whose
  *   mapping save is still running (review L4). `down` would find no run, so
  *   it is still the requested stage, not the ready one.
- * - `starting`: services requested, lost before the graph was ready, which no
- *   command can retire yet (HACK-2714), so the message names none.
+ * - `starting`: services requested by a fresh `up`, lost before the graph
+ *   was ready. No run record exists for `hack down --recover` to find, so the
+ *   message names no command (a resumed run's names down, then up: HACK-2714).
  * - `preparing` / `preparing-restore`: lost during image pulls, before any
  *   service was requested (review M1). A fresh `up` has no run record, so the
  *   message names `hack up` alone; a restore (a restart's replacement, or a
@@ -8547,10 +8549,10 @@ test.each([
       "Run hack down --recover to retire the interrupted start with the run's data kept, then hack up to start it again."
     );
   } else if (stage === "requested" || stage === "started") {
-    expect(lost.loss).toEqual({ stage: "requested" });
+    expect(lost.loss).toEqual({ stage: "requested", recorded: false });
     expect(advice).not.toContain("hack down");
     expect(advice).toContain("Keep this native home unchanged");
-    // HACK-2714: nothing retires the run, so the cause names no step either.
+    // A fresh `up` has no run to retire, so the cause names no step either.
     expect(causeLine).not.toContain("hack down");
   } else {
     expect(lost.loss).toEqual({ stage: "ready" });
@@ -8756,6 +8758,102 @@ test("a failed exited-provider recovery says so, then keeps the original refusal
   ).toHaveLength(1);
 });
 
+test.each([
+  {
+    name: "settled",
+    selected: { phase: "failed-retained", cross_boot_start: true },
+    retirable: true,
+  },
+  // #1273 review: dependency services still `Prepared`.
+  {
+    name: "unsettled",
+    selected: { phase: "failed-retained", cross_boot_start: false },
+    retirable: false,
+  },
+  // Real VM at d19aa31a (the `restoring` variant: graph owner and provider
+  // killed together): the restore had started every service, so the receipt
+  // was `started-observed` (`started_from: restoring`), a live phase the
+  // recovery admits, while `cross_boot_start` is false for it.
+  {
+    name: "started restore",
+    selected: {
+      phase: "started-observed",
+      cross_boot_start: false,
+      live_owner_recovery: null,
+    },
+    retirable: true,
+  },
+  { name: "ready", selected: { phase: "ready-observed" }, retirable: true },
+  // A pending same-boot recovery resumes only in its own boot.
+  {
+    name: "same-boot recovery pending",
+    selected: { phase: "ready-observed", live_owner_recovery: "a".repeat(64) },
+    retirable: false,
+  },
+  {
+    name: "restart in progress",
+    selected: { phase: "restarting" },
+    retirable: false,
+  },
+  // An older runtime that does not report it, or a failed selection.
+  { name: "older runtime", selected: { phase: "restoring" }, retirable: false },
+  { name: "no phase", selected: {}, retirable: false },
+  { name: "failed selection", selected: undefined, retirable: false },
+])("a recorded run lost before ready is retirable only as the runtime admits it ($name)", async ({
+  selected,
+  retirable,
+}) => {
+  const runId = "1".repeat(32);
+  const calls: string[][] = [];
+  const loss = await nativeLostStartRetirable({
+    loss: { stage: "requested", recorded: true },
+    runtime: { home: "/unused" } as Parameters<
+      typeof nativeLostStartRetirable
+    >[0]["runtime"],
+    projectRoot: "/unused",
+    run: runId,
+    invoke: (async (request: { args: readonly string[] }) => {
+      calls.push([...request.args]);
+      if (selected === undefined) {
+        throw new Error("selection failed");
+      }
+      return { version: 1, run: runId, ...selected };
+    }) as unknown as Parameters<typeof nativeLostStartRetirable>[0]["invoke"],
+  });
+  expect(loss).toEqual({ stage: "requested", recorded: true, retirable });
+  expect(calls).toEqual([
+    ["graph", "foreground-owner", "--run-id", runId, "--json"],
+  ]);
+});
+
+test("only a recorded requested loss asks the runtime", async () => {
+  const invoke = (async () => {
+    throw new Error("not asked");
+  }) as unknown as Parameters<typeof nativeLostStartRetirable>[0]["invoke"];
+  const base = {
+    runtime: { home: "/unused" } as Parameters<
+      typeof nativeLostStartRetirable
+    >[0]["runtime"],
+    projectRoot: "/unused",
+    run: "1".repeat(32),
+    invoke,
+  };
+  for (const loss of [
+    { stage: "ready" } as const,
+    { stage: "preparing", recorded: true } as const,
+    { stage: "requested", recorded: false } as const,
+  ]) {
+    expect(await nativeLostStartRetirable({ ...base, loss })).toEqual(loss);
+  }
+  expect(
+    await nativeLostStartRetirable({
+      ...base,
+      run: undefined,
+      loss: { stage: "requested", recorded: true },
+    })
+  ).toEqual({ stage: "requested", recorded: true, retirable: false });
+});
+
 test("a restart preflight's loss stage follows the restart it retries", () => {
   expect(
     restartPreflightLossStage({ cleanedRetry: false, preparedRetry: false })
@@ -8765,7 +8863,7 @@ test("a restart preflight's loss stage follows the restart it retries", () => {
   ).toEqual({ stage: "preparing", recorded: true });
   expect(
     restartPreflightLossStage({ cleanedRetry: false, preparedRetry: true })
-  ).toEqual({ stage: "requested" });
+  ).toEqual({ stage: "requested", recorded: false });
 });
 
 /**

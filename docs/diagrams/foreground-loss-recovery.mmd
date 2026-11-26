@@ -15,7 +15,7 @@ stateDiagram-v2
   Dead --> Lost : StartFails / same message
   state advice <<choice>>
   Lost --> advice
-  advice --> Inspect : [lostAt = Requested]
+  advice --> Inspect : [fresh up, Requested]
   advice --> Down : [run recorded]
   advice --> Up : [fresh up, Preparing]
   Down --> Up : down --recover
@@ -39,14 +39,18 @@ stateDiagram-v2
     the stage message.
   end note
   note left of Inspect
-    No command can retire it
-    yet (HACK-2714): none named.
+    A fresh up has no record
+    for down to retire yet:
+    none named.
     INV NoNeedlessWithholding
   end note
   note right of Down
+    Starts the pool; retires a
+    lost start (failed-retained
+    or restoring) or a ready
+    run, port or none, data kept.
     Removes containers a lost
-    VM brought back, then
-    confirms the stop.
+    VM brought back.
   end note
   note right of Recovered
     INV NoRefusedAdvice

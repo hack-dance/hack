@@ -62,6 +62,37 @@ fn live(phase: &str) -> bool {
     matches!(phase, "ready-observed" | STARTED_OBSERVED)
 }
 
+/// A start whose owner died before it was ready, recovered across a boot
+/// (HACK-2714): the owner's own unwind left `failed-retained`, or it died without
+/// unwinding (killed, crashed, or ended with its frontend) while `preparing` or
+/// `restoring`. Only a settled relay startup is admitted (every dependency service
+/// released or completed), so no prepared host reservation is left to a later boot.
+///
+/// A `restoring` receipt on disk is always an admitted restore: a fresh owner
+/// commits it only with its startup enrollment (`restore.rs`), and before that the
+/// acknowledged stopped receipt stays, retired as an unadmitted owner. The restore's
+/// own failure path (`retain_restore_failure`) changes nothing else in it but the
+/// phase, to `failed-retained`, which `prepare` already admits. So a `restoring`
+/// receipt whose owner died holds the same resources and evidence as the
+/// `failed-retained` one an unwind would have left, and the same cleanup retires it.
+/// A restart in progress (`restarting`), which replaces a ready generation's
+/// containers in place, keeps its refusal.
+pub(super) fn unconfirmed_start(receipt: &Receipt) -> bool {
+    matches!(
+        receipt.phase.as_str(),
+        "failed-retained" | "preparing" | "restoring"
+    ) && receipt.relay_cleanup.is_none()
+        && receipt.relay_startup.as_ref().is_some_and(|startup| {
+            startup.valid(receipt)
+                && startup.services.values().all(|service| {
+                    matches!(
+                        service.phase,
+                        startup::Phase::Released | startup::Phase::Completed
+                    )
+                })
+        })
+}
+
 fn validate(
     intent: &Intent,
     receipt: &Receipt,
@@ -166,7 +197,9 @@ pub(super) fn recovery_selection(
     // A new selection may recover only the phases admitted by execute. Retained
     // stops without an intent keep their existing unadmitted/ordinary path.
     if !publication_present
-        || (!(live(&receipt.phase) || receipt.phase == "cleanup-intent")
+        || (!(live(&receipt.phase)
+            || unconfirmed_start(receipt)
+            || receipt.phase == "cleanup-intent")
             && !exists(&root.join("one-off.json"))?)
     {
         return Ok(None);
@@ -251,7 +284,7 @@ fn archive_completed_prior(
         && current.relay_cleanup.as_ref().is_some_and(|marker| {
             marker.valid() && marker.phase == cleanup_enrollment::Phase::Pending
         });
-    if (!live(&current.phase) && !interrupted_enrollment)
+    if (!live(&current.phase) && !unconfirmed_start(current) && !interrupted_enrollment)
         || selected(current)? != expected
         || prior.one_off_sha256.is_some()
         || prior
@@ -997,7 +1030,10 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
                     })
             })
             && exists(&root.join("relay-cleanup-bridges.json"))?;
-        if (!live(&receipt.phase) && !interrupted_enrollment && one_off_sha256.is_none())
+        if (!live(&receipt.phase)
+            && !unconfirmed_start(&receipt)
+            && !interrupted_enrollment
+            && one_off_sha256.is_none())
             || receipt.relay_startup.is_none()
             || (receipt.relay_cleanup.is_some() && !interrupted_enrollment)
             || selected(&receipt)? != expected
@@ -1022,6 +1058,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
             &receipt,
             &old_boot,
             pin_guard.as_ref().map(|guard| guard.witness()),
+            Some(dead.process()),
         )?;
         let prior_bridges = bridges::cleanup::capture_prior_generation(&root, &bridges, &receipt)?;
         require_prior_bridge_history(&root, &bridges, &receipt, prior_bridges.as_ref())?;
@@ -1103,6 +1140,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
                 &receipt,
                 &intent.old_boot,
                 pin_guard.as_ref().map(|guard| guard.witness()),
+                Some(dead.process()),
             )?;
             let prior = bridges::cleanup::capture_prior_generation(&root, &selection, &receipt)?;
             require_prior_bridge_history(&root, &selection, &receipt, prior.as_ref())?;
@@ -2261,6 +2299,95 @@ mod tests {
         foreign["entries"][0]["owner"] = json!("f".repeat(32));
         state::write(&root.join("restore-history.json"), &foreign).unwrap();
         assert!(retained(root, &later).is_err());
+    }
+
+    #[test]
+    fn a_start_lost_before_ready_is_recovered_across_boots_by_its_control_root() {
+        // HACK-2714 (real VM): the provider died after "Project started"; the owner's
+        // own unwind left `failed-retained`, with no relay cleanup marker and a
+        // control root derived from the boot it ran in.
+        let fixture = super::super::retained_startup::tests::Fixture::new();
+        let mut owner = Owner::load(&fixture.candidate).unwrap();
+        let previous = owner.guest_boot_id.clone().unwrap();
+        owner.previous_guest_boot_id = Some(previous.clone());
+        owner.guest_boot_id = Some("22222222-2222-2222-2222-222222222222".into());
+        owner.phase = "running".into();
+        let mut receipt = fixture.receipt();
+        receipt.phase = "failed-retained".into();
+        receipt.relay_startup = Some(serde_json::from_value(json!({"control_only":true,"guest_root":null,"control_root":"/private/owned","control_generation":"a".repeat(32),"artifact":"e".repeat(64),"services":{}})).unwrap());
+        receipt.relay_startup.as_mut().unwrap().control_root =
+            startup::receipt_control_root(&fixture.candidate.state_root, &receipt, &previous)
+                .unwrap();
+        assert!(unconfirmed_start(&receipt));
+        let hint = |receipt: &Receipt, owner: &Owner, published: bool| {
+            recovery_selection(
+                &fixture.candidate,
+                &fixture.graph(),
+                receipt,
+                owner,
+                published,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            hint(&receipt, &owner, true),
+            Some(selected(&receipt).unwrap())
+        );
+        // An owner that died without unwinding leaves the start's own phase: a
+        // fresh start's `preparing`, or an admitted restore's `restoring`.
+        for phase in ["preparing", "restoring"] {
+            let mut starting = receipt.clone();
+            starting.phase = phase.into();
+            assert!(unconfirmed_start(&starting));
+            assert_eq!(
+                hint(&starting, &owner, true),
+                Some(selected(&starting).unwrap())
+            );
+        }
+        let mut preparing = receipt.clone();
+        preparing.phase = "preparing".into();
+        // No exited publication, or the run's own boot still current: nothing.
+        assert!(hint(&receipt, &owner, false).is_none());
+        let mut same_boot = owner.clone();
+        same_boot.guest_boot_id = Some(previous.clone());
+        assert!(hint(&receipt, &same_boot, true).is_none());
+        // A restart in progress keeps its refusal, and so does an enrolled cleanup
+        // marker or an unsettled relay startup.
+        for phase in ["restarting", "stopped-data-retained"] {
+            let mut other = receipt.clone();
+            other.phase = phase.into();
+            assert!(!unconfirmed_start(&other));
+            assert!(hint(&other, &owner, true).is_none());
+        }
+        let mut enrolled = receipt.clone();
+        let context = host_relay::context(&enrolled.owner, &previous).unwrap();
+        enrolled.relay_cleanup = Some(
+            serde_json::from_value(json!({
+                "version":1,"runtime":context.runtime,"boot":context.boot,"operation":([3;16]),
+                "effect":([4;32]),"control_root":"/private/owned","phase":"pending"
+            }))
+            .unwrap(),
+        );
+        assert!(!unconfirmed_start(&enrolled));
+        let mut unsettled = receipt.clone();
+        unsettled.relay_startup.as_mut().unwrap().control_only = false;
+        assert!(!unconfirmed_start(&unsettled));
+        // Before this change (the negative control) only a ready or started run
+        // was a cross-boot selection.
+        assert!(!live(&receipt.phase) && !live(&preparing.phase));
+        // Real VM at d19aa31a: a restore whose services had all started when its
+        // graph owner and provider were killed together leaves `started-observed`
+        // (`started_from: restoring`). It is a live run, admitted as one, while
+        // `cross_boot_start` (`unconfirmed_start`) stays false for it.
+        let mut started = receipt.clone();
+        started.phase = "restoring".into();
+        mark_started(&mut started).unwrap();
+        assert_eq!(started.phase, STARTED_OBSERVED);
+        assert!(live(&started.phase) && !unconfirmed_start(&started));
+        assert_eq!(
+            hint(&started, &owner, true),
+            Some(selected(&started).unwrap())
+        );
     }
 
     #[test]

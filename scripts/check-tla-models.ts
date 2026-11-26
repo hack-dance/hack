@@ -101,7 +101,7 @@ async function runModels() {
           jar,
           "tlc2.TLC",
           "-workers",
-          "2",
+          String("workers" in control && control.workers ? control.workers : 2),
           "-metadir",
           resolve(scratch, model.name, name),
           "-config",

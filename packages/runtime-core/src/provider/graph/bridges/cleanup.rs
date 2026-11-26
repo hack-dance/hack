@@ -14,6 +14,8 @@ pub(crate) struct Selection {
     predecessor_owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     predecessor_absence: Option<AbsentPredecessor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    predecessor_exit: Option<ExitedPredecessor>,
     run: String,
     plan: String,
     capacity: u8,
@@ -26,6 +28,20 @@ struct AbsentPredecessor {
     selection_sha256: String,
     previous_boot: String,
     control_root: PathBuf,
+}
+
+/// The run's relay owner exited cleanly with its foreground owner (HACK-2711):
+/// that managed exit unlinked both publication paths and left the operation
+/// lock, so no pinned endpoint remains to fingerprint. Bound to the exact dead
+/// foreground process and the earlier boot through the receipt's process-derived
+/// control root; there is nothing of it left to retire.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExitedPredecessor {
+    previous_boot: String,
+    control_root: PathBuf,
+    process: crate::provider::identity::ProcessIdentity,
+    witness_sha256: String,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +136,19 @@ fn validate_selection_with_absence(
             return Err(invalid());
         }
     }
+    if let Some(expected) = &selection.predecessor_exit {
+        if host_pin.is_some()
+            || absence.is_some()
+            || exited_predecessor(
+                &engine.guest().candidate().state_root,
+                receipt,
+                selection.previous_boot.as_deref().ok_or_else(invalid)?,
+                &expected.process,
+            )? != *expected
+        {
+            return Err(invalid());
+        }
+    }
     match (&selection.predecessor_absence, absence) {
         (None, None) => {}
         (None, Some(witness))
@@ -151,7 +180,8 @@ fn validate_bindings(
             || previous_boot != Some(previous.as_str())
             || (selection.selected.is_empty()
                 && selection.predecessor_owner.is_none()
-                && selection.predecessor_absence.is_none())
+                && selection.predecessor_absence.is_none()
+                && selection.predecessor_exit.is_none())
         {
             return Err(invalid());
         }
@@ -161,6 +191,20 @@ fn validate_bindings(
             || selection.previous_boot.is_none()
             || !selection.selected.is_empty()
             || !pinned_predecessor_eligible(receipt)
+    }) {
+        return Err(invalid());
+    }
+    if selection.predecessor_exit.as_ref().is_some_and(|exit| {
+        !hex(&exit.witness_sha256, 64)
+            || selection.previous_boot.as_deref() != Some(exit.previous_boot.as_str())
+            || selection.predecessor_owner.is_some()
+            || selection.predecessor_absence.is_some()
+            || !selection.selected.is_empty()
+            || !pinned_predecessor_eligible(receipt)
+            || receipt
+                .relay_startup
+                .as_ref()
+                .is_none_or(|startup| startup.control_root != exit.control_root)
     }) {
         return Err(invalid());
     }
@@ -175,6 +219,7 @@ fn validate_bindings(
                     .as_ref()
                     .is_none_or(|startup| startup.control_root != absence.control_root)
                 || selection.predecessor_owner.is_some()
+                || selection.predecessor_exit.is_some()
                 || !selection.selected.is_empty()
                 || !pinned_predecessor_eligible(receipt)
         })
@@ -230,6 +275,7 @@ pub(crate) fn capture(
         previous_boot: None,
         predecessor_owner: None,
         predecessor_absence: None,
+        predecessor_exit: None,
         run: receipt.run.clone(),
         plan: receipt.plan_id.clone(),
         capacity: engine.guest().bridge_intent().map_or(0, |v| v.slots),
@@ -411,15 +457,95 @@ fn pending_interrupted(receipt: &Receipt, previous: &str) -> bool {
         })
 }
 
+/// The predecessor proof of a selection without routes: the pinned dead relay
+/// endpoint when one is published (unchanged), else, without a host pin, the
+/// clean exit of the dead foreground owner's relay. HACK-2711 (real VM): a run
+/// with no published port whose owner unwound after its VM died left only the
+/// relay operation lock, so the pinned proof refused with `relay_owner_refused`.
+/// The pinned refusal stands when the exit cannot be proved either.
+fn select_predecessor(
+    candidate: &Candidate,
+    selection: &mut Selection,
+    receipt: &Receipt,
+    previous: &str,
+    host_pin: Option<&super::super::host_pin_recovery::Witness>,
+    dead_owner: Option<&crate::provider::identity::ProcessIdentity>,
+) -> Result<(), CandidateError> {
+    match predecessor_owner(receipt, previous, host_pin) {
+        Ok(fingerprint) => {
+            selection.predecessor_owner = Some(fingerprint);
+            Ok(())
+        }
+        Err(pinned) => {
+            let (None, Some(process)) = (host_pin, dead_owner) else {
+                return Err(pinned);
+            };
+            let exit = exited_predecessor(&candidate.state_root, receipt, previous, process)
+                .map_err(|_| pinned)?;
+            selection.predecessor_exit = Some(exit);
+            Ok(())
+        }
+    }
+}
+
+/// Observe the clean exit of the relay owner that `process` ran for this run in
+/// `previous`. The receipt's control root must be the one that exact process
+/// derived for that boot (`startup::process_control_root`), and the publication
+/// there must be absent, its lock left and the process dead
+/// (`dead::CleanupWitness`). Every validation of the selection repeats this.
+fn exited_predecessor(
+    state_root: &std::path::Path,
+    receipt: &Receipt,
+    previous: &str,
+    process: &crate::provider::identity::ProcessIdentity,
+) -> Result<ExitedPredecessor, CandidateError> {
+    let startup = receipt
+        .relay_startup
+        .as_ref()
+        .filter(|_| pinned_predecessor_eligible(receipt))
+        .ok_or_else(invalid)?;
+    let expected = super::super::startup::process_control_root(
+        state_root,
+        &receipt.owner,
+        previous,
+        &receipt.run,
+        process,
+    )?;
+    if expected != startup.control_root {
+        return Err(invalid());
+    }
+    let witness = crate::provider::relay_owner::publication::dead::CleanupWitness::acquire(
+        &startup.control_root,
+        super::super::host_relay::context(&receipt.owner, previous)?,
+        process,
+    )?;
+    if witness.present_selection().is_some() {
+        return Err(invalid());
+    }
+    witness.verify()?;
+    Ok(ExitedPredecessor {
+        previous_boot: previous.into(),
+        control_root: startup.control_root.clone(),
+        process: process.clone(),
+        witness_sha256: witness.selection_sha256()?,
+    })
+}
+
 /// Explicit dead-owner recovery only: guest helper absence follows the audited
 /// boot transition since the run's earlier boot (guest tmpfs does not survive any
 /// reboot), never a fabricated live-helper observation.
+///
+/// `dead_owner` is the exact dead foreground process whose publication lock the
+/// caller holds. A selection without routes then also accepts that process's
+/// cleanly exited relay owner ([`ExitedPredecessor`]) when no pinned predecessor
+/// endpoint is left to fingerprint.
 pub(crate) fn capture_previous_boot(
     candidate: &Candidate,
     engine: &Engine<'_>,
     receipt: &Receipt,
     previous: &str,
     host_pin: Option<&super::super::host_pin_recovery::Witness>,
+    dead_owner: Option<&crate::provider::identity::ProcessIdentity>,
 ) -> Result<Selection, CandidateError> {
     let store = strict_store(candidate, engine)?;
     let mut selection = Selection {
@@ -429,6 +555,7 @@ pub(crate) fn capture_previous_boot(
         previous_boot: Some(previous.into()),
         predecessor_owner: None,
         predecessor_absence: None,
+        predecessor_exit: None,
         run: receipt.run.clone(),
         plan: receipt.plan_id.clone(),
         capacity: engine.guest().bridge_intent().map_or(0, |v| v.slots),
@@ -459,6 +586,7 @@ pub(crate) fn capture_previous_boot(
                 || prior.previous_boot.is_some()
                 || prior.predecessor_owner.is_some()
                 || prior.predecessor_absence.is_some()
+                || prior.predecessor_exit.is_some()
                 || prior.run != selection.run
                 || prior.plan != selection.plan
                 || prior.capacity != selection.capacity
@@ -470,8 +598,16 @@ pub(crate) fn capture_previous_boot(
             if prior.selected.is_empty() {
                 // Zero ingress is still an enrolled graph cleanup. The prior
                 // empty sidecar alone cannot authorize it: require the exact
-                // dead pinned predecessor from the run's earlier boot.
-                selection.predecessor_owner = Some(predecessor_owner(receipt, previous, host_pin)?);
+                // dead pinned predecessor from the run's earlier boot, or the
+                // clean exit of that predecessor with the dead foreground owner.
+                select_predecessor(
+                    candidate,
+                    &mut selection,
+                    receipt,
+                    previous,
+                    host_pin,
+                    dead_owner,
+                )?;
             } else {
                 selection.selected = prior
                     .selected
@@ -488,7 +624,14 @@ pub(crate) fn capture_previous_boot(
                     .collect();
             }
         } else {
-            selection.predecessor_owner = Some(predecessor_owner(receipt, previous, host_pin)?);
+            select_predecessor(
+                candidate,
+                &mut selection,
+                receipt,
+                previous,
+                host_pin,
+                dead_owner,
+            )?;
         }
     }
     validate_selection_recovery(engine, receipt, &selection, host_pin)?;
@@ -511,6 +654,7 @@ pub(crate) fn capture_previous_boot_absence(
         previous_boot: Some(witness.previous_boot().into()),
         predecessor_owner: None,
         predecessor_absence: None,
+        predecessor_exit: None,
         run: receipt.run.clone(),
         plan: receipt.plan_id.clone(),
         capacity: engine
@@ -630,6 +774,7 @@ fn live_remaining_matches(store: &Store, selection: &Selection) -> Result<(), Ca
     if selection.previous_boot.is_some()
         || selection.predecessor_owner.is_some()
         || selection.predecessor_absence.is_some()
+        || selection.predecessor_exit.is_some()
         || store.owner != selection.owner
         || store.next_launch_serial < selection.serial
     {
@@ -695,13 +840,15 @@ pub(crate) fn interrupted_release(
 ) -> bool {
     let exact_routes = if prior.selected.is_empty() {
         current.selected.is_empty()
-            && current
+            && (current
                 .predecessor_owner
                 .as_ref()
                 .is_some_and(|hash| hex(hash, 64))
+                || current.predecessor_exit.is_some())
             && pinned_predecessor_eligible(receipt)
     } else {
         current.predecessor_owner.is_none()
+            && current.predecessor_exit.is_none()
             && prior.selected.len() == current.selected.len()
             && prior.selected.iter().all(|(slot, selected)| {
                 current.selected.get(slot).is_some_and(|now| {
@@ -718,6 +865,7 @@ pub(crate) fn interrupted_release(
         && prior.previous_boot.is_none()
         && prior.predecessor_owner.is_none()
         && prior.predecessor_absence.is_none()
+        && prior.predecessor_exit.is_none()
         && current.predecessor_absence.is_none()
         && prior.run == current.run
         && current.run == receipt.run
@@ -767,11 +915,12 @@ fn prior_generation(
                 && prior.previous_boot.as_deref() != Some(current.boot.as_str())))
         && prior.predecessor_owner.is_none()
         && prior.predecessor_absence.is_none()
+        && prior.predecessor_exit.is_none()
         && prior.run == current.run
         && prior.plan == current.plan
         && prior.capacity == current.capacity
         && (if current.selected.is_empty() {
-            never_published(receipt)
+            never_published(receipt) || routeless_successor(prior, current)
         } else {
             current.selected.values().all(|selected| {
                 selected
@@ -802,6 +951,19 @@ fn prior_generation(
 /// naming the boot the run died in.
 fn never_published(receipt: &Receipt) -> bool {
     receipt.phase == super::super::STARTED_OBSERVED
+}
+
+/// Neither generation holds a route (HACK-2711: a run with no published port, or
+/// one whose start failed before it published), so no route needs ordering. The
+/// empty prior names the boot the run died in (`earlier` above), and the
+/// successor carries its own proof that the run's relay owner of that boot is
+/// dead or exited. The prior was captured from the same registry no later
+/// (`serial`), as in the interrupted release.
+fn routeless_successor(prior: &Selection, current: &Selection) -> bool {
+    prior.selected.is_empty()
+        && current.selected.is_empty()
+        && prior.serial <= current.serial
+        && (current.predecessor_owner.is_some() || current.predecessor_exit.is_some())
 }
 
 fn stopped_prior_bindings(root: &std::path::Path, prior: &Selection, receipt: &Receipt) -> bool {
@@ -971,6 +1133,7 @@ fn admit_completed_selection(
         || selection.capacity != capacity
         || selection.predecessor_owner.is_some()
         || selection.predecessor_absence.is_some()
+        || selection.predecessor_exit.is_some()
         || selection
             .selected
             .values()
@@ -1077,6 +1240,7 @@ mod tests {
             previous_boot: None,
             predecessor_owner: None,
             predecessor_absence: None,
+            predecessor_exit: None,
             run: "b".repeat(32),
             plan: "c".repeat(64),
             capacity: 0,
@@ -2174,5 +2338,245 @@ mod tests {
         assert_eq!(fs::metadata(partial).unwrap().len(), 65537);
         assert_eq!(fs::read(committed).unwrap(), previous);
         assert!(!fixture.0.join("relay-cleanup-bridges-recovery-1").exists());
+    }
+
+    fn exit_proof(previous: &str) -> ExitedPredecessor {
+        ExitedPredecessor {
+            previous_boot: previous.into(),
+            control_root: "/private/owned".into(),
+            process: crate::provider::identity::ProcessIdentity {
+                pid: 2_000_000,
+                start_micros: 1,
+                uid: 501,
+                executable: "/bin/sleep".into(),
+            },
+            witness_sha256: "a".repeat(64),
+        }
+    }
+
+    #[test]
+    fn a_routeless_ready_run_supersedes_its_own_empty_sidecar_only_with_a_predecessor_proof() {
+        // HACK-2711 (real VM): a ready run with no published port, restored after a
+        // stop in the boot it then died in, recovered on a later boot. Its prior
+        // sidecar is that stop's empty selection; no current slot names the run.
+        let fixture = Fixture::new();
+        let old_boot = "11111111-1111-1111-1111-111111111111";
+        let mut prior = selection(3);
+        prior.boot = old_boot.into();
+        let mut current = selection(3);
+        current.boot = "22222222-2222-2222-2222-222222222222".into();
+        current.previous_boot = Some(old_boot.into());
+        let ready: Receipt = serde_json::from_value(json!({
+            "version":1,"run":current.run,"owner":current.owner,
+            "namespace":"3".repeat(64),"plan_id":current.plan,
+            "phase":"ready-observed","readiness":{},"resources":{},
+            "relay_startup":{"control_only":true,"guest_root":null,
+                "control_root":"/private/owned","artifact":"e".repeat(64),"services":{}}
+        }))
+        .unwrap();
+        state::write(&fixture.0.join("relay-cleanup-bridges.json"), &prior).unwrap();
+        // Before this change (the negative control): an empty current selection of a
+        // ready run never supersedes a prior one, whatever proves its relay owner.
+        assert!(capture_prior_generation(&fixture.0, &current, &ready).is_err());
+        current.predecessor_exit = Some(exit_proof(old_boot));
+        assert!(
+            capture_prior_generation(&fixture.0, &current, &ready)
+                .unwrap()
+                .is_some()
+        );
+        // The pinned dead endpoint is the same proof where it is still published.
+        let mut pinned = current.clone();
+        pinned.predecessor_exit = None;
+        pinned.predecessor_owner = Some("b".repeat(64));
+        assert!(
+            capture_prior_generation(&fixture.0, &pinned, &ready)
+                .unwrap()
+                .is_some()
+        );
+        // The empty prior must name the boot the run died in.
+        let mut older = prior.clone();
+        older.boot = "00000000-0000-0000-0000-000000000000".into();
+        state::write(&fixture.0.join("relay-cleanup-bridges.json"), &older).unwrap();
+        assert!(capture_prior_generation(&fixture.0, &current, &ready).is_err());
+        // Nor may it come from a later registry state than the successor's.
+        let mut later = prior.clone();
+        later.serial = 4;
+        state::write(&fixture.0.join("relay-cleanup-bridges.json"), &later).unwrap();
+        assert!(capture_prior_generation(&fixture.0, &current, &ready).is_err());
+        // A prior that held routes is never superseded by an empty successor.
+        let (mut routed, _) = live_selection();
+        routed.boot = old_boot.into();
+        routed.run = current.run.clone();
+        routed.plan = current.plan.clone();
+        routed.capacity = current.capacity;
+        assert!(!routeless_successor(&routed, &current));
+        // An exit proof never accompanies routes or another predecessor proof.
+        let mut both = current.clone();
+        both.predecessor_owner = Some("b".repeat(64));
+        assert!(validate_bindings(&ready, &both, Some(old_boot)).is_err());
+    }
+
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    fn sleeper() -> (Child, crate::provider::identity::ProcessIdentity) {
+        let child = Child(
+            std::process::Command::new("/bin/sleep")
+                .arg("60")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let process = crate::provider::identity::observe(child.0.id() as i32).unwrap();
+        (child, process)
+    }
+    /// A disposable run-scoped control root for `process`, as its relay owner
+    /// leaves it after a clean exit: only the publication's operation lock.
+    fn exited_root(
+        state_root: &std::path::Path,
+        receipt: &mut Receipt,
+        boot: &str,
+        process: &crate::provider::identity::ProcessIdentity,
+    ) -> crate::owned_tmp_root::OwnedTmpRoot {
+        // Owned before anything creates it, so a panic still removes it.
+        let root = crate::owned_tmp_root::OwnedTmpRoot::new(
+            super::super::super::startup::process_control_root(
+                state_root,
+                &receipt.owner,
+                boot,
+                &receipt.run,
+                process,
+            )
+            .unwrap(),
+        );
+        // Exclusive creation under a digest of this fixture's unique state root
+        // scopes the directory; it never names a runtime home.
+        fs::DirBuilder::new().mode(0o700).create(&*root).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(root.join("relay-control"))
+            .unwrap();
+        drop(state::Lock::acquire(&root.join("relay-control")).unwrap());
+        receipt.relay_startup.as_mut().unwrap().control_root = root.to_path_buf();
+        root
+    }
+
+    #[test]
+    fn a_cleanly_exited_relay_owner_is_proved_only_for_its_dead_process_and_boot() {
+        let state = Fixture::new();
+        let previous = "11111111-1111-1111-1111-111111111111";
+        let mut receipt: Receipt = serde_json::from_value(json!({
+            "version":1,"run":"a".repeat(32),"owner":"b".repeat(32),
+            "namespace":"c".repeat(64),"plan_id":"d".repeat(64),
+            "phase":"ready-observed","readiness":{},"resources":{},
+            "relay_startup":{"control_only":true,"guest_root":null,
+                "control_root":"/private/owned","artifact":"e".repeat(64),"services":{}}
+        }))
+        .unwrap();
+        let (mut dead, process) = sleeper();
+        let root = exited_root(&state.0, &mut receipt, previous, &process);
+        // Its relay owner's process is still alive: no exit is proved.
+        assert!(exited_predecessor(&state.0, &receipt, previous, &process).is_err());
+        dead.0.kill().unwrap();
+        dead.0.wait().unwrap();
+        let proof = exited_predecessor(&state.0, &receipt, previous, &process).unwrap();
+        assert_eq!(proof.previous_boot, previous);
+        assert_eq!(proof.control_root, root.to_path_buf());
+        assert!(hex(&proof.witness_sha256, 64));
+        // Repeated observation of the unchanged evidence is the same proof.
+        assert!(exited_predecessor(&state.0, &receipt, previous, &process).unwrap() == proof);
+        // Another boot, another process or another state root derive another root.
+        assert!(exited_predecessor(&state.0, &receipt, "other-boot", &process).is_err());
+        let (_live, other) = sleeper();
+        assert!(exited_predecessor(&state.0, &receipt, previous, &other).is_err());
+        assert!(
+            exited_predecessor(
+                std::path::Path::new("/private/other"),
+                &receipt,
+                previous,
+                &process
+            )
+            .is_err()
+        );
+        // A publication still present (partial or whole) is not a clean exit.
+        let record = root.join("relay-control/owner.json");
+        fs::write(&record, b"{}").unwrap();
+        fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(exited_predecessor(&state.0, &receipt, previous, &process).is_err());
+        fs::remove_file(&record).unwrap();
+        // A recreated publication directory has another lock identity.
+        let lock = root.join("relay-control/operation.lock");
+        fs::remove_file(&lock).unwrap();
+        drop(state::Lock::acquire(&root.join("relay-control")).unwrap());
+        assert!(exited_predecessor(&state.0, &receipt, previous, &process).unwrap() != proof);
+        // An unsettled relay startup is never eligible.
+        let mut pending = receipt.clone();
+        pending.relay_startup.as_mut().unwrap().control_only = false;
+        assert!(exited_predecessor(&state.0, &pending, previous, &process).is_err());
+    }
+
+    #[test]
+    fn a_routeless_selection_falls_back_to_the_exit_only_with_the_dead_owner() {
+        let fixture = Fixture::new();
+        let candidate = Candidate::discover(&fixture.0).unwrap();
+        let previous = "11111111-1111-1111-1111-111111111111";
+        let mut receipt: Receipt = serde_json::from_value(json!({
+            "version":1,"run":"a".repeat(32),"owner":"b".repeat(32),
+            "namespace":"c".repeat(64),"plan_id":"d".repeat(64),
+            "phase":"failed-retained","readiness":{},"resources":{},
+            "relay_startup":{"control_only":true,"guest_root":null,
+                "control_root":"/private/owned","artifact":"e".repeat(64),"services":{}}
+        }))
+        .unwrap();
+        let (mut dead, process) = sleeper();
+        let _root = exited_root(&candidate.state_root, &mut receipt, previous, &process);
+        dead.0.kill().unwrap();
+        dead.0.wait().unwrap();
+        let mut selection = selection(1);
+        // Without the dead owner the pinned refusal stands, as before (HACK-2711).
+        let refused =
+            select_predecessor(&candidate, &mut selection, &receipt, previous, None, None)
+                .unwrap_err();
+        assert_eq!(refused.code, "relay_owner_refused");
+        assert!(selection.predecessor_exit.is_none());
+        select_predecessor(
+            &candidate,
+            &mut selection,
+            &receipt,
+            previous,
+            None,
+            Some(&process),
+        )
+        .unwrap();
+        assert!(selection.predecessor_owner.is_none());
+        assert!(
+            selection.predecessor_exit
+                == Some(
+                    exited_predecessor(&candidate.state_root, &receipt, previous, &process)
+                        .unwrap()
+                )
+        );
+        // Another process named as the dead owner keeps the pinned refusal.
+        let (_live, other) = sleeper();
+        let mut other_selection = super::tests::selection(1);
+        assert_eq!(
+            select_predecessor(
+                &candidate,
+                &mut other_selection,
+                &receipt,
+                previous,
+                None,
+                Some(&other),
+            )
+            .unwrap_err()
+            .code,
+            "relay_owner_refused"
+        );
     }
 }

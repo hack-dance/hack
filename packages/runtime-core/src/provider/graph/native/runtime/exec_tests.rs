@@ -176,3 +176,49 @@ fn finite_exec_refuses_changed_member_or_data_before_command_and_withholds_resta
         );
     }
 }
+
+/// HACK-2739: only the owner's expired lease wait gets the pre-effect code, and
+/// that code passes the requester's closed reply-code filter unchanged.
+#[test]
+fn the_owners_exec_lease_refusal_has_its_own_pre_effect_code() {
+    let mapped = exec::owner_lease_refusal(CandidateError::new("provider_busy", "held"));
+    assert_eq!(mapped.code, exec::OWNER_EXEC_LEASE_BUSY);
+    assert!(
+        (1..=64).contains(&mapped.code.len())
+            && mapped
+                .code
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    );
+    for code in [
+        "provider_acquisition_cancelled",
+        "native_graph_foreground",
+        "managed_environment_expired",
+    ] {
+        assert_eq!(
+            exec::owner_lease_refusal(CandidateError::new(code, "kept")).code,
+            code
+        );
+    }
+}
+
+/// HACK-2739: the owner's own wait, on a real flock held as a project stop, ends in
+/// that code (scaled: a 300 ms budget for the owner's 15 s bound).
+#[cfg(target_os = "macos")]
+#[test]
+fn the_owners_exec_lease_wait_expires_with_the_pre_effect_code() {
+    use crate::provider::engine::command_lease_tests::{hold_lease_as_project_stop, running_pool};
+    let (_home, candidate) = running_pool();
+    let (release, holder) = hold_lease_as_project_stop(&candidate, Duration::from_secs(30));
+    let refused = Engine::connect_command_until(
+        &candidate,
+        Instant::now() + Duration::from_millis(300),
+        &|| Ok(()),
+    )
+    .map_err(exec::owner_lease_refusal)
+    .err()
+    .unwrap();
+    assert_eq!(refused.code, exec::OWNER_EXEC_LEASE_BUSY);
+    release.send(()).unwrap();
+    holder.join().unwrap();
+}

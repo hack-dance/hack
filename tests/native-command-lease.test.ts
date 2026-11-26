@@ -1,9 +1,12 @@
 import { expect, test } from "bun:test";
+import { NATIVE_AUTHORED_EXEC_REQUEST_TIMEOUT_MS } from "../src/backends/native-authored-project-exec.ts";
 import {
   isNativeCommandLeaseRefusal,
   isNativeCommandNotRun,
+  isNativeOwnerAuthoredExecLeaseRefusal,
   isNativeOwnerRefreshLeaseRefusal,
   NATIVE_COMMAND_LEASE_WAIT_SECONDS,
+  NATIVE_OWNER_AUTHORED_EXEC_LEASE_BUSY,
   NATIVE_OWNER_REFRESH_LEASE_BUSY,
   nativeCommandLeaseRefusal,
   nativeCommandLeaseWaitLine,
@@ -126,6 +129,61 @@ test("HACK-2729 review: only the owner's exact pre-effect refusal is classified 
       )
     ).toBe(false);
   }
+});
+
+test("HACK-2739: an authored exec's lease refusal says nothing ran, and only the owner's exact pair is pre-effect", () => {
+  const refusal = nativeCommandLeaseRefusal({
+    nativeMessage: PROJECT_STOP,
+    command: "hack exec",
+    stage: "authored",
+  });
+  expect(isNativeCommandNotRun(refusal)).toBe(true);
+  expect(refusal.message.split("\n")).toEqual([
+    "hack exec could not acquire the native runtime lock (provider_busy); nothing ran.",
+    "Holder: project stop.",
+    "Retry hack exec once that project stop finishes.",
+  ]);
+  expect(
+    isNativeOwnerAuthoredExecLeaseRefusal(
+      new NativeRuntimeRequestError({
+        message: "x",
+        nativeCode: "native_graph_foreground",
+        nativeCauseCode: NATIVE_OWNER_AUTHORED_EXEC_LEASE_BUSY,
+      })
+    )
+  ).toBe(true);
+  for (const [nativeCode, nativeCauseCode] of [
+    ["native_graph_foreground", "provider_busy"],
+    ["native_graph_foreground", undefined],
+    ["native_graph_foreground", NATIVE_OWNER_REFRESH_LEASE_BUSY],
+    ["graph_owner_recovery", NATIVE_OWNER_AUTHORED_EXEC_LEASE_BUSY],
+    [NATIVE_OWNER_AUTHORED_EXEC_LEASE_BUSY, undefined],
+  ] as const) {
+    expect(
+      isNativeOwnerAuthoredExecLeaseRefusal(
+        new NativeRuntimeRequestError({
+          message: "x",
+          nativeCode,
+          nativeCauseCode,
+        })
+      )
+    ).toBe(false);
+  }
+  expect(
+    isNativeOwnerAuthoredExecLeaseRefusal(
+      Object.assign(new Error("forged"), {
+        nativeCode: "native_graph_foreground",
+        nativeCauseCode: NATIVE_OWNER_AUTHORED_EXEC_LEASE_BUSY,
+      })
+    )
+  ).toBe(false);
+});
+
+test("HACK-2739: the authored exec request outlasts the requester's wait and the owner's fixed read", () => {
+  // Wait, 5 s to send, the fixed 40 s read of the owner's answer.
+  expect(NATIVE_AUTHORED_EXEC_REQUEST_TIMEOUT_MS).toBeGreaterThanOrEqual(
+    (NATIVE_COMMAND_LEASE_WAIT_SECONDS + 5 + 40) * 1000
+  );
 });
 
 test("HACK-2729: exec's requests outlast the runtime's longer lease wait", () => {

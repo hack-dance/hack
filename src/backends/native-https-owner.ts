@@ -407,6 +407,17 @@ export async function connectNativeHttpsOwner(
   }
 }
 
+/**
+ * The owner connection closed before a reply arrived: the owner exited (for
+ * example killed) or dropped the request. Not a refusal the owner sent. Same
+ * message as {@link nativeHttpsOwnerRefused}.
+ */
+export class NativeHttpsOwnerConnectionClosed extends Error {
+  constructor() {
+    super(nativeHttpsOwnerRefused().message);
+  }
+}
+
 /** One request per connection at a time; uncertainty is never retried. */
 export async function requestNativeHttpsOwner(
   socket: Socket,
@@ -416,7 +427,7 @@ export async function requestNativeHttpsOwner(
   // the request waited out its whole 120 s timer. A `hack down` after the
   // owner was killed waited that long for the frontend's release (HACK-2720).
   if (socket.destroyed || !socket.writable) {
-    throw nativeHttpsOwnerRefused();
+    throw new NativeHttpsOwnerConnectionClosed();
   }
   return await new Promise((resolve, reject) => {
     let bytes = Buffer.alloc(0);
@@ -432,7 +443,7 @@ export async function requestNativeHttpsOwner(
         resolve(reply);
       }
     };
-    const onClose = () => finish(nativeHttpsOwnerRefused());
+    const onClose = () => finish(new NativeHttpsOwnerConnectionClosed());
     const onData = (chunk: Buffer) => {
       if (bytes.length + chunk.length > NATIVE_HTTPS_OWNER_FRAME_LIMIT) {
         finish(nativeHttpsOwnerRefused());
@@ -457,14 +468,15 @@ export async function requestNativeHttpsOwner(
         finish(nativeHttpsOwnerRefused());
       }
     };
-    const timer = setTimeout(onClose, 120_000);
+    // A silent owner is not a closed one: its timeout stays a plain refusal.
+    const timer = setTimeout(() => finish(nativeHttpsOwnerRefused()), 120_000);
     socket.on("data", onData);
     socket.once("close", onClose);
     socket.once("error", onClose);
     try {
       socket.write(encodeNativeHttpsOwnerFrame(value));
     } catch {
-      finish(nativeHttpsOwnerRefused());
+      finish(new NativeHttpsOwnerConnectionClosed());
     }
   });
 }
@@ -525,12 +537,10 @@ export async function acquireNativeHttpsLease(
   } catch (startupFailure) {
     throw new NativeHttpsLeaseAcquisitionError(intended, { startupFailure });
   }
-  let ownerClosed = false;
-  const exited = new Promise<{ component: string; code: number }>((resolve) => {
-    socket.once("close", () => {
-      ownerClosed = true;
-      resolve({ component: "shared-https-owner", code: 1 });
-    });
+  const connection = nativeHttpsOwnerConnection({
+    socket,
+    recover: (identity) =>
+      recoverNativeHttpsLease({ runtime: opts.runtime, identity }),
   });
   try {
     const reply = await requestNativeHttpsOwner(socket, {
@@ -561,12 +571,11 @@ export async function acquireNativeHttpsLease(
       throw nativeHttpsOwnerRefused();
     }
     const selected = identity;
-    let released = false;
     return {
       identity: selected,
       caPath: owner.caPath,
       httpsPort: binding.httpsPort,
-      exited,
+      exited: connection.exited,
       verifyHostname: (hostname, path) =>
         verifyNativeHttpsHostname(
           hostname,
@@ -580,22 +589,7 @@ export async function acquireNativeHttpsLease(
               peerPort,
             })
         ),
-      releaseAfterCleanup: async () => {
-        if (released) {
-          return;
-        }
-        await releaseNativeHttpsLeaseAfterCleanup({
-          ownerClosed: ownerClosed || socket.destroyed,
-          release: () => release(socket, selected),
-          recover: () =>
-            recoverNativeHttpsLease({
-              runtime: opts.runtime,
-              identity: selected,
-            }),
-        });
-        released = true;
-        socket.end();
-      },
+      releaseAfterCleanup: () => connection.releaseAfterCleanup(selected),
     };
   } catch {
     // A durable acquire may have committed; disconnect preserves that lease for recovery.
@@ -610,18 +604,66 @@ export async function acquireNativeHttpsLease(
  * for example killed), through lease recovery, which retires an exited owner
  * after its proofs (HACK-2720). Before this the frontend wrote its release to
  * the closed connection and waited out the request's 120 s timer, so the
- * `hack down` that waited for it hung, then refused.
+ * `hack down` that waited for it hung, then refused. A release whose
+ * connection closes before any reply tries recovery once too (#1271 review);
+ * a refusal the owner sent is final.
  */
 export async function releaseNativeHttpsLeaseAfterCleanup(opts: {
-  readonly ownerClosed: boolean;
+  readonly ownerClosed: () => boolean;
   readonly release: () => Promise<void>;
   readonly recover: () => Promise<void>;
 }): Promise<void> {
-  if (opts.ownerClosed) {
+  if (opts.ownerClosed()) {
     await opts.recover();
     return;
   }
-  await opts.release();
+  try {
+    await opts.release();
+  } catch (error) {
+    if (!(error instanceof NativeHttpsOwnerConnectionClosed)) {
+      throw error;
+    }
+    await opts.recover();
+  }
+}
+
+/**
+ * The frontend's end of one owner connection: `exited` settles when the owner
+ * closes it, and `releaseAfterCleanup` releases the lease through it or, once
+ * it has closed, recovers the lease (see
+ * {@link releaseNativeHttpsLeaseAfterCleanup}). One release per connection.
+ */
+export function nativeHttpsOwnerConnection(opts: {
+  readonly socket: Socket;
+  readonly recover: (identity: NativeHttpsLeaseIdentity) => Promise<void>;
+}): {
+  readonly exited: Promise<{ component: string; code: number }>;
+  releaseAfterCleanup(identity: NativeHttpsLeaseIdentity): Promise<void>;
+} {
+  const { socket } = opts;
+  let closed = false;
+  const exited = new Promise<{ component: string; code: number }>((resolve) => {
+    socket.once("close", () => {
+      closed = true;
+      resolve({ component: "shared-https-owner", code: 1 });
+    });
+  });
+  let released = false;
+  return {
+    exited,
+    releaseAfterCleanup: async (identity) => {
+      if (released) {
+        return;
+      }
+      await releaseNativeHttpsLeaseAfterCleanup({
+        ownerClosed: () => closed || socket.destroyed,
+        release: () => release(socket, identity),
+        recover: () => opts.recover(identity),
+      });
+      released = true;
+      socket.end();
+    },
+  };
 }
 
 async function hasActiveNativeHttpsLease(

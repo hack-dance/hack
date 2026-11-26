@@ -5203,7 +5203,9 @@ instead of sending its release to the closed connection (which waited out a
 120 second timer while `hack down` waited for it, printing nothing). The
 retirement is bounded: up to 5 seconds for the admission lock, then at most
 about 30 seconds of process, pool and child checks; it usually takes a second
-or two. A `hack down` still waiting for its run's frontend after 5 seconds
+or two. The release is then verified against the stopped graph, which waits up
+to 15 seconds for a busy provider lock. A release whose connection closes
+before the owner replies tries this recovery once too. A `hack down` still waiting for its run's frontend after 5 seconds
 says so in one line. Otherwise the receipt, the dead challenge socket and the empty owner
 lock are removed, the owner directory moves beside a retired-owner record
 (`native-https/released-leases/<generation>/exited-owner`), the release is still

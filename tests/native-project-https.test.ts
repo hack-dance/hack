@@ -1396,7 +1396,7 @@ test("an authority stop that times out is refused with a next step", async () =>
         return await f.invoke(request);
       },
     }),
-    "cooperative stop did not confirm its exit (it may have timed out). Nothing was stopped and the retained records were kept. Run hack down again"
+    "cooperative stop did not confirm its exit (it may have timed out). Nothing was stopped, and the retained records were kept. Run hack down again"
   );
   expect(await f.leftovers()).toEqual(ALL_LEFT);
 });
@@ -1486,6 +1486,35 @@ test("malformed or mismatched records are refused with a next step that keeps th
     "receipt names HTTPS port 19443, not 19444"
   );
   expect(await port.leftovers()).toEqual(ALL_LEFT);
+});
+
+test("a removal that fails part way says which records it already removed", async () => {
+  const f = await exitedOwnerFixture();
+  f.setState("gone");
+  const storage = join(f.runtime.home, "native-https");
+  const error = await expectClosedRefusal(
+    retireExitedNativeHttpsChildren({
+      runtime: f.runtime,
+      httpsPort: 19_443,
+      checkPort: async () => {},
+      exitWaitMs: 50,
+      invoke: f.invoke,
+      // The challenge socket is replaced before removal: the receipt goes,
+      // then the socket no longer matches.
+      beforeRemoval: async () => {
+        await rm(join(storage, "owner.sock"));
+        writeFileSync(join(storage, "owner.sock"), "replacement", {
+          mode: 0o600,
+        });
+      },
+    }),
+    "changed while it was retired"
+  );
+  expect(error.message).toContain(
+    "the receipt (active-owner.json) was already removed and the other retained records were kept"
+  );
+  expect(error.message).not.toContain("and the retained records were kept");
+  expect(await f.leftovers()).toEqual(["owner.lock", "owner.sock"]);
 });
 
 test("nothing is removed when the caller's last check before removal refuses", async () => {

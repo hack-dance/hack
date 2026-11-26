@@ -1063,6 +1063,8 @@ function withinBudget(budgetEnd: number, nominalMs: number): number {
 /** What an exited owner's retirement has done so far, for its refusals. */
 interface ExitedChildProgress {
   authorityStopped: boolean;
+  /** Records already removed, in order. */
+  readonly removed: string[];
 }
 
 /** A refusal of the exited-owner retirement that names a next step. */
@@ -1078,9 +1080,14 @@ function exitedChildRefused(
   progress: ExitedChildProgress,
   kind: "process" | "records" = "process"
 ): Error {
-  const done = progress.authorityStopped
-    ? "The exited owner's hostname authority was stopped through its cooperative stop; nothing else was stopped, and the retained records were kept."
-    : "Nothing was stopped and the retained records were kept.";
+  const stopped = progress.authorityStopped
+    ? "The exited owner's hostname authority was stopped through its cooperative stop; nothing else was stopped"
+    : "Nothing was stopped";
+  const records =
+    progress.removed.length === 0
+      ? "the retained records were kept"
+      : `${progress.removed.join(" and ")} ${progress.removed.length === 1 ? "was" : "were"} already removed and the other retained records were kept`;
+  const done = `${stopped}, and ${records}.`;
   const next =
     kind === "process"
       ? "Run hack down again in a few seconds; if this repeats, stop that process yourself, then run hack down again."
@@ -1439,7 +1446,10 @@ export async function retireExitedNativeHttpsChildren(opts: {
     Date.now() + (opts.exitWaitMs ?? NATIVE_HTTPS_EXITED_CHILD_WAIT_MS);
   const budgetEnd =
     Date.now() + (opts.budgetMs ?? NATIVE_HTTPS_EXITED_CHILD_BUDGET_MS);
-  const progress: ExitedChildProgress = { authorityStopped: false };
+  const progress: ExitedChildProgress = {
+    authorityStopped: false,
+    removed: [],
+  };
   const storage = await exitedStep(
     "The runtime home or its native-https directory is not private.",
     progress,
@@ -1493,6 +1503,7 @@ export async function retireExitedNativeHttpsChildren(opts: {
           path: join(storage, OWNER_RECEIPT),
           identity: receipt.identity,
         });
+        progress.removed.push("the receipt (active-owner.json)");
       }
       if (owner) {
         const ownerSocket = join(storage, OWNER_SOCKET);
@@ -1501,6 +1512,7 @@ export async function retireExitedNativeHttpsChildren(opts: {
           throw refused();
         }
         await unlink(ownerSocket);
+        progress.removed.push("the challenge socket (owner.sock)");
       }
       if (lock) {
         await removeOwnedDirectory(
@@ -1508,6 +1520,7 @@ export async function retireExitedNativeHttpsChildren(opts: {
           { dev: lock.dev, ino: lock.ino },
           false
         );
+        progress.removed.push("the owner lock (owner.lock)");
       }
     }
   );

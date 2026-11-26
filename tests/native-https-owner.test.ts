@@ -18,7 +18,9 @@ import { nativeHttpsOwnerInvocationRunning } from "../src/backends/native-https-
 import {
   connectNativeHttpsOwner,
   ensureNativeHttpsOwner,
+  NativeHttpsOwnerConnectionClosed,
   type NativeHttpsSpawnedOwner,
+  nativeHttpsOwnerConnection,
   readNativeHttpsOwnerConfiguration,
   recoverNativeHttpsLease,
   releaseNativeHttpsLeaseAfterCleanup,
@@ -1750,17 +1752,97 @@ describe("a shared owner that exited while serving", () => {
       calls.push(name);
     };
     await releaseNativeHttpsLeaseAfterCleanup({
-      ownerClosed: true,
+      ownerClosed: () => true,
       release: record("release"),
       recover: record("recover"),
     });
     await releaseNativeHttpsLeaseAfterCleanup({
-      ownerClosed: false,
+      ownerClosed: () => false,
       release: record("release"),
       recover: record("recover"),
     });
     expect(calls).toEqual(["recover", "release"]);
   });
+
+  test("a release whose connection closes before any reply recovers once; a refusal the owner sent is final", async () => {
+    const calls: string[] = [];
+    await releaseNativeHttpsLeaseAfterCleanup({
+      ownerClosed: () => false,
+      release: async () => {
+        calls.push("release");
+        throw new NativeHttpsOwnerConnectionClosed();
+      },
+      recover: async () => {
+        calls.push("recover");
+      },
+    });
+    expect(calls).toEqual(["release", "recover"]);
+    await expect(
+      releaseNativeHttpsLeaseAfterCleanup({
+        ownerClosed: () => false,
+        release: async () => {
+          throw new Error("graph-verification: provider_busy");
+        },
+        recover: async () => {
+          calls.push("recover again");
+        },
+      })
+    ).rejects.toThrow("graph-verification");
+    expect(calls).toEqual(["release", "recover"]);
+  });
+
+  /**
+   * The real connection wiring `acquireNativeHttpsLease` uses (it runs only in
+   * the compiled CLI): an acquired lease on the real owner process, the owner
+   * killed mid-run, then the frontend's cleanup.
+   */
+  test("an acquired lease's cleanup recovers through its own connection's close after the owner is killed", async () => {
+    const f = await fixture();
+    const started = await f.start();
+    const recovered: unknown[] = [];
+    const connection = nativeHttpsOwnerConnection({
+      socket: started.socket,
+      recover: async (identity) => {
+        recovered.push(identity);
+      },
+    });
+    const identity = await f.acquire(
+      started.socket,
+      started.configuration.ownerGeneration,
+      "b"
+    );
+    process.kill(started.pid, "SIGKILL");
+    expect(await connection.exited).toEqual({
+      component: "shared-https-owner",
+      code: 1,
+    });
+    const begun = performance.now();
+    await connection.releaseAfterCleanup(identity);
+    await connection.releaseAfterCleanup(identity);
+    expect(performance.now() - begun).toBeLessThan(1000);
+    expect(recovered).toEqual([identity]);
+  }, 25_000);
+
+  test("an acquired lease's cleanup releases through its open connection while the owner lives", async () => {
+    const f = await fixture();
+    const started = await f.start();
+    const connection = nativeHttpsOwnerConnection({
+      socket: started.socket,
+      recover: async () => {
+        throw new Error("recovery must not run");
+      },
+    });
+    const first = await f.acquire(
+      started.socket,
+      started.configuration.ownerGeneration,
+      "b"
+    );
+    await f.clean("b");
+    await connection.releaseAfterCleanup(first);
+    // The last lease retired the owner through its own release.
+    await f.helperExited();
+    await expect(lstat(nativeHttpsOwnerRoot(f.home))).rejects.toThrow("ENOENT");
+  }, 25_000);
 
   test("is left alone while its exact owner invocation still runs", async () => {
     const { children, verified, recover, retained } = await killedOwner();

@@ -984,7 +984,7 @@ async function nativeProjectDownOnce(opts: {
         try {
           const token = latest;
           await withSlowNotice({
-            line: "Waiting for this run's frontend to finish its cleanup (its HTTPS lease release or recovery, at most about 35 s after the services stop).",
+            line: "Waiting for this run's frontend to finish its cleanup: its HTTPS lease release or recovery. Retiring an exited HTTPS owner usually finishes within about 35 s after the services stop; the release is then verified against the stopped graph.",
             wait: () =>
               waitNativeProjectFinalization({
                 scope: opts.scope,

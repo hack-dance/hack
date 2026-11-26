@@ -451,10 +451,10 @@ mod tests {
             while Instant::now() < deadline {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        stream.set_nonblocking(false).unwrap();
-                        stream
-                            .set_read_timeout(Some(Duration::from_secs(2)))
-                            .unwrap();
+                        // Darwin refuses these on a stream whose peer has
+                        // already closed; its bytes are still readable.
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                         let mut request = Vec::new();
                         let mut bytes = [0u8; 256];
                         while !request.ends_with(b"\r\n\r\n") {
@@ -551,12 +551,11 @@ mod tests {
         fs::set_permissions(&session.0, fs::Permissions::from_mode(0o755)).unwrap();
         super::super::stop_caddy(&admin);
         fs::set_permissions(&session.0, fs::Permissions::from_mode(0o700)).unwrap();
-        // The stand-in is still waiting: end it with a request of our own.
-        std::io::Write::write_all(
-            &mut std::os::unix::net::UnixStream::connect(&admin).unwrap(),
-            b"GET / HTTP/1.1\r\n\r\n",
-        )
-        .unwrap();
+        // The stand-in is still waiting: end it with a request of our own,
+        // kept open until the stand-in has read it.
+        let mut probe = std::os::unix::net::UnixStream::connect(&admin).unwrap();
+        std::io::Write::write_all(&mut probe, b"GET / HTTP/1.1\r\n\r\n").unwrap();
         assert!(caddy.join().unwrap().starts_with(b"GET / "));
+        drop(probe);
     }
 }

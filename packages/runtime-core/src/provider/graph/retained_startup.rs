@@ -210,13 +210,24 @@ fn after_engine_loss(owner: &Owner) -> bool {
         && owner.process.is_some()
 }
 
-/// What no boot or stop of the same pool changes: its owner token and machine, HOME alias,
-/// disks, root files, profile, socket layout, shares, network and capacity. A replacement
-/// owner, token or disk, a changed share, or a changed network differs here. The phase, the
-/// provider process, the boot ids, the engine's identity, the clean-stop marker and the
-/// per-boot settings (`reclamation`, `hot_reload`) are left out: `Owner::begin_boot` and a
-/// stop rewrite them.
-fn stable_identity(owner: &Owner) -> impl serde::Serialize + '_ {
+/// What only a replacement of this run's pool changes: the owner token and machine, HOME
+/// alias, disks, root files, profile, socket layout, and this run's own project share (the
+/// pool's entry for the root the receipt's shared source names, or none). A replacement
+/// owner, token, disk or root file, or a changed or removed share of this run, differs here.
+///
+/// Left out, so that a change to them with the same receipt is [`pool_changed`]: the phase,
+/// the provider process, the boot ids, the engine's identity, the clean-stop marker and the
+/// per-boot settings (`reclamation`, `hot_reload`), which `Owner::begin_boot` and a stop
+/// rewrite; and what another project's commands may change on the same pool: its own
+/// project shares, the network intent, the bridge and dependency socket capacity and the
+/// translation setting. The selection taken again then binds them, and `runtime up` still
+/// checks this start's own request against them under the lease (`StartRequest::check`).
+fn stable_identity<'a>(owner: &'a Owner, receipt: &'a Receipt) -> impl serde::Serialize + 'a {
+    let own_share = receipt
+        .source
+        .as_ref()
+        .and_then(|source| source.shared.as_ref())
+        .map(|share| owner.project_share_for(&share.project));
     (
         (
             &owner.version,
@@ -229,16 +240,7 @@ fn stable_identity(owner: &Owner) -> impl serde::Serialize + '_ {
             &owner.overlay,
             &owner.rootfs_digest,
         ),
-        (
-            &owner.profile,
-            &owner.socket_layout,
-            &owner.project_share,
-            &owner.additional_project_shares,
-            &owner.network,
-            &owner.application_bridge,
-            &owner.dependency_sockets,
-            &owner.amd64_emulation,
-        ),
+        (&owner.profile, &owner.socket_layout, own_share),
     )
 }
 
@@ -254,20 +256,22 @@ fn digest(value: &impl serde::Serialize) -> Result<String, CandidateError> {
 /// [`pool_changed`]: another start booted (or stopped) this same pool in between.
 fn selection(owner: &Owner, receipt: &Receipt) -> Result<String, CandidateError> {
     let stable = digest(&(
-        "hack-retained-startup-stable-v1",
-        stable_identity(owner),
+        "hack-retained-startup-stable-v2",
+        stable_identity(owner, receipt),
         receipt,
     ))?;
     let whole = digest(&("hack-retained-startup-v2", owner, receipt))?;
     Ok(format!("{}{}", &stable[..32], &whole[..32]))
 }
 
-/// The retained start's selection is stale only because the same pool booted or stopped
-/// since it was taken (HACK-2732). The caller takes the selection again and retries once.
+/// The retained start's selection is stale only because the same pool booted or stopped, or
+/// another project changed it, since it was taken (HACK-2732). The CLI takes the selection
+/// again and retries once; the sentence is what a user sees when that retry meets another
+/// change too, so it names the command to repeat.
 fn pool_changed() -> CandidateError {
     error(
         "graph_retained_pool_changed",
-        "Another start booted or stopped the native pool after this start checked its retained run; the run, its data and the pool's identity are unchanged. Check the run's eligibility again, then start.",
+        "Another project started, stopped or changed the native pool after this start checked its retained run; the run, its data and the pool's identity are unchanged and nothing was started. Retry hack up (or hack up -d).",
     )
 }
 
@@ -300,7 +304,9 @@ impl Guard {
             selection: expected.into(),
             retired,
         };
-        let lease = lifecycle::startup_lease(
+        // The pool's existing lease only: a retained start needs an owned pool, so a
+        // missing lock file refuses here instead of being created.
+        let lease = state::Lock::acquire_existing_waiting(
             &candidate.state_root.join("run/smolvm"),
             lifecycle::START_LEASE_WAIT,
         )?;
@@ -1021,15 +1027,103 @@ pub(in crate::provider::graph) mod tests {
         }
     }
 
+    /// An approved unfiltered share of `project` in the owner's layout.
+    fn share(owner: &Owner, project: &str) -> super::super::super::ProjectShareIntent {
+        let digest = format!("{:x}", crate::Hex(Sha256::digest(project.as_bytes())));
+        super::super::super::ProjectShareIntent {
+            project: PathBuf::from(project),
+            guest_path: owner.socket_layout.project(&digest),
+            device: 1,
+            inode: 2,
+            unfiltered_source: true,
+        }
+    }
+
+    /// Make the fixture's run a shared-source run of the pool's primary share.
+    fn share_run(fixture: &Fixture) {
+        let mut owner = Owner::load(&fixture.candidate).unwrap();
+        let own = share(&owner, "/fixture/project-a");
+        owner.project_share = Some(own.clone());
+        owner.save(&fixture.candidate).unwrap();
+        let mut receipt = fixture.receipt();
+        receipt.source = Some(super::super::source::SourceBinding {
+            cache_scope: None,
+            shared: Some(own),
+            shared_contract: None,
+            live: None,
+            revision: "1".repeat(64),
+            archive_sha256: "2".repeat(64),
+            selection_sha256: "3".repeat(64),
+        });
+        state::write(&fixture.graph().join("state.json"), &receipt).unwrap();
+    }
+
     #[test]
-    fn a_changed_disk_network_or_receipt_still_refuses_and_is_never_a_changed_pool() {
-        for case in ["disk", "network", "receipt"] {
+    fn a_peer_projects_pool_change_is_a_changed_pool_that_a_new_selection_accepts() {
+        // Another project's commands may change the shared pool without touching this
+        // run: add its own project share (which stops an idle pool), change the network
+        // intent, the socket capacity or the translation setting. The retained start
+        // selects again and retries instead of refusing; its own request is still checked
+        // against the pool under the lease.
+        for case in ["peer-share", "network", "emulation"] {
             let fixture = Fixture::new();
+            share_run(&fixture);
             let before = preflight(&fixture.candidate, &fixture.run).unwrap();
             let before = before["selection"].as_str().unwrap().to_owned();
             let mut owner = Owner::load(&fixture.candidate).unwrap();
             peer_boot(&mut owner, "stopped");
             match case {
+                "peer-share" => {
+                    let peer = share(&owner, "/fixture/project-b");
+                    owner.additional_project_shares.push(peer);
+                }
+                "network" => owner.network = super::super::super::NetworkIntent::Internet,
+                "bridges" => {
+                    owner.application_bridge =
+                        Some(super::super::super::BridgeIntent::new(2).unwrap())
+                }
+                _ => owner.amd64_emulation = true,
+            }
+            owner.save(&fixture.candidate).unwrap();
+            let error = Guard::acquire(&fixture.candidate, &fixture.run, &before)
+                .err()
+                .unwrap();
+            assert_eq!(error.code, "graph_retained_pool_changed", "{case}");
+            let after = preflight(&fixture.candidate, &fixture.run).unwrap();
+            let after = after["selection"].as_str().unwrap();
+            assert_eq!(after[..32], before[..32], "{case}");
+            let guard = Guard::acquire(&fixture.candidate, &fixture.run, after).unwrap();
+            guard.verify(&fixture.candidate, &lease(&fixture)).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_changed_identity_of_this_runs_pool_still_refuses_and_is_never_a_changed_pool() {
+        for case in [
+            "own-share",
+            "own-share-removed",
+            "disk",
+            "rootfs",
+            "receipt",
+            "token",
+        ] {
+            let mut fixture = Fixture::new();
+            share_run(&fixture);
+            let before = preflight(&fixture.candidate, &fixture.run).unwrap();
+            let before = before["selection"].as_str().unwrap().to_owned();
+            if case == "token" {
+                // A valid replacement owner (token, machine, HOME alias and disks).
+                fixture.replace_owner();
+            }
+            let mut owner = Owner::load(&fixture.candidate).unwrap();
+            peer_boot(&mut owner, "stopped");
+            match case {
+                // This run's own share now names another directory identity.
+                "own-share" => owner.project_share.as_mut().unwrap().inode += 1,
+                "own-share-removed" => {
+                    // The run's root is no longer the pool's share; another one is.
+                    owner.project_share = Some(share(&owner, "/fixture/project-b"));
+                }
                 // A replaced storage disk whose record was updated to match it.
                 "disk" => {
                     let data = owner.real_data_dir(&fixture.candidate).unwrap();
@@ -1039,26 +1133,39 @@ pub(in crate::provider::graph) mod tests {
                     fs::write(&path, bytes).unwrap();
                     owner.storage = Some(identity::disk(&path).unwrap());
                 }
-                "network" => owner.network = super::super::super::NetworkIntent::Internet,
-                _ => {
+                // Changed root files whose recorded digest was updated to match them.
+                "rootfs" => {
+                    let rootfs = fixture.candidate.state_root.join("run/smolvm/rootfs");
+                    fs::write(rootfs.join("public-base"), b"another pinned base").unwrap();
+                    owner.rootfs_digest =
+                        Some(crate::provider::artifact::rootfs_digest(&rootfs, None).unwrap());
+                }
+                "receipt" => {
                     let mut receipt = fixture.receipt();
                     receipt.plan_id = "9".repeat(64);
                     state::write(&fixture.graph().join("state.json"), &receipt).unwrap();
                 }
+                _ => {}
             }
             owner.save(&fixture.candidate).unwrap();
-            // The current state is eligible: only the selection binds the change.
-            let after = preflight(&fixture.candidate, &fixture.run).unwrap();
-            assert_ne!(
-                after["selection"].as_str().unwrap()[..32],
-                before[..32],
-                "{case}"
-            );
+            // Where the current state is eligible, only the selection binds the change.
+            if let Ok(after) = preflight(&fixture.candidate, &fixture.run) {
+                assert_ne!(
+                    after["selection"].as_str().unwrap()[..32],
+                    before[..32],
+                    "{case}"
+                );
+            }
             let error = Guard::acquire(&fixture.candidate, &fixture.run, &before)
                 .err()
                 .unwrap();
             assert_eq!(error.code, "graph_retained_startup", "{case}");
-            assert_eq!(start_with(&fixture, &before).code, "graph_retained_startup");
+            assert_eq!(
+                start_with(&fixture, &before).code,
+                "graph_retained_startup",
+                "{case}"
+            );
+            assert!(no_admission(&fixture), "{case}");
         }
     }
 

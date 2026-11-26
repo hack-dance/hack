@@ -12,6 +12,7 @@ import {
   type invokeNativeRuntime,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
+  retainNativeRuntimeFailure,
 } from "./native-runtime-client.ts";
 import { NATIVE_START_LEASE_REQUEST_TIMEOUT_MS } from "./native-start-lease.ts";
 
@@ -93,13 +94,16 @@ export const NATIVE_RETAINED_POOL_CHANGED = "graph_retained_pool_changed";
  * meanwhile (HACK-2732). Two projects' `hack up -d` on a stopped pool: each
  * preflight selects the stopped pool; one start boots it, and the other's
  * `runtime up`, under the startup lease, finds the pool booted since its
- * selection. The runtime refuses that with `graph_retained_pool_changed` only
- * when the run's receipt and the pool's stable identity (token, machine, HOME
- * alias, disks, root files, profile, shares, network, layout) are unchanged.
- * Then `reselect` takes the selection again (the preflight and, on a running
- * pool, the graph confirmation) and `runtime up` runs once more, which joins
- * the running pool. Any other refusal, or a second one, is kept: a replaced
- * owner, token or disk refuses with `graph_retained_startup`.
+ * selection. Another project's own share, network or capacity change counts
+ * the same way. The runtime refuses that with `graph_retained_pool_changed`
+ * only when the run's receipt and its pool's stable identity (token, machine,
+ * HOME alias, disks, root files, profile, layout and this run's own share) are
+ * unchanged. Then `reselect` takes the selection again (the preflight and, on
+ * a running pool, the graph confirmation) and `runtime up` runs once more,
+ * which joins the running pool. Any other refusal is kept: a replaced owner,
+ * token, disk or own share refuses with `graph_retained_startup`. A second
+ * change is reported as it comes, naming the retry
+ * ({@link NATIVE_RETAINED_POOL_CHANGED_AGAIN}).
  */
 export async function runtimeUpJoiningChangedPool<T>(opts: {
   readonly flags: readonly string[];
@@ -119,8 +123,34 @@ export async function runtimeUpJoiningChangedPool<T>(opts: {
       throw error;
     }
   }
-  return await opts.up(await opts.reselect());
+  const flags = await opts.reselect();
+  try {
+    return await opts.up(flags);
+  } catch (error) {
+    // A second change means the pool booted or stopped again while this start
+    // waited: retried once only, it is reported as it is, with the next step.
+    if (
+      error instanceof NativeRuntimeRequestError &&
+      error.nativeCode === NATIVE_RETAINED_POOL_CHANGED
+    ) {
+      // The runtime's own fixed sentence (which names the same retry) stays the
+      // detail a detached start reports.
+      throw retainNativeRuntimeFailure({
+        error: new NativeRuntimeRequestError({
+          nativeCode: NATIVE_RETAINED_POOL_CHANGED,
+          nativeMessage: error.nativeMessage,
+          message: NATIVE_RETAINED_POOL_CHANGED_AGAIN,
+        }),
+        original: error,
+      });
+    }
+    throw error;
+  }
 }
+
+/** The refusal after the one retry also found the pool changed (HACK-2732). */
+export const NATIVE_RETAINED_POOL_CHANGED_AGAIN =
+  "Native runtime request failed (graph_retained_pool_changed): the native pool changed again while this start waited for it (another project started or stopped it). Nothing was started for this run and its data is kept. Retry hack up (or hack up -d).";
 
 /**
  * The retained run's eligibility once more, for a start whose selection the

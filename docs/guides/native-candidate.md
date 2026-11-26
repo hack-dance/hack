@@ -1023,11 +1023,15 @@ project stopped with `hack down` and started again, HACK-2732). The retained-sta
 check reads the pool only under the lease, so it waits out the first project's boot
 instead of refusing it. A start whose check saw the pool stopped, before the other
 project booted it, gets `graph_retained_pool_changed` from `runtime up`: the run, its
-data and the pool's identity (owner token, machine, HOME alias, disks, root files,
-profile, shares, network and layout) are unchanged, and only the pool's boot changed.
-`hack up` then checks the run once more and repeats `runtime up` once, which joins the
-running pool; it prints no extra line. A replaced owner, token or disk still refuses
-with `graph_retained_startup`.
+data and its pool's identity (owner token, machine, HOME alias, disks, root files,
+profile, layout and this project's own share) are unchanged, and only the pool's boot
+changed. Another project's change to the pool counts the same way: adding its own
+project share (which stops an idle pool), or changing the network intent, socket
+capacity or translation setting. `hack up` then checks the run once more and repeats
+`runtime up` once, which joins the running pool; it prints no extra line. If the pool
+changed again in between, the start stops with that code, nothing started and data
+kept, and says to retry `hack up` (or `hack up -d`). A replaced owner, token or disk,
+or a change to this project's own share, still refuses with `graph_retained_startup`.
 
 While a start waits, it keeps its project's run lock. A `hack down` of the same
 project during that wait is refused `provider_busy` for up to 35 seconds. Run it

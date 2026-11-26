@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  NATIVE_RETAINED_POOL_CHANGED_AGAIN,
   preflightNativeRetainedStartup,
   runtimeUpJoiningChangedPool,
   verifyNativeResumedRetainedGraph,
@@ -191,4 +192,23 @@ test("a changed pool is retried only for a retained start, once (HACK-2732)", as
     ["--expect-retained-selection", "7"],
     ["--expect-retained-selection", "8"],
   ]);
+  // A second change is not retried again: it names the command to repeat.
+  calls.length = 0;
+  await expect(
+    runtimeUpJoiningChangedPool({
+      flags: ["--expect-retained-selection", "7"],
+      up: async (flags) => {
+        calls.push(flags);
+        throw changed();
+      },
+      reselect: async () => ["--expect-retained-selection", "8"],
+    })
+  ).rejects.toMatchObject({
+    nativeCode: "graph_retained_pool_changed",
+    message: NATIVE_RETAINED_POOL_CHANGED_AGAIN,
+  });
+  expect(calls).toHaveLength(2);
+  expect(NATIVE_RETAINED_POOL_CHANGED_AGAIN).toContain(
+    "Retry hack up (or hack up -d)."
+  );
 });

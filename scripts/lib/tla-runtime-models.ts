@@ -2141,6 +2141,31 @@ const contracts: readonly ModelContract[] = [
         fields: ["token = 1"],
       },
       {
+        // Three projects' retained starts: one boots, two select again and join.
+        name: "retained-guard-three",
+        module: "RetainedGuard",
+        negative: false,
+        states: 167,
+      },
+      {
+        // Other projects change the pool (their own share, network, capacity)
+        // twice: a start refuses only for a replaced owner or after its one
+        // retry met another change (`RefusedOnlyAfterRetry`).
+        name: "retained-guard-peer-changes",
+        module: "RetainedGuard",
+        negative: false,
+        states: 761,
+      },
+      {
+        // ... and that second change is reachable: it is reported as it comes,
+        // naming the retry, not retried without bound.
+        name: "retained-guard-changed-twice",
+        module: "RetainedGuard",
+        negative: true,
+        invariant: "NoRefusal",
+        ...retainedGuardEither("preflight", "refused", ["peer = 2"], true),
+      },
+      {
         // The retry then the join is reachable.
         name: "retained-guard-rejoins",
         module: "RetainedGuard",

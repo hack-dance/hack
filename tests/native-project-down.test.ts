@@ -21,6 +21,7 @@ import {
   nativeDownEnvironment,
   nativeProjectDown,
   nativeRestartLockHeldNote,
+  withSlowNotice,
 } from "../src/backends/native-project-down.ts";
 import {
   beginNativeProjectFinalization,
@@ -3345,6 +3346,40 @@ test("the restart coordinator's down never starts a stopped pool", async () => {
   });
   await expect(attempt).rejects.toBeInstanceOf(NativeRuntimeRequestError);
   expect(calls).toEqual(["inspect"]);
+});
+
+test("a down still waiting for its run's frontend says so once, and a quick one says nothing (#1271)", async () => {
+  const lines: string[] = [];
+  const notice = (line: string) => lines.push(line);
+  expect(
+    await withSlowNotice({
+      wait: async () => "quick",
+      line: "slow",
+      afterMs: 50,
+      notice,
+    })
+  ).toBe("quick");
+  await Bun.sleep(80);
+  expect(lines).toEqual([]);
+  await withSlowNotice({
+    wait: () => Bun.sleep(150),
+    line: "slow",
+    afterMs: 50,
+    notice,
+  });
+  expect(lines).toEqual(["slow"]);
+  await expect(
+    withSlowNotice({
+      wait: async () => {
+        throw new Error("refused");
+      },
+      line: "slow",
+      afterMs: 50,
+      notice,
+    })
+  ).rejects.toThrow("refused");
+  await Bun.sleep(80);
+  expect(lines).toEqual(["slow"]);
 });
 
 /**

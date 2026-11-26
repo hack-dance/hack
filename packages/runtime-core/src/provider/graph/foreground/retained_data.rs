@@ -203,6 +203,22 @@ pub(super) fn repair_lost_removals(
     if receipt.phase != "stopped-data-retained" || receipt.relay_startup.is_none() {
         return Err(lost_removal_refused());
     }
+    let marker = root.join(graph::LOST_REMOVAL_REPAIR);
+    let pending = match std::fs::symlink_metadata(&marker) {
+        Ok(metadata) if metadata.is_file() => {
+            // Only an exact marker of this run's receipt resumes; anything else is
+            // retained as evidence.
+            let recorded: LostRemovalRepair =
+                state::read_bounded(&marker, 4096).map_err(|_| lost_removal_refused())?;
+            if recorded != LostRemovalRepair::of(&receipt)? {
+                return Err(lost_removal_refused());
+            }
+            true
+        }
+        Ok(_) => return Err(lost_removal_refused()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => return Err(lost_removal_refused()),
+    };
     let mut present = Vec::new();
     for resource in receipt
         .resources
@@ -219,16 +235,46 @@ pub(super) fn repair_lost_removals(
     }
     // Containers first: a network is removed only once nothing is attached to it.
     present.sort_by_key(|resource| resource.kind != Kind::Container);
+    if !present.is_empty() && !pending {
+        // Durable before the first removal: a repair that ends before its barrier
+        // confirms leaves this marker, so the stop is not accepted until a later
+        // repair has flushed the guest disk, even when the guest lists nothing.
+        state::write(&marker, &LostRemovalRepair::of(&receipt)?)?;
+    }
     for resource in &present {
         graph::remove_owned_resource(&engine, &receipt, resource, || guard.verify())?;
     }
-    if !present.is_empty() {
+    if pending || !present.is_empty() {
         graph::storage_barrier(&engine)?;
+        guard.verify()?;
+        std::fs::remove_file(&marker).map_err(state::io)?;
+        std::fs::File::open(&root)
+            .and_then(|directory| directory.sync_all())
+            .map_err(state::io)?;
     }
     guard.verify()?;
     Ok(
         json!({"ok":true,"run":run,"phase":receipt.phase,"receipt":receipt,"removed_again":present.len()}),
     )
+}
+
+/// The repair-in-progress marker: the exact receipt (by digest) it repairs.
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LostRemovalRepair {
+    version: u8,
+    run: String,
+    receipt_sha256: String,
+}
+impl LostRemovalRepair {
+    fn of(receipt: &Receipt) -> Result<Self, CandidateError> {
+        let bytes = serde_json::to_vec_pretty(receipt).map_err(|_| lost_removal_refused())?;
+        Ok(Self {
+            version: 1,
+            run: receipt.run.clone(),
+            receipt_sha256: format!("{:x}", crate::Hex(Sha256::digest(bytes))),
+        })
+    }
 }
 
 /// One brought-back resource: recorded removed, with its recorded id (container or
@@ -432,6 +478,26 @@ mod tests {
     fn receipt() -> Receipt {
         serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"stopped-data-retained","readiness":{},"resources":{},"relay_startup":{"control_only":true,"guest_root":null,"control_root":"/private/owned","artifact":"e".repeat(64),"services":{}},"relay_cleanup":{"version":1,"runtime":vec![1;16],"boot":vec![2;16],"operation":vec![3;16],"effect":vec![4;32],"control_root":"/private/owned","phase":"confirmed"}})).unwrap()
     }
+    #[test]
+    fn an_unfinished_lost_removal_repair_resumes_only_for_its_own_receipt() {
+        // Codex review of #1273: the marker binds the exact receipt it repairs, so
+        // a repair interrupted before its barrier is finished only for that stop.
+        let stopped = receipt();
+        let marker = LostRemovalRepair::of(&stopped).unwrap();
+        assert!(marker == LostRemovalRepair::of(&stopped).unwrap());
+        assert_eq!(marker.run, stopped.run);
+        assert_eq!(marker.receipt_sha256.len(), 64);
+        let mut later = stopped.clone();
+        later.namespace = "f".repeat(64);
+        assert!(marker != LostRemovalRepair::of(&later).unwrap());
+        // The persisted shape is exact.
+        let value = serde_json::to_value(&marker).unwrap();
+        assert_eq!(value["version"], 1);
+        let mut unknown = value.clone();
+        unknown["extra"] = json!(true);
+        assert!(serde_json::from_value::<LostRemovalRepair>(unknown).is_err());
+    }
+
     #[test]
     fn a_lost_removal_is_repaired_only_for_a_stopped_recorded_removed_resource() {
         // HACK-2719 (real VM, row 8): the engine lists the removed container again,

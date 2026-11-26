@@ -95,6 +95,11 @@ pub(in crate::provider::graph) fn checked(
     run: &str,
 ) -> Result<(Owner, Receipt), CandidateError> {
     no_file(&candidate.state_root.join("run/smolvm"), "owner.pending")?;
+    // A lost-removal repair whose storage barrier has not confirmed (HACK-2719):
+    // `hack down --recover` finishes it before the stop counts as retained.
+    if let Ok(root) = directory(candidate, run) {
+        no_file(&root, super::LOST_REMOVAL_REPAIR)?;
+    }
     let owner = Owner::load(candidate)?;
     if owner.phase == "failed-boot-stopped" {
         return Err(error(

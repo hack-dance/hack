@@ -2443,25 +2443,27 @@ mod tests {
         receipt: &mut Receipt,
         boot: &str,
         process: &crate::provider::identity::ProcessIdentity,
-    ) -> Fixture {
-        let root = super::super::super::startup::process_control_root(
-            state_root,
-            &receipt.owner,
-            boot,
-            &receipt.run,
-            process,
-        )
-        .unwrap();
+    ) -> crate::owned_tmp_root::OwnedTmpRoot {
+        // Owned before anything creates it, so a panic still removes it.
+        let root = crate::owned_tmp_root::OwnedTmpRoot::new(
+            super::super::super::startup::process_control_root(
+                state_root,
+                &receipt.owner,
+                boot,
+                &receipt.run,
+                process,
+            )
+            .unwrap(),
+        );
         // Exclusive creation under a digest of this fixture's unique state root
         // scopes the directory; it never names a runtime home.
-        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
-        let root = Fixture(root);
+        fs::DirBuilder::new().mode(0o700).create(&*root).unwrap();
         fs::DirBuilder::new()
             .mode(0o700)
-            .create(root.0.join("relay-control"))
+            .create(root.join("relay-control"))
             .unwrap();
-        drop(state::Lock::acquire(&root.0.join("relay-control")).unwrap());
-        receipt.relay_startup.as_mut().unwrap().control_root = root.0.clone();
+        drop(state::Lock::acquire(&root.join("relay-control")).unwrap());
+        receipt.relay_startup.as_mut().unwrap().control_root = root.to_path_buf();
         root
     }
 
@@ -2485,7 +2487,7 @@ mod tests {
         dead.0.wait().unwrap();
         let proof = exited_predecessor(&state.0, &receipt, previous, &process).unwrap();
         assert_eq!(proof.previous_boot, previous);
-        assert_eq!(proof.control_root, root.0);
+        assert_eq!(proof.control_root, root.to_path_buf());
         assert!(hex(&proof.witness_sha256, 64));
         // Repeated observation of the unchanged evidence is the same proof.
         assert!(exited_predecessor(&state.0, &receipt, previous, &process).unwrap() == proof);
@@ -2503,15 +2505,15 @@ mod tests {
             .is_err()
         );
         // A publication still present (partial or whole) is not a clean exit.
-        let record = root.0.join("relay-control/owner.json");
+        let record = root.join("relay-control/owner.json");
         fs::write(&record, b"{}").unwrap();
         fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(exited_predecessor(&state.0, &receipt, previous, &process).is_err());
         fs::remove_file(&record).unwrap();
         // A recreated publication directory has another lock identity.
-        let lock = root.0.join("relay-control/operation.lock");
+        let lock = root.join("relay-control/operation.lock");
         fs::remove_file(&lock).unwrap();
-        drop(state::Lock::acquire(&root.0.join("relay-control")).unwrap());
+        drop(state::Lock::acquire(&root.join("relay-control")).unwrap());
         assert!(exited_predecessor(&state.0, &receipt, previous, &process).unwrap() != proof);
         // An unsettled relay startup is never eligible.
         let mut pending = receipt.clone();

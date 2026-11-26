@@ -2145,9 +2145,15 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NoAcquisitionAfterCleanup",
         fields: ['fin = "confirmed"', 'https = "pending"'],
+        // TLC runs two workers, so on a loaded runner the first violation it
+        // reports need not be the shortest. A cleanup that starts once the
+        // acquisition has moved on (`CleanupStart`) leaves `fin = "unconfirmed"`
+        // with `authority` or `verify` still in flight (hosted CI, PR #1273).
         alternativeWitnesses: [
           ['fin = "confirmed"', 'https = "authority"'],
           ['fin = "confirmed"', 'https = "verify"'],
+          ['fin = "unconfirmed"', 'https = "authority"'],
+          ['fin = "unconfirmed"', 'https = "verify"'],
         ],
       },
       {

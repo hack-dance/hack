@@ -990,11 +990,25 @@ function lostContainerRemovals(snapshot: unknown): boolean {
     const observation = observations[`container:${String(resource.key)}`];
     return isRecord(observation) ? observation.state : undefined;
   });
-  return (
-    states.includes("exited") &&
-    states.every((state) => state === "absent" || state === "exited")
+  const settled = states.every(
+    (state) => state === "absent" || state === "exited"
   );
+  // A repair that removed them but ended before its storage barrier confirmed
+  // (`lost_removal_pending`): run it again, so the stop becomes durable.
+  return settled && (states.includes("exited") || lostRemovalPending(snapshot));
 }
+
+/** A lost-removal repair whose storage barrier has not confirmed yet. */
+function lostRemovalPending(snapshot: unknown): boolean {
+  return isRecord(snapshot) && snapshot.lost_removal_pending === true;
+}
+
+/**
+ * The refusal of a plain `hack down` while a lost-removal repair is unfinished:
+ * the containers are gone from the guest's list, but not yet durably.
+ */
+export const NATIVE_LOST_REMOVAL_PENDING =
+  "This run is stopped with its data kept, but an earlier hack down --recover removed containers a lost VM had brought back and ended before it confirmed that the removal reached the guest disk. Run hack down --recover to finish it; hack up refuses the run until then.";
 
 /**
  * The refusal when the runtime does not remove the brought-back containers
@@ -1389,6 +1403,9 @@ async function nativeProjectDownOnce(opts: {
   const verifyStoppedRepairing = async (snapshot: unknown): Promise<void> => {
     if (!(opts.recover === true && lostContainerRemovals(snapshot))) {
       verify(snapshot, run, true);
+      if (stoppedRetained(snapshot) && lostRemovalPending(snapshot)) {
+        throw new ClosedCliError(NATIVE_LOST_REMOVAL_PENDING);
+      }
       return;
     }
     try {

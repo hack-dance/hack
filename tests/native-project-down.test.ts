@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   NATIVE_LOST_REMOVAL_NOTE,
+  NATIVE_LOST_REMOVAL_PENDING,
   NATIVE_LOST_REMOVAL_UNREPAIRABLE,
   NATIVE_OWNER_EXIT_NOTICE,
   NATIVE_RECOVERED_RESTART_NOTE,
@@ -3675,7 +3676,9 @@ function lostRemovalSnapshot(webState: string) {
 }
 async function lostRemovalDown(opts: {
   readonly recover: boolean;
-  readonly webState: "exited" | "running";
+  readonly webState: "exited" | "running" | "absent";
+  /** An earlier repair ended before its storage barrier confirmed. */
+  readonly pending?: boolean;
   /** Whether the runtime's cleanup actually removes the container. */
   readonly cleanupClears?: boolean;
   /** The runtime refuses the owner-less repair with this code (real-VM row 8). */
@@ -3725,9 +3728,12 @@ async function lostRemovalDown(opts: {
         return { authority: { present: false } };
       }
       expect(command).toBe("inspect");
-      return lostRemovalSnapshot(
-        cleaned && opts.cleanupClears !== false ? "absent" : opts.webState
-      );
+      return {
+        ...lostRemovalSnapshot(
+          cleaned && opts.cleanupClears !== false ? "absent" : opts.webState
+        ),
+        ...(opts.pending && !cleaned ? { lost_removal_pending: true } : {}),
+      };
     },
   });
   const result = await down.then(
@@ -3736,6 +3742,33 @@ async function lostRemovalDown(opts: {
   );
   return { result, calls, notices };
 }
+
+// Codex review of #1273: a repair that removed the containers and ended before
+// its storage barrier confirmed leaves its marker. The guest lists nothing, but
+// the stop is not durable yet: down --recover runs the repair again (which
+// flushes the disk and clears the marker), and a plain down refuses.
+test("down --recover finishes a lost-removal repair whose barrier never confirmed", async () => {
+  const { result, calls, notices } = await lostRemovalDown({
+    recover: true,
+    webState: "absent",
+    pending: true,
+  });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(calls.filter((call) => call === "cleanup")).toHaveLength(1);
+  expect(notices).toContain(NATIVE_LOST_REMOVAL_NOTE);
+});
+
+test("a plain down refuses a stop whose lost-removal repair is unfinished", async () => {
+  const { result, calls } = await lostRemovalDown({
+    recover: false,
+    webState: "absent",
+    pending: true,
+  });
+  expect(result).toBeInstanceOf(Error);
+  expect((result as Error).message).toBe(NATIVE_LOST_REMOVAL_PENDING);
+  expect(NATIVE_LOST_REMOVAL_PENDING).toContain("hack down --recover");
+  expect(calls).not.toContain("cleanup");
+});
 
 test("down --recover removes containers a lost VM brought back, so hack up can start", async () => {
   const { result, calls, notices } = await lostRemovalDown({

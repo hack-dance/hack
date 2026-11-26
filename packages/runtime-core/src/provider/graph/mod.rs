@@ -447,6 +447,11 @@ pub struct Snapshot {
     pub failed_after_started: Option<startup_failure::AfterStarted>,
     #[cfg(target_os = "macos")]
     pub interrupted_start_cleanup_incomplete: bool,
+    /// A lost-removal repair (HACK-2719) removed containers again but its storage
+    /// barrier has not confirmed: the stop is not yet durable, whatever the guest
+    /// lists now. Only that repair, run again, clears it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub lost_removal_pending: bool,
     pub observations: BTreeMap<String, Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub startup_observed_ports: Vec<u16>,
@@ -2474,6 +2479,7 @@ fn inspect_using(
     let storage_references = storage::references(&receipt, journal_incomplete, &observations);
     let pending_cleanup = cleanup_diagnostics::pending(&receipt, &observations, journal_incomplete);
     let failed_after_started = startup_failure::after_started(&root);
+    let lost_removal_pending = fs::symlink_metadata(root.join(LOST_REMOVAL_REPAIR)).is_ok();
     Ok(Snapshot {
         receipt,
         journal_incomplete,
@@ -2481,6 +2487,7 @@ fn inspect_using(
         failed_after_started,
         #[cfg(target_os = "macos")]
         interrupted_start_cleanup_incomplete,
+        lost_removal_pending,
         observations,
         startup_observed_ports: Vec::new(),
         guest_endpoints,
@@ -2754,6 +2761,9 @@ fn cleanup_owned_fenced(
 /// checks the boot, the pool owner and the ext4 `/storage` mount.
 const STORAGE_BARRIER: &str = "sync -f /storage\nprintf 'hack-storage-barrier-v1 synced\\n'\n";
 const STORAGE_BARRIER_DONE: &str = "hack-storage-barrier-v1 synced\n";
+/// The run-directory marker of a lost-removal repair whose barrier has not yet
+/// confirmed (`foreground::retained_data::repair_lost_removals`).
+pub(super) const LOST_REMOVAL_REPAIR: &str = "lost-removal-repair.json";
 /// The barrier's own bound. The cleanup holds the provider lease, so a flush that
 /// stalls must end well before another project's start gives up waiting for it.
 const STORAGE_BARRIER_TIMEOUT: Duration = Duration::from_secs(10);

@@ -66,7 +66,9 @@ import {
   nativeStoppedNotice,
   parseNativeHttpsSelection,
   prepareNativeProjectServices,
+  restartPreflightLossStage,
   reviewedNativeHttpsRoutes,
+  routeNativeLostVm,
   startedServiceSummary,
   startNativeProject,
   verifyHttpsRoutes,
@@ -7954,6 +7956,7 @@ test.each([
   { path: "image", stage: "preparing-restore" },
   { path: "unwind", stage: "requested" },
   { path: "unwind", stage: "ready" },
+  { path: "unwind", stage: "started" },
   { path: "record", stage: "preparing" },
 ] as const)("a start error from a lost provider fails with the stage message ($path, $stage)", async ({
   path,
@@ -8025,8 +8028,13 @@ test.each([
     const serve = opts.dependencies.serve!;
     opts.dependencies.serve = async (request) => {
       if (stage === "ready") {
-        // A started return (mapped), then the owner's request fails.
+        // A started return (mapped), then the owner's ready line, then
+        // the owner's request fails.
         await serve(request);
+      } else if (stage === "started") {
+        // Real-VM row 2: a started return (mapped) whose owner never
+        // reached its ready line; the runtime has not confirmed the start.
+        await request.onReady();
       }
       vmLost = true;
       original = lostRequest();
@@ -8035,7 +8043,9 @@ test.each([
   }
   const failure = await startNativeProject({
     ...opts,
-    ...(stage === "ready" ? { waitForReady: false } : {}),
+    ...(stage === "ready" || stage === "started"
+      ? { waitForReady: false }
+      : {}),
     ...(stage === "preparing-restore"
       ? {
           restore: {
@@ -8065,10 +8075,9 @@ test.each([
   const advice = lines.slice(0, -1).join("\n");
   expect(causeLine.startsWith("(cause: ")).toBe(true);
   if (path === "unwind") {
-    // The start's own unwind error (real-VM row 2's shape).
-    expect(causeLine).toContain(
-      "Native foreground exit cleanup is unconfirmed"
-    );
+    // The start's own unwind error (real-VM row 2's shape), whichever of its
+    // cleanup refusals the fixture reaches.
+    expect(causeLine.startsWith("(cause: Native foreground ")).toBe(true);
   } else if (original instanceof Error) {
     expect(causeLine).toContain(original.message.split("\n")[0]!);
   }
@@ -8085,7 +8094,7 @@ test.each([
     expect(advice).toContain(
       "Run hack down --recover to retire the interrupted start with the run's data kept, then hack up to start it again."
     );
-  } else if (stage === "requested") {
+  } else if (stage === "requested" || stage === "started") {
     expect(lost.loss).toEqual({ stage: "requested" });
     expect(advice).not.toContain("hack down");
     expect(advice).toContain("Keep this native home unchanged");
@@ -8143,6 +8152,135 @@ test.each([
     throw original;
   };
   await expect(startNativeProject(opts)).rejects.toBe(original);
+});
+
+/**
+ * HACK-2096 real-VM row 6 at c624229e: `hack restart` pulls images in its
+ * preflight, before it saves its intent or stops anything, so a provider killed
+ * there printed only the raw `process_identity_unavailable`. The preflight now
+ * runs through `routeNativeLostVm`, with the stage its restart is in.
+ */
+test("a restart preflight lost with its VM fails with the stage message", async () => {
+  const boot = "87654321-4321-4321-4321-cba987654321";
+  const running = {
+    phase: "running",
+    token: "c".repeat(32),
+    guest_boot_id: boot,
+    process: { pid: 2345 },
+  };
+  const original = new NativeRuntimeRequestError({
+    message:
+      "Native runtime request failed (process_identity_unavailable); inspect owned state before retrying.",
+    nativeCode: "process_identity_unavailable",
+  });
+  const route = (gone: boolean, record: unknown = running) =>
+    routeNativeLostVm({
+      home: "/unused",
+      loss: restartPreflightLossStage({
+        cleanedRetry: false,
+        preparedRetry: false,
+      }),
+      read: async () => record,
+      classify: (options) =>
+        classifyNativeLostProvider({
+          ...options,
+          read: async () => record,
+          gone: () => gone,
+        }),
+      run: async () => {
+        throw original;
+      },
+    }).then(
+      () => undefined,
+      (error: unknown) => error
+    );
+  const lost = await route(true);
+  expect(lost).toBeInstanceOf(NativeForegroundVmLostError);
+  expect((lost as NativeForegroundVmLostError).loss).toEqual({
+    stage: "ready",
+  });
+  expect((lost as Error).message).toContain(
+    "Run hack down --recover to retire this run with its data kept, then hack up to start it again."
+  );
+  expect((lost as Error).message).toContain(
+    "(cause: Native runtime request failed (process_identity_unavailable)"
+  );
+  // A live provider keeps the preflight's own error, code and all.
+  expect(await route(false)).toBe(original);
+  // No running boot when the preflight began: nothing to classify against.
+  expect(await route(true, { phase: "stopped", token: "c".repeat(32) })).toBe(
+    original
+  );
+});
+
+/**
+ * HACK-2096 real-VM row 7 at c624229e: after a fresh `up` lost its VM, the
+ * `hack up` its message names failed at once: `runtime up` refused
+ * `process_identity_unavailable` because the dead provider's record still said
+ * `running`, and a fresh start has no retained preflight to trigger the
+ * HACK-2579 recovery. `runtime up` now recovers an exited provider first, once.
+ */
+test.each([
+  { status: "process-exited", recovers: true },
+  { status: "running", recovers: false },
+] as const)("a fresh up recovers an exited provider before runtime up ($status)", async ({
+  status,
+  recovers,
+}) => {
+  const { opts, events } = await fixture(false);
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => void notices.push(line);
+  let ups = 0;
+  let recovered = false;
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    const [area, command] = request.args;
+    if (area === "runtime" && command === "up") {
+      ups++;
+      events.push("runtime up");
+      if (!recovered) {
+        throw new NativeRuntimeRequestError({
+          message:
+            "Native runtime request failed (process_identity_unavailable); inspect owned state before retrying.",
+          nativeCode: "process_identity_unavailable",
+        });
+      }
+      return { phase: "running", process_alive: true };
+    }
+    if (area === "runtime" && command === "status") {
+      events.push(`runtime status ${status}`);
+      return { phase: status, process_alive: status === "running" };
+    }
+    if (area === "runtime" && command === "recover") {
+      events.push("runtime recover");
+      recovered = true;
+      return { phase: "recovered-unclean" };
+    }
+    return await invoke(request);
+  };
+  const started = startNativeProject({ ...opts, watchPool: false });
+  if (recovers) {
+    expect(await started).toBe(0);
+    expect(ups).toBe(2);
+    expect(events).toContain("runtime recover");
+    expect(notices).toContain(NATIVE_EXITED_RUNTIME_NOTICE);
+  } else {
+    await expect(started).rejects.toBeInstanceOf(NativeRuntimeRequestError);
+    expect(ups).toBe(1);
+    expect(events).not.toContain("runtime recover");
+  }
+});
+
+test("a restart preflight's loss stage follows the restart it retries", () => {
+  expect(
+    restartPreflightLossStage({ cleanedRetry: false, preparedRetry: false })
+  ).toEqual({ stage: "ready" });
+  expect(
+    restartPreflightLossStage({ cleanedRetry: true, preparedRetry: false })
+  ).toEqual({ stage: "preparing", recorded: true });
+  expect(
+    restartPreflightLossStage({ cleanedRetry: false, preparedRetry: true })
+  ).toEqual({ stage: "requested" });
 });
 
 /**

@@ -961,6 +961,15 @@ function lostContainerRemovals(snapshot: unknown): boolean {
   );
 }
 
+/**
+ * The refusal when the brought-back containers cannot be removed (real-VM row
+ * 8): the run's cleanup must go through its foreground owner, which is gone,
+ * and the runtime offers no owner-less removal that keeps data yet. It names
+ * no command that would fail, and none that would discard the data.
+ */
+export const NATIVE_LOST_REMOVAL_UNREPAIRABLE =
+  "This run is stopped with its data kept and nothing of it is running, but stopped containers that an earlier hack down had removed are listed again: the VM was lost seconds after that down, before the removal reached its disk. This run's cleanup goes through its foreground owner, which is gone, so no hack command can remove them while keeping the data yet, and hack up refuses the run until they are gone. Keep this native home unchanged for inspection; hack ps --json shows the stopped containers.";
+
 /** Shown when `hack down --recover` removed containers a lost VM brought back. */
 export const NATIVE_LOST_REMOVAL_NOTE =
   "Stopped containers of this run that a lost VM had brought back were removed again; the run's data is kept.";
@@ -1258,12 +1267,25 @@ async function nativeProjectDownOnce(opts: {
       verify(snapshot, run, true);
       return;
     }
-    await invoke({
-      runtime: opts.runtime,
-      cwd: opts.scope.projectRoot,
-      args: ["graph", "cleanup", "--run-id", run.run, "--json"],
-      timeoutMs: 590_000,
-    });
+    try {
+      await invoke({
+        runtime: opts.runtime,
+        cwd: opts.scope.projectRoot,
+        args: ["graph", "cleanup", "--run-id", run.run, "--json"],
+        timeoutMs: 590_000,
+      });
+    } catch (error) {
+      // Real-VM row 8 at c624229e: a relay-enrolled receipt's cleanup goes
+      // through its foreground owner, which is gone, and the runtime has no
+      // owner-less removal that keeps data yet. Say exactly that.
+      if (
+        error instanceof NativeRuntimeRequestError &&
+        error.nativeCode === "graph_owner_recovery"
+      ) {
+        throw new ClosedCliError(NATIVE_LOST_REMOVAL_UNREPAIRABLE);
+      }
+      throw error;
+    }
     verify(await inspect(), run, true);
     (opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)))(
       NATIVE_LOST_REMOVAL_NOTE

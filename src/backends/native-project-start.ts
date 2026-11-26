@@ -77,6 +77,7 @@ import {
   type NativeHttpsLeaseIdentity,
   recoverNativeHttpsLease,
 } from "./native-https-owner.ts";
+import { readNativePoolRecord } from "./native-https-pool-boot.ts";
 import { reportNativeIgnoredSettingNotices } from "./native-ignored-setting-notices.ts";
 import {
   batchImageFailure,
@@ -2441,6 +2442,51 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
   );
   return await opts.select();
 }
+/**
+ * `runtime up` that first recovers a pool whose provider exited while its
+ * record still says `running` (HACK-2579), once. Real-VM row 7 at c624229e:
+ * a fresh `hack up` (no retained run, so no retained preflight to trigger the
+ * recovery in `selectNativeStartupRecoveringStoppedPool`) after a lost VM got
+ * `process_identity_unavailable` from `runtime up` at once, so the `hack up`
+ * that the lost-VM message names failed. `recoverExitedNativeRuntime` acts only
+ * when `runtime status` reports `process-exited`, and `runtime recover` proves
+ * the recorded provider gone by its identity under the provider lease; any
+ * other refusal is left as it is.
+ */
+function runtimeUpRecoveringExitedProvider(opts: {
+  readonly invoke: typeof invokeNativeRuntime;
+  readonly warn: (line: string) => void;
+  readonly signal: AbortSignal;
+}): typeof invokeNativeRuntime {
+  return async (request) => {
+    try {
+      return await opts.invoke(request);
+    } catch (error) {
+      if (
+        !(
+          error instanceof NativeRuntimeRequestError &&
+          error.nativeCode === "process_identity_unavailable" &&
+          !opts.signal.aborted &&
+          (await recoverExitedNativeRuntime({
+            runtime: request.runtime,
+            cwd: request.cwd,
+            invoke: opts.invoke,
+            signal: opts.signal,
+            notice: (line) => {
+              if (!reportNativeImageNotice(line)) {
+                opts.warn(line);
+              }
+            },
+          }).catch(() => false))
+        )
+      ) {
+        throw error;
+      }
+      requireActiveStartup(opts.signal);
+      return await opts.invoke(request);
+    }
+  };
+}
 const NATIVE_FOREGROUND_OWNER_EXITED = "graph_foreground_owner_exited";
 /** Retained-preflight refusals a pool with an exited provider can give (HACK-2579). */
 const EXITED_PROVIDER_REFUSALS = new Set([
@@ -3418,7 +3464,9 @@ async function startNativeProjectAttempt(
      * frontend's readiness work (HTTPS, `up.after`, the caller's `onReady`). A
      * run lost from here on is retired across boots by `hack down --recover`
      * (HACK-2096). A fresh `up` that is ready but not yet mapped is still
-     * `requested`: `down` would find no run.
+     * `requested`: `down` would find no run. So is a started return before
+     * its owner's ready line: it is mapped, but the runtime has not confirmed
+     * the start, and a loss there is HACK-2714's unadmitted owner.
      */
     readonly onReady?: () => void;
     /**
@@ -3809,7 +3857,11 @@ async function startNativeProjectAttempt(
           args: ["runtime", "status", "--json"],
           signal: controller.signal,
         })
-      : await deps.invoke({
+      : await runtimeUpRecoveringExitedProvider({
+          invoke: deps.invoke,
+          warn: deps.warn,
+          signal: controller.signal,
+        })({
           runtime: opts.runtime,
           cwd: opts.scope.projectRoot,
           args: [
@@ -4349,6 +4401,9 @@ async function startNativeProjectAttempt(
           // checked and the run is reported ready.
           const allReady = async () => {
             if (mapped) {
+              // The owner's ready line of a started return: confirmed and
+              // mapped, so a loss from here is retired by `down --recover`.
+              graph.onReady?.();
               try {
                 await acquireHttps(
                   mapped.readyMapping,
@@ -4485,8 +4540,14 @@ async function startNativeProjectAttempt(
                 void startupStatus.stop();
                 const { readyMapping, persistedMapping } =
                   await ensureMapping();
-                // Ready and mapped: `down --recover` now finds this run.
-                graph.onReady?.();
+                // Ready and mapped: `down --recover` now finds this run. A
+                // started return is mapped here but not yet confirmed by the
+                // runtime (real VM row 2: a run lost then is
+                // `graph_foreground_owner_exited_unadmitted`, HACK-2714); it is
+                // ready only at the owner's ready line (`allReady`).
+                if (!returnAtStarted) {
+                  graph.onReady?.();
+                }
                 // The HTTPS owner admits a lease only under the provider lease, for a
                 // ready graph: a started return takes it at the owner's ready line.
                 if (!returnAtStarted) {
@@ -4903,9 +4964,13 @@ export async function startNativeProject(
         onProgress: (event) => {
           // A started return has released its launcher and saved its mapping:
           // like a ready one, it has nothing left to finish on its own.
+          // Its loss stage stays `requested` until the owner's ready line
+          // (`graph.onReady` from `allReady`): see the serve `onReady` handler.
           if (event.phase === "ready" || event.phase === "started") {
             serving = true;
-            loss = { stage: "ready" };
+            if (event.phase === "ready") {
+              loss = { stage: "ready" };
+            }
           } else if (event.phase === "stopping" || event.phase === "stopped") {
             serving = false;
           }
@@ -5015,4 +5080,71 @@ async function lostVmFailure(opts: {
         cause: opts.error,
       })
     : undefined;
+}
+
+/**
+ * The loss stage of a `hack restart` lost in its preflight (HACK-2096 real-VM
+ * row 6). An ordinary restart has saved no intent and stopped nothing yet: its
+ * old run is the live run, retired by `hack down --recover` like a ready one,
+ * and `hack up` then starts it. A retry of a `cleaned` restart has its old run
+ * stopped with its intent pending, which `down --recover` retires, as for a
+ * replacement lost while preparing. A retry of a `prepared` restart (the old
+ * run's stop unconfirmed) has no retirement that the down performs, so no
+ * command is named.
+ */
+export function restartPreflightLossStage(opts: {
+  readonly cleanedRetry: boolean;
+  readonly preparedRetry: boolean;
+}): NativeForegroundLossStage {
+  if (opts.cleanedRetry) {
+    return { stage: "preparing", recorded: true };
+  }
+  return opts.preparedRetry ? { stage: "requested" } : { stage: "ready" };
+}
+
+/**
+ * Run a foreground step outside `startNativeProject` that a lost VM can fail,
+ * and route its error through the same classification (HACK-2096 real-VM row
+ * 6: `hack restart`'s preflight pulls images before it saves its intent or
+ * stops anything, and a provider killed there printed the raw
+ * `process_identity_unavailable`). The boot is the pool record's running boot
+ * when the step begins; without one, or in a detached owner, or after a stop
+ * request, the error is left as it is. `loss` is what the step's caller knows.
+ */
+export async function routeNativeLostVm<T>(opts: {
+  readonly home: string;
+  readonly loss: NativeForegroundLossStage;
+  readonly signal?: AbortSignal;
+  readonly run: () => Promise<T>;
+  /** Test seams: the pool record read and the classification. */
+  readonly read?: (home: string) => Promise<unknown>;
+  readonly classify?: typeof classifyNativeLostProvider;
+}): Promise<T> {
+  const record = isNativeDetachedOwnerProcess()
+    ? undefined
+    : await (opts.read ?? readNativePoolRecord)(opts.home).catch(
+        () => undefined
+      );
+  const bootId =
+    isRecord(record) &&
+    record.phase === "running" &&
+    typeof record.guest_boot_id === "string" &&
+    record.guest_boot_id !== ""
+      ? record.guest_boot_id
+      : undefined;
+  try {
+    return await opts.run();
+  } catch (error) {
+    const lost =
+      bootId === undefined || opts.signal?.aborted
+        ? undefined
+        : await lostVmFailure({
+            error,
+            home: opts.home,
+            bootId,
+            loss: opts.loss,
+            classify: opts.classify,
+          });
+    throw lost ?? error;
+  }
 }

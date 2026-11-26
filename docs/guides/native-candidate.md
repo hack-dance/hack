@@ -2664,9 +2664,13 @@ code 1, and what to run next, which depends on how far the start got:
 - After its services were requested and before it was ready and mapped: no
   supported retirement yet (HACK-2714: `hack down --recover` and `hack up` refuse
   it), so the message names neither command and says to keep the native home
-  for inspection.
+  for inspection. A plain `hack up` that returned at "Project started" is in
+  this stage until its services report ready: the runtime has not confirmed
+  that start yet.
 
-The same sequence follows a lost `hack restart`: if its replacement was lost
+A `hack restart` lost while it checks and pulls the new images, before it
+stops anything, gets the ready-stage message: its old run is still the live
+run. The same sequence follows a lost `hack restart`: if its replacement was lost
 before the restart finished, its old run was already stopped, so `hack down
 --recover` also retires the pending restart (it says so in one line) and `hack
 up` resumes the retained data; a `hack restart` then would refuse, because
@@ -2691,9 +2695,15 @@ carries that code, because the runtime also reports it for failures on a
 healthy VM. A VM lost
 seconds after a `hack down` can also bring that down's removed containers back,
 stopped, on the next boot (the guest engine's removal had not reached its
-disk). `hack down --recover` removes them again, says so in one line, and then
+disk). Where the runtime can remove them without the run's foreground owner,
+`hack down --recover` removes them again, says so in one line, and then
 confirms the run stopped with its data kept; a plain `hack down` still refuses
-that state, and nothing is removed while any of them runs.
+that state, and nothing is removed while any of them runs. A run whose cleanup
+goes through its foreground owner (a relay-enrolled run) cannot yet: the owner
+is gone, and the runtime has no owner-less removal that keeps data. `hack down
+--recover` then says so, names no command, and leaves the data and the home as
+they are for inspection; `hack up` refuses that run until the containers are
+gone. This is a runtime gap, not fixed here.
 
 The start exits within about a
 second once it is ready, or about 11 seconds later while it is still starting or

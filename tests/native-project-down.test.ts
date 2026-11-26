@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   NATIVE_LOST_REMOVAL_NOTE,
+  NATIVE_LOST_REMOVAL_UNREPAIRABLE,
   NATIVE_OWNER_EXIT_NOTICE,
   NATIVE_RECOVERED_RESTART_NOTE,
   NATIVE_RESTART_INTENT_UNREADABLE_NOTE,
@@ -3224,6 +3225,8 @@ async function lostRemovalDown(opts: {
   readonly webState: "exited" | "running";
   /** Whether the runtime's cleanup actually removes the container. */
   readonly cleanupClears?: boolean;
+  /** The runtime refuses an owner-less cleanup (real-VM row 8 at c624229e). */
+  readonly ownerRequired?: boolean;
 }) {
   const fx = await fixture();
   const calls: string[] = [];
@@ -3252,6 +3255,14 @@ async function lostRemovalDown(opts: {
           run.run,
           "--json",
         ]);
+        if (opts.ownerRequired) {
+          // A relay-enrolled receipt: cleanup goes through the owner, gone.
+          throw new NativeRuntimeRequestError({
+            message:
+              "Native runtime request failed (graph_owner_recovery); inspect owned state before retrying.",
+            nativeCode: "graph_owner_recovery",
+          });
+        }
         cleaned = true;
         return {};
       }
@@ -3306,6 +3317,25 @@ test("down --recover prints no removal note when the re-inspection still finds t
   expect(String(result)).toContain("cleanup is unconfirmed");
   expect(calls).toContain("cleanup");
   expect(notices).not.toContain(NATIVE_LOST_REMOVAL_NOTE);
+});
+
+test("down --recover says plainly when the runtime cannot remove brought-back containers without the owner", async () => {
+  // Real-VM row 8 at c624229e: the receipt is relay-enrolled, so `graph
+  // cleanup` goes through the run's foreground owner, which is gone, and the
+  // runtime refuses (`graph_owner_recovery`). The refusal names no command
+  // that fails and none that discards the data.
+  const { result, calls, notices } = await lostRemovalDown({
+    recover: true,
+    webState: "exited",
+    ownerRequired: true,
+  });
+  expect(result).toBeInstanceOf(Error);
+  expect((result as Error).message).toBe(NATIVE_LOST_REMOVAL_UNREPAIRABLE);
+  expect(calls).toContain("cleanup");
+  expect(notices).not.toContain(NATIVE_LOST_REMOVAL_NOTE);
+  expect(NATIVE_LOST_REMOVAL_UNREPAIRABLE).toContain("data kept");
+  expect(NATIVE_LOST_REMOVAL_UNREPAIRABLE).not.toContain("--remove-data");
+  expect(NATIVE_LOST_REMOVAL_UNREPAIRABLE).not.toContain("run hack up");
 });
 
 test("retiring a cleaned restart is a no-op without one", async () => {

@@ -844,8 +844,21 @@ Bounds: one start, one loss, at most two user commands. Not modeled: the Rust
 runtime's own recovery proofs (a cross-boot recovery that refuses for another
 reason, as HACK-2711 found for a project without a published port, is outside
 this model), why a guest engine's removal can be lost (the model only allows
-it), `up.after` commands that outlive the exit, and real VM timing. The
+it), `up.after` commands that outlive the exit, a `hack restart` lost in its
+preflight (before it saves its intent; the old run is still the live run, so
+the code gives it the ready-stage message), and real VM timing. The
 real-VM check is the gate for the runtime half.
+
+Known runtime gap (real VM at `c624229e`, row 8): `RepairLeftover = TRUE`
+holds only where the runtime can remove brought-back containers without the
+run's foreground owner. A relay-enrolled receipt's cleanup goes through that
+owner, and with it gone the runtime refuses (`graph_owner_recovery`); there is
+no owner-less removal that keeps data yet. For such a run the model's
+`keep-leftover` control is what happens: the named `hack down --recover`
+refuses. The code says so (`NATIVE_LOST_REMOVAL_UNREPAIRABLE`) instead of
+passing the raw refusal on; closing the gap needs runtime work (an owner-less
+container removal under the dead-owner guard, or a removal made durable before
+the receipt records it).
 
 ## Native pool stop under a live run
 

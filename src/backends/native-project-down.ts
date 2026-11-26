@@ -919,6 +919,52 @@ class ExitedPoolRecovered extends Error {
   }
 }
 
+/**
+ * HACK-2096 (real VM, row 8): a stopped retained run whose receipt records
+ * every container removed, while the engine still shows some of them, stopped
+ * (`exited`) and none running. Seen after the provider was killed seconds
+ * after a `hack down` removed the run's containers: the guest engine's removal
+ * had not reached the storage disk, so the next boot listed the containers
+ * again, as exited (137). Nothing is running, but `verify` needs every
+ * container absent, so `hack down --recover` refused ("cleanup is
+ * unconfirmed") and `hack up` refused the mapping. Only this exact shape is
+ * repaired, by the runtime's own `graph cleanup` of the receipt's resources
+ * (exact ids, volumes kept); anything running, uncertain or unrecorded is not.
+ */
+function lostContainerRemovals(snapshot: unknown): boolean {
+  if (
+    !(
+      stoppedRetained(snapshot) &&
+      isRecord(snapshot) &&
+      snapshot.journal_incomplete === false &&
+      isRecord(snapshot.receipt) &&
+      isRecord(snapshot.receipt.resources) &&
+      isRecord(snapshot.observations)
+    )
+  ) {
+    return false;
+  }
+  const observations = snapshot.observations;
+  const containers = Object.values(snapshot.receipt.resources).filter(
+    (resource) => isRecord(resource) && resource.kind === "container"
+  );
+  const states = containers.map((resource) => {
+    if (!isRecord(resource) || resource.phase !== "absent") {
+      return "unrecorded";
+    }
+    const observation = observations[`container:${String(resource.key)}`];
+    return isRecord(observation) ? observation.state : undefined;
+  });
+  return (
+    states.includes("exited") &&
+    states.every((state) => state === "absent" || state === "exited")
+  );
+}
+
+/** Shown when `hack down --recover` removed containers a lost VM brought back. */
+export const NATIVE_LOST_REMOVAL_NOTE =
+  "Stopped containers of this run that a lost VM had brought back were removed again; the run's data is kept.";
+
 /** Whether an inspected graph is stopped with its data retained. */
 function stoppedRetained(snapshot: unknown): boolean {
   return (
@@ -1204,6 +1250,22 @@ async function nativeProjectDownOnce(opts: {
       hooks.run({ phase: "after", run, graphStopped: true })
     );
   };
+  // `hack down --recover` only: see `lostContainerRemovals`.
+  const repairLostRemovals = async (snapshot: unknown): Promise<unknown> => {
+    if (!(opts.recover === true && lostContainerRemovals(snapshot))) {
+      return snapshot;
+    }
+    await invoke({
+      runtime: opts.runtime,
+      cwd: opts.scope.projectRoot,
+      args: ["graph", "cleanup", "--run-id", run.run, "--json"],
+      timeoutMs: 590_000,
+    });
+    (opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+      NATIVE_LOST_REMOVAL_NOTE
+    );
+    return await inspect();
+  };
   const recovered = await recoverNativeInterruptedStartupCleanup({
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
@@ -1212,7 +1274,7 @@ async function nativeProjectDownOnce(opts: {
     invoke,
   });
   if (recovered !== null) {
-    verify(recovered, run, true);
+    verify(await repairLostRemovals(recovered), run, true);
     await opts.retireHostProcesses?.(run);
     await wait();
     await owedAfterStop();
@@ -1243,6 +1305,9 @@ async function nativeProjectDownOnce(opts: {
   if (stoppedRetained(initial)) {
     // Recovery or a foreground stop already stopped compute. Guest cleanup and
     // completed hooks must not replay; only journaled owed phases run once.
+    // The one exception is the runtime's own removal of containers the receipt
+    // already records removed but a lost VM brought back; no hook runs for it.
+    initial = await repairLostRemovals(initial);
     verify(initial, run, true);
     await opts.retireHostProcesses?.(run);
     await wait();

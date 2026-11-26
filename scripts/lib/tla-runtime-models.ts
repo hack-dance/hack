@@ -3294,20 +3294,46 @@ const contracts: readonly ModelContract[] = [
   {
     // HACK-2096: after a foreground up or restart loses its VM, every command
     // its message names is accepted in order, and it withholds a command only
-    // where none works. The negative control is PR #1253 at cd0ebff10 (restart
-    // named by intent everywhere, lock left held, intent kept); keep-intent,
-    // leak-lock and intent-message each restore one old rule, and
-    // withhold-preparing is a6c4cba (no command before the graph was ready).
+    // where none works, whether the pool watch or the start's own error ends
+    // the start. The negative control is PR #1253 at cd0ebff10 (restart named
+    // by intent everywhere, lock left held, intent kept, generic error text,
+    // brought-back containers unrepaired); keep-intent, leak-lock,
+    // intent-message, generic-error and keep-leftover each restore one old
+    // rule, and withhold-preparing is a6c4cba (no command before ready).
     // restart-recovers is the reachability witness of a recovered restart.
     name: "foreground-loss-recovery",
     module: "ForegroundLossRecovery",
-    states: 41,
+    states: 88,
     invariant: "NoRefusedAdvice",
-    fields: ['outcome = "refused"', 'lostAt = "Requested"'],
-    alternativeWitnesses: [
-      ['outcome = "refused"', 'lostAt = "Preparing"', 'kind = "restart"'],
-    ],
+    fields: ['outcome = "refused"', 'lostAt = "Preparing"'],
+    alternativeWitnesses: [['outcome = "refused"', 'lostAt = "Requested"']],
     additionalControls: [
+      {
+        // a8705a39 on a real VM: the start's error wins the race with its
+        // own text, and `hack up` (image preparation's advice) refuses.
+        name: "generic-error",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          'endedBy = "error"',
+          'msg = "genericUp"',
+          'lostAt = "Preparing"',
+        ],
+      },
+      {
+        // Real-VM row 8: containers a lost VM brought back are not removed,
+        // so `hack down --recover` cannot confirm the cleanup.
+        name: "keep-leftover",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          "leftover = TRUE",
+          'msg = "downUp"',
+          'lostAt = "Preparing"',
+        ],
+      },
       {
         name: "keep-intent",
         negative: true,

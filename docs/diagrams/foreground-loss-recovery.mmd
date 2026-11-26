@@ -7,10 +7,12 @@ stateDiagram-v2
   Preparing --> Requested : Request
   Requested --> GraphReady : GraphReady [mapped]
   GraphReady --> Serving : Serve / retire intent, lock
-  Preparing --> Lost : Lose / release lock
-  Requested --> Lost : Lose
-  GraphReady --> Lost : Lose / release lock
-  Serving --> Lost : Lose
+  Preparing --> Dead : Die
+  Requested --> Dead : Die
+  GraphReady --> Dead : Die
+  Serving --> Dead : Die
+  Dead --> Lost : Watch / release lock
+  Dead --> Lost : StartFails / same message
   state advice <<choice>>
   Lost --> advice
   advice --> Inspect : [lostAt = Requested]
@@ -31,10 +33,20 @@ stateDiagram-v2
     still holds its cleaned
     intent and its lock.
   end note
+  note right of Dead
+    The watch and the start's
+    own error race; both print
+    the stage message.
+  end note
   note left of Inspect
     No command can retire it
     yet (HACK-2714): none named.
     INV NoNeedlessWithholding
+  end note
+  note right of Down
+    Removes containers a lost
+    VM brought back, then
+    confirms the stop.
   end note
   note right of Recovered
     INV NoRefusedAdvice
@@ -49,7 +61,7 @@ stateDiagram-v2
   classDef idle stroke-width:1.6px
   class Preparing,Requested,GraphReady wait
   class Serving live
-  class Lost fail
+  class Dead,Lost fail
   class Down,Up wait
   class Recovered ok
   class Inspect idle

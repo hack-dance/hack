@@ -145,25 +145,14 @@ export function watchNativeStartPool(opts: {
     if (stopped || grace) {
       return;
     }
-    let provider: number | undefined;
-    if (
-      isRecord(record) &&
-      record.guest_boot_id === opts.bootId &&
-      typeof record.token === "string"
-    ) {
-      owner ??= record.token;
-      if (record.phase === "running") {
-        provider = providerPid(record);
-      }
-    }
-    const providerGone = provider !== undefined && gone(provider);
-    if (
-      providerGone ||
-      nativeHttpsPoolBootEnded(record, { bootId: opts.bootId, owner })
-    ) {
-      const end: NativeStartPoolEnd = providerGone
-        ? { bootId: opts.bootId, providerPid: provider }
-        : { bootId: opts.bootId };
+    const reading = nativePoolBootEnd(record, {
+      bootId: opts.bootId,
+      owner,
+      gone,
+    });
+    owner = reading.owner;
+    const end = reading.end;
+    if (end) {
       const graceMs =
         typeof opts.graceMs === "function"
           ? opts.graceMs()
@@ -187,6 +176,123 @@ export function watchNativeStartPool(opts: {
     clearInterval(timer);
     clearTimeout(grace);
   };
+}
+
+/**
+ * One reading of the pool record against a watched boot: the boot's owner
+ * token once a record names it, and the end it proves, if any (the provider pid
+ * the running record names is gone, or the boot was stopped or replaced). The
+ * pool watch and {@link classifyNativeLostProvider} share it, so a lost VM is
+ * recognized the same way whichever notices first.
+ */
+export function nativePoolBootEnd(
+  record: unknown,
+  opts: {
+    readonly bootId: string;
+    readonly owner?: string;
+    readonly gone: (pid: number) => boolean;
+  }
+): { readonly owner?: string; readonly end?: NativeStartPoolEnd } {
+  let owner = opts.owner;
+  let provider: number | undefined;
+  if (
+    isRecord(record) &&
+    record.guest_boot_id === opts.bootId &&
+    typeof record.token === "string"
+  ) {
+    owner ??= record.token;
+    if (record.phase === "running") {
+      provider = providerPid(record);
+    }
+  }
+  if (provider !== undefined && opts.gone(provider)) {
+    return { owner, end: { bootId: opts.bootId, providerPid: provider } };
+  }
+  if (nativeHttpsPoolBootEnded(record, { bootId: opts.bootId, owner })) {
+    return { owner, end: { bootId: opts.bootId } };
+  }
+  return { owner };
+}
+
+/**
+ * Native codes a request reports when the provider under it is gone: the
+ * recorded provider process cannot be identified (`process_identity_unavailable`)
+ * or the pool's process exited (`pool_process_exited`).
+ */
+const LOST_PROVIDER_CODES = new Set([
+  "process_identity_unavailable",
+  "pool_process_exited",
+]);
+const LOST_PROVIDER_TEXT =
+  /\((process_identity_unavailable|pool_process_exited)\)/;
+
+/**
+ * Whether a start error carries a lost-provider code anywhere a native client
+ * puts one: a request error's code, an image batch failure's code, the cause
+ * chain, or the closed diagnostic text a cleanup error quotes. Bounded depth.
+ */
+export function nativeLostProviderCode(error: unknown, depth = 0): boolean {
+  if (!isRecord(error) || depth > 4) {
+    return false;
+  }
+  if (
+    typeof error.nativeCode === "string" &&
+    LOST_PROVIDER_CODES.has(error.nativeCode)
+  ) {
+    return true;
+  }
+  if (
+    Array.isArray(error.failures) &&
+    error.failures.some(
+      (failure) =>
+        isRecord(failure) &&
+        typeof failure.code === "string" &&
+        LOST_PROVIDER_CODES.has(failure.code)
+    )
+  ) {
+    return true;
+  }
+  if (
+    typeof error.message === "string" &&
+    LOST_PROVIDER_TEXT.test(error.message)
+  ) {
+    return true;
+  }
+  return nativeLostProviderCode(error.cause, depth + 1);
+}
+
+/**
+ * HACK-2096 (real-VM review): when a foreground start fails, did it fail
+ * because the VM under it was lost? On a real VM the start's own error path
+ * (a request, image preparation, or its foreground unwind) often reports
+ * within a second of the provider's death, before the pool watch's check and
+ * grace. This is the one classification every such path goes through, so the
+ * user gets the same stage message whichever notices first. The pool record is
+ * the evidence (the same reading as the watch: the watched boot's provider pid
+ * is gone, or the boot ended); a lost-provider code in the error also counts,
+ * for a record that cannot be read or does not yet show the loss. Undefined
+ * when neither proves a loss.
+ */
+export async function classifyNativeLostProvider(opts: {
+  readonly error: unknown;
+  readonly home: string;
+  readonly bootId: string;
+  readonly read?: (home: string) => Promise<unknown>;
+  readonly gone?: (pid: number) => boolean;
+}): Promise<NativeStartPoolEnd | undefined> {
+  const record = await (opts.read ?? readNativePoolRecord)(opts.home).catch(
+    () => undefined
+  );
+  const { end } = nativePoolBootEnd(record, {
+    bootId: opts.bootId,
+    gone: opts.gone ?? processGone,
+  });
+  if (end) {
+    return end;
+  }
+  return nativeLostProviderCode(opts.error)
+    ? { bootId: opts.bootId }
+    : undefined;
 }
 
 /** The provider pid a running pool record names, when it is a plausible pid. */

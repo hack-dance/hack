@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  NATIVE_LOST_REMOVAL_NOTE,
   NATIVE_OWNER_EXIT_NOTICE,
   NATIVE_RECOVERED_RESTART_NOTE,
   NATIVE_RESTART_INTENT_UNREADABLE_NOTE,
@@ -3188,6 +3189,106 @@ test("an unreadable restart intent does not fail a down --recover that stopped t
   expect(notices).toContain(NATIVE_RESTART_INTENT_UNREADABLE_NOTE);
   expect(notices).not.toContain(NATIVE_RECOVERED_RESTART_NOTE);
   expect(intent).toBe("{}\n");
+});
+
+/**
+ * HACK-2096 real-VM row 8: the provider was killed seconds after a `hack down`
+ * removed the run's containers, during the next `hack up`'s image pull. The
+ * guest engine's removal had not reached its disk, so the next boot listed the
+ * web container again, `exited` (137), while the receipt records it removed.
+ * `hack down --recover` refused ("cleanup is unconfirmed") and `hack up`
+ * refused the mapping: a dead end. `down --recover` now has the runtime remove
+ * exactly those containers again (`graph cleanup`, volumes kept), confirms them
+ * absent, and `hack up` can start the run.
+ */
+function lostRemovalSnapshot(webState: string) {
+  const base = snapshot(true);
+  return {
+    ...base,
+    receipt: {
+      ...base.receipt,
+      resources: {
+        "container:web": {
+          ...base.receipt.resources["container:web"],
+          phase: "absent",
+        },
+      },
+    },
+    observations: {
+      "container:web": { state: webState, health: null },
+    },
+  };
+}
+async function lostRemovalDown(opts: {
+  readonly recover: boolean;
+  readonly webState: "exited" | "running";
+}) {
+  const fx = await fixture();
+  const calls: string[] = [];
+  const notices: string[] = [];
+  let cleaned = false;
+  const down = nativeProjectDown({
+    ...fx,
+    recover: opts.recover,
+    notice: (line) => {
+      notices.push(line);
+    },
+    before: async () => {
+      throw new Error("replayed before");
+    },
+    after: async () => {
+      throw new Error("replayed after");
+    },
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "cleanup") {
+        expect(request.args).toEqual([
+          "graph",
+          "cleanup",
+          "--run-id",
+          run.run,
+          "--json",
+        ]);
+        cleaned = true;
+        return {};
+      }
+      if (command === "foreground-owner") {
+        return ownerSelection("exited");
+      }
+      if (command === "managed-hostname-authority") {
+        return { authority: { present: false } };
+      }
+      expect(command).toBe("inspect");
+      return lostRemovalSnapshot(cleaned ? "absent" : opts.webState);
+    },
+  });
+  const result = await down.then(
+    (value) => value,
+    (error: unknown) => error
+  );
+  return { result, calls, notices };
+}
+
+test("down --recover removes containers a lost VM brought back, so hack up can start", async () => {
+  const { result, calls, notices } = await lostRemovalDown({
+    recover: true,
+    webState: "exited",
+  });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(calls).toEqual(["inspect", "foreground-owner", "cleanup", "inspect"]);
+  expect(notices).toContain(NATIVE_LOST_REMOVAL_NOTE);
+});
+
+test.each([
+  { name: "a plain down", recover: false, webState: "exited" },
+  { name: "a container still running", recover: true, webState: "running" },
+] as const)("down never replays cleanup of a stopped run for $name", async (opts) => {
+  const { result, calls, notices } = await lostRemovalDown(opts);
+  expect(result).toBeInstanceOf(Error);
+  expect(String(result)).toContain("cleanup is unconfirmed");
+  expect(calls).not.toContain("cleanup");
+  expect(notices).not.toContain(NATIVE_LOST_REMOVAL_NOTE);
 });
 
 test("retiring a cleaned restart is a no-op without one", async () => {

@@ -2677,7 +2677,19 @@ restart, recovery or data removal), the down keeps the pending restart and names
 the lock in one line; if the pending restart cannot be read, the down still
 stops the run and says the restart was not retired. An `up.after` command still
 running when the VM is lost is not waited for: it can outlive the exit until it
-finishes. The start exits within about a
+finishes.
+
+The start's own error often comes first: a runtime request, image preparation
+or the start's unwind fails within about a second of the provider's death
+(`process_identity_unavailable`). That error ends the start with the same
+message, chosen by how far the start got, not by which error fired. A VM lost
+seconds after a `hack down` can also bring that down's removed containers back,
+stopped, on the next boot (the guest engine's removal had not reached its
+disk). `hack down --recover` removes them again, says so in one line, and then
+confirms the run stopped with its data kept; a plain `hack down` still refuses
+that state, and nothing is removed while any of them runs.
+
+The start exits within about a
 second once it is ready, or about 11 seconds later while it is still starting or
 stopping; earlier versions waited on the lost VM and never exited. Once the
 run's graph has stopped, the pool counts as idle and may stop under the start

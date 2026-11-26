@@ -2,8 +2,8 @@
 \* HACK-2096: what a foreground `hack up` or `hack restart` tells the user after
 \* its provider VM is lost, and whether following that advice works.
 \*
-\* The pool watch starts right after `runtime up`, so the start is lost at one
-\* of four points:
+\* The pool watch starts right after `runtime up`, so the VM dies under the
+\* start at one of four points:
 \*   Preparing: no service of this run requested yet (resolve, review, image
 \*     builds and pulls, restore selection);
 \*   Requested: services requested, the graph not yet both reported ready by
@@ -12,11 +12,18 @@
 \*     (HTTPS, `up.after`, and for a restart the retirement of its pending
 \*     intent and its operation lock) still running;
 \*   Serving.
-\* The user then runs exactly the commands the message names, in order.
+\* Two things then race to end the start: the pool watch (it prints the
+\* message, releases the restart lock and exits 1), or the start's own error
+\* path (a request, image preparation or the foreground unwind fails first;
+\* on a real VM within 0.13 to 1.6 s). The user then runs exactly the commands
+\* the printed message names, in order.
 \*
 \* `recorded` says whether a run record exists for `hack down --recover` to
 \* find before services are requested: a resumed retained run, or a
 \* restart's old run. A fresh `up` has none until its mapping is saved.
+\* `leftover`: a VM lost seconds after a `hack down` removed the recorded
+\* run's containers may bring them back on the next boot, stopped, because the
+\* guest engine's removal had not reached its disk (real-VM row 8).
 \*
 \* Constants select the code:
 \*   MessageRule = "stage": this fix. Preparing names `hack down --recover`,
@@ -29,17 +36,23 @@
 \*     isolated where it differs).
 \*   "old": PR #1253 at cd0ebff10: everywhere, down then `hack restart` while
 \*     an intent is pending, else down then up.
+\*   ErrorRule = "stage": the start's own error goes through the same
+\*     classification and prints the same stage message; "generic": PR #1253
+\*     at a8705a39, the error's own text (image preparation names `hack up`;
+\*     the foreground unwind names `hack down --recover`).
 \*   ReleaseLock: the lost start releases the restart lock before it exits.
 \*   RetireIntent: `hack down --recover` retires a cleaned restart intent once
 \*     the run is stopped with data kept, when the restart lock is free.
+\*   RepairLeftover: `hack down --recover` removes containers the receipt
+\*     records removed that a lost VM brought back.
 EXTENDS Naturals, Sequences
 
-CONSTANTS MessageRule, ReleaseLock, RetireIntent
+CONSTANTS MessageRule, ErrorRule, ReleaseLock, RetireIntent, RepairLeftover
 
-VARIABLES kind, recorded, start, lostAt, receipt, intent, lock, msg, todo,
-          outcome
-vars == <<kind, recorded, start, lostAt, receipt, intent, lock, msg, todo,
-          outcome>>
+VARIABLES kind, recorded, start, lostAt, endedBy, leftover, receipt, intent,
+          lock, msg, todo, outcome
+vars == <<kind, recorded, start, lostAt, endedBy, leftover, receipt, intent,
+          lock, msg, todo, outcome>>
 
 Commands == {"down", "up", "restart"}
 Stages == {"Preparing", "Requested", "GraphReady", "Serving"}
@@ -47,12 +60,15 @@ Stages == {"Preparing", "Requested", "GraphReady", "Serving"}
 TypeOK ==
     /\ kind \in {"up", "restart"}
     /\ recorded \in BOOLEAN
-    /\ start \in Stages \cup {"Lost"}
+    /\ start \in Stages \cup {"Dead", "Lost"}
     /\ lostAt \in Stages \cup {"none"}
+    /\ endedBy \in {"none", "watch", "error"}
+    /\ leftover \in BOOLEAN
     /\ receipt \in {"none", "stopped", "unready", "ready"}
     /\ intent \in {"none", "cleaned"}
     /\ lock \in BOOLEAN
-    /\ msg \in {"none", "up", "downUp", "downRestart", "inspect"}
+    /\ msg \in {"none", "up", "downUp", "downRestart", "inspect",
+                "genericUp", "genericDown"}
     /\ todo \in Seq(Commands)
     /\ outcome \in {"pending", "ok", "refused"}
 
@@ -64,24 +80,27 @@ Init ==
     /\ kind \in {"up", "restart"}
     /\ recorded \in BOOLEAN
     /\ kind = "restart" => recorded
-    /\ start = "Preparing" /\ lostAt = "none"
+    /\ start = "Preparing" /\ lostAt = "none" /\ endedBy = "none"
+    /\ leftover = FALSE
     /\ receipt = IF recorded THEN "stopped" ELSE "none"
     /\ intent = IF kind = "restart" THEN "cleaned" ELSE "none"
     /\ lock = (kind = "restart")
     /\ msg = "none" /\ todo = <<>> /\ outcome = "pending"
 
+Frozen == <<kind, recorded, endedBy, leftover, msg, todo, outcome>>
+
 \* The first service of this run is requested (`graph.onRequested`).
 Request ==
     /\ start = "Preparing"
     /\ start' = "Requested" /\ receipt' = "unready"
-    /\ UNCHANGED <<kind, recorded, lostAt, intent, lock, msg, todo, outcome>>
+    /\ UNCHANGED <<lostAt, intent, lock>> /\ UNCHANGED Frozen
 
 \* The runtime reported the graph ready and the mapping is saved
 \* (`graph.onReady`, after `ensureMapping`).
 GraphReady ==
     /\ start = "Requested"
     /\ start' = "GraphReady" /\ receipt' = "ready"
-    /\ UNCHANGED <<kind, recorded, lostAt, intent, lock, msg, todo, outcome>>
+    /\ UNCHANGED <<lostAt, intent, lock>> /\ UNCHANGED Frozen
 
 \* The frontend's readiness work finished. For a restart, its `onReady`
 \* retires the intent and releases the lock, then `ready` progress follows.
@@ -89,7 +108,17 @@ Serve ==
     /\ start = "GraphReady"
     /\ start' = "Serving"
     /\ intent' = "none" /\ lock' = FALSE
-    /\ UNCHANGED <<kind, recorded, lostAt, receipt, msg, todo, outcome>>
+    /\ UNCHANGED <<lostAt, receipt>> /\ UNCHANGED Frozen
+
+\* The provider VM dies under the start. A recorded run lost before any
+\* service was requested may get its removed containers back (row 8).
+Die ==
+    /\ start \in Stages
+    /\ start' = "Dead" /\ lostAt' = start
+    /\ leftover' \in IF recorded /\ start = "Preparing"
+                     THEN BOOLEAN ELSE {FALSE}
+    /\ UNCHANGED <<kind, recorded, endedBy, receipt, intent, lock, msg, todo,
+                   outcome>>
 
 ByIntent == IF intent = "cleaned" THEN "downRestart" ELSE "downUp"
 
@@ -107,31 +136,49 @@ Message(at) ==
             ELSE StageMessage(at)
       [] OTHER -> ByIntent
 
+\* The error's own text at a8705a39: image preparation says to retry
+\* `hack up`; the foreground unwind says to run `hack down --recover`.
+GenericMessage(at) ==
+    IF at = "Preparing" THEN "genericUp" ELSE "genericDown"
+
 Steps(m) ==
-    CASE m = "up" -> <<"up">>
+    CASE m \in {"up", "genericUp"} -> <<"up">>
       [] m = "downUp" -> <<"down", "up">>
       [] m = "downRestart" -> <<"down", "restart">>
+      [] m = "genericDown" -> <<"down">>
       [] OTHER -> <<>>
+
+End(by, m, lockAfter) ==
+    /\ start = "Dead"
+    /\ start' = "Lost" /\ endedBy' = by
+    /\ msg' = m /\ todo' = Steps(m)
+    /\ lock' = lockAfter
+    /\ outcome' = IF Steps(m) = <<>> THEN "ok" ELSE "pending"
+    /\ UNCHANGED <<kind, recorded, lostAt, leftover, receipt, intent>>
 
 \* The pool watch sees the lost VM, prints the message, runs `beforeLostExit`
 \* (the restart's lock release) and exits 1; nothing else of the start runs.
-Lose ==
-    /\ start \in Stages
-    /\ start' = "Lost" /\ lostAt' = start
-    /\ msg' = Message(start)
-    /\ todo' = Steps(Message(start))
-    /\ lock' = (lock /\ ~ReleaseLock)
-    /\ outcome' = IF Steps(Message(start)) = <<>> THEN "ok" ELSE "pending"
-    /\ UNCHANGED <<kind, recorded, receipt, intent>>
+Watch == End("watch", Message(lostAt), lock /\ ~ReleaseLock)
+
+\* The start's own error path fails first. Its error propagates, so the
+\* restart's `finally` releases the lock either way.
+StartFails ==
+    End("error",
+        IF ErrorRule = "stage" THEN Message(lostAt) ELSE GenericMessage(lostAt),
+        FALSE)
 
 \* `hack down --recover` depends on where the start was lost, not on what the
 \* message said. Lost while preparing, the record (if any) is still the
 \* stopped retained run, and a fresh `up` has none (`not_started`); lost once
 \* ready and mapped, the run is stopped with data kept. Lost in between, no
-\* cross-boot retirement exists yet (HACK-2714).
-DownAccepts == lostAt \in {"Preparing", "GraphReady", "Serving"}
-\* `hack up` refuses a pending restart and a run that is not stopped.
-UpAccepts == intent = "none" /\ receipt \in {"none", "stopped"}
+\* cross-boot retirement exists yet (HACK-2714). Containers a lost VM brought
+\* back fail the confirmation unless the down removes them again.
+DownAccepts ==
+    /\ lostAt \in {"Preparing", "GraphReady", "Serving"}
+    /\ leftover => RepairLeftover
+\* `hack up` refuses a pending restart, a run that is not stopped, and a
+\* mapping whose cleanup is unconfirmed.
+UpAccepts == intent = "none" /\ receipt \in {"none", "stopped"} /\ ~leftover
 \* `hack restart` refuses while its lock is held ("already owned"), and a
 \* stopped run with nothing pending ("needs an active graph").
 RestartAccepts == ~lock /\ intent = "cleaned" /\ receipt = "stopped"
@@ -146,18 +193,19 @@ Step ==
     /\ LET c == Head(todo) IN
        IF ~Accepts(c)
        THEN /\ outcome' = "refused"
-            /\ UNCHANGED <<receipt, intent, todo>>
+            /\ UNCHANGED <<receipt, intent, todo, leftover>>
        ELSE /\ todo' = Tail(todo)
             /\ outcome' = IF Tail(todo) = <<>> THEN "ok" ELSE "pending"
             /\ receipt' = CASE c = "down" ->
                                  IF receipt = "none" THEN "none" ELSE "stopped"
                             [] OTHER -> "ready"
+            /\ leftover' = IF c = "down" THEN FALSE ELSE leftover
             /\ intent' = IF c = "down" /\ RetireIntent /\ ~lock
                          THEN "none"
                          ELSE IF c = "restart" THEN "none" ELSE intent
-    /\ UNCHANGED <<kind, recorded, start, lostAt, lock, msg>>
+    /\ UNCHANGED <<kind, recorded, start, lostAt, endedBy, lock, msg>>
 
-Next == Request \/ GraphReady \/ Serve \/ Lose \/ Step
+Next == Request \/ GraphReady \/ Serve \/ Die \/ Watch \/ StartFails \/ Step
 Spec == Init /\ [][Next]_vars
 
 \* Every command the message names, run in order, is accepted.

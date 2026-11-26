@@ -1,7 +1,11 @@
 import { expect, test } from "bun:test";
+import { NativeImageBatchError } from "../src/backends/native-image-policy.ts";
+import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import {
+  classifyNativeLostProvider,
   type NativeStartPoolEnd,
   nativeForegroundPoolEndMessage,
+  nativeLostProviderCode,
   watchNativeStartPool,
 } from "../src/backends/native-start-pool-watch.ts";
 
@@ -313,4 +317,99 @@ test("a run lost before any service was requested names the commands that work",
   expect(fresh).not.toContain("data is kept");
   expect(fresh).not.toContain("hack restart");
   expect(fresh.split("\n").at(-1)).toBe("Run hack up to start it again.");
+});
+
+test("a lost-provider code is found wherever a native client puts one", () => {
+  const request = (nativeCode: string) =>
+    new NativeRuntimeRequestError({
+      message: `Native runtime request failed (${nativeCode}); inspect owned state before retrying.`,
+      nativeCode,
+    });
+  expect(nativeLostProviderCode(request("process_identity_unavailable"))).toBe(
+    true
+  );
+  expect(nativeLostProviderCode(request("pool_process_exited"))).toBe(true);
+  expect(
+    nativeLostProviderCode(
+      new NativeImageBatchError([
+        {
+          reference: "docker.io/library/python:3.10-alpine",
+          code: "process_identity_unavailable",
+          reason: "Cannot establish native provider process identity",
+          recovery: "Inspect hack doctor, then retry hack up.",
+          services: ["web"],
+        },
+      ])
+    )
+  ).toBe(true);
+  // The foreground unwind quotes the code in its closed diagnostic text.
+  expect(
+    nativeLostProviderCode(
+      new Error(
+        "Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Startup diagnostic: Native graph startup failed (process_identity_unavailable)."
+      )
+    )
+  ).toBe(true);
+  expect(
+    nativeLostProviderCode(
+      new Error("wrapped", { cause: request("process_identity_unavailable") })
+    )
+  ).toBe(true);
+  for (const other of [
+    request("provider_busy"),
+    request("runtime_changed"),
+    new Error("synthetic failure"),
+    undefined,
+  ]) {
+    expect(nativeLostProviderCode(other)).toBe(false);
+  }
+});
+
+test("a failed start is classified as lost from the same pool reading as the watch", async () => {
+  const read = async () => record({ process: { pid: 4242 } });
+  // The watched boot's provider pid is gone: lost, whatever the error says.
+  expect(
+    await classifyNativeLostProvider({
+      error: new Error("synthetic failure"),
+      home: "/unused",
+      bootId: boot,
+      read,
+      gone: (pid) => pid === 4242,
+    })
+  ).toEqual({ bootId: boot, providerPid: 4242 });
+  // The boot was replaced.
+  expect(
+    await classifyNativeLostProvider({
+      error: new Error("synthetic failure"),
+      home: "/unused",
+      bootId: boot,
+      read: async () =>
+        record({ guest_boot_id: "87654321-4321-4321-4321-cba987654321" }),
+      gone: () => false,
+    })
+  ).toEqual({ bootId: boot });
+  // An unreadable record, but a lost-provider code in the error.
+  expect(
+    await classifyNativeLostProvider({
+      error: new NativeRuntimeRequestError({
+        message:
+          "Native runtime request failed (process_identity_unavailable).",
+        nativeCode: "process_identity_unavailable",
+      }),
+      home: "/unused",
+      bootId: boot,
+      read: () => Promise.reject(new Error("unreadable")),
+      gone: () => false,
+    })
+  ).toEqual({ bootId: boot });
+  // A live provider and an ordinary error: not a lost VM.
+  expect(
+    await classifyNativeLostProvider({
+      error: new Error("synthetic failure"),
+      home: "/unused",
+      bootId: boot,
+      read,
+      gone: () => false,
+    })
+  ).toBeUndefined();
 });

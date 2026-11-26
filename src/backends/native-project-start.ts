@@ -259,8 +259,10 @@ import {
   type NativeServiceExit,
 } from "./native-service-exit-monitor.ts";
 import {
+  classifyNativeLostProvider,
   NATIVE_START_POOL_GRACE_MS,
   type NativeForegroundLossStage,
+  type NativeStartPoolEnd,
   nativeForegroundPoolEndMessage,
   watchNativeStartPool,
 } from "./native-start-pool-watch.ts";
@@ -510,6 +512,8 @@ type Dependencies = {
   /** Whether the pool record proves the run's owner's boot ended (HACK-2572). */
   poolBootEnded: (home: string) => Promise<boolean>;
   watchPool: typeof watchNativeStartPool;
+  /** Whether a failed start lost its VM (HACK-2096); the pool record and the error. */
+  classifyLostProvider: typeof classifyNativeLostProvider;
   /** How long a start waits for such an owner to go (HACK-2572). */
   endedBootOwnerWaitMs: number;
 };
@@ -548,6 +552,7 @@ const DEFAULTS: Dependencies = {
   startupStatusIntervalMs: NATIVE_START_STATUS_INTERVAL_MS,
   poolBootEnded: nativePoolBootProvenEnded,
   watchPool: watchNativeStartPool,
+  classifyLostProvider: classifyNativeLostProvider,
   endedBootOwnerWaitMs: NATIVE_ENDED_BOOT_OWNER_WAIT_MS,
 };
 /**
@@ -4863,9 +4868,13 @@ export async function startNativeProject(
   // no terminal, and its launcher has already returned.
   const detached = isNativeDetachedOwnerProcess();
   const warn = opts.dependencies?.warn ?? DEFAULTS.warn;
+  // The boot this attempt's runtime up confirmed: a start error after it may be
+  // the lost VM (see `lostVmFailure`).
+  let watchedBoot: string | undefined;
   const watchAdmittedBoot =
     (opts.watchPool ?? true)
       ? (bootId: string) => {
+          watchedBoot = bootId;
           stopPoolWatch = (opts.dependencies?.watchPool ?? DEFAULTS.watchPool)({
             home: opts.runtime.home,
             bootId,
@@ -4927,10 +4936,76 @@ export async function startNativeProject(
       }
     );
   } catch (error) {
-    throw withStartupLockBlocker(error);
+    // The start's own error path often reports a lost VM before the pool
+    // watch does (real VM: 0.13 to 1.6 s after the provider's death). It gets
+    // the same stage message, from the stage the graph reached.
+    const lost =
+      detached || graphStopped || watchedBoot === undefined
+        ? undefined
+        : await lostVmFailure({
+            error,
+            home: opts.runtime.home,
+            bootId: watchedBoot,
+            loss,
+            classify: opts.dependencies?.classifyLostProvider,
+          });
+    throw lost ?? withStartupLockBlocker(error);
   } finally {
     settled = true;
     stopPoolWatch?.();
     await finish?.();
   }
+}
+
+/**
+ * A foreground start that failed because its VM was lost (HACK-2096): the stage
+ * message the pool watch would have printed, as the start's error. The original
+ * error stays as `cause`.
+ */
+export class NativeForegroundVmLostError extends ClosedCliError {
+  readonly end: NativeStartPoolEnd;
+  readonly loss: NativeForegroundLossStage;
+  constructor(opts: {
+    readonly end: NativeStartPoolEnd;
+    readonly loss: NativeForegroundLossStage;
+    readonly cause: unknown;
+  }) {
+    super(nativeForegroundPoolEndMessage(opts.end, opts.loss), {
+      cause: opts.cause,
+    });
+    this.end = opts.end;
+    this.loss = opts.loss;
+  }
+}
+
+/**
+ * Route a failed foreground start through {@link classifyNativeLostProvider}:
+ * a lost VM becomes {@link NativeForegroundVmLostError} with the stage the
+ * graph reached; anything else (a cancellation included) is left as it is.
+ */
+async function lostVmFailure(opts: {
+  readonly error: unknown;
+  readonly home: string;
+  readonly bootId: string;
+  readonly loss: NativeForegroundLossStage;
+  readonly classify?: typeof classifyNativeLostProvider;
+}): Promise<NativeForegroundVmLostError | undefined> {
+  if (
+    opts.error instanceof NativeStartupCanceledError ||
+    opts.error instanceof NativeForegroundVmLostError
+  ) {
+    return undefined;
+  }
+  const end = await (opts.classify ?? classifyNativeLostProvider)({
+    error: opts.error,
+    home: opts.home,
+    bootId: opts.bootId,
+  }).catch(() => undefined);
+  return end
+    ? new NativeForegroundVmLostError({
+        end,
+        loss: opts.loss,
+        cause: opts.error,
+      })
+    : undefined;
 }

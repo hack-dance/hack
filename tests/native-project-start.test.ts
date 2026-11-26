@@ -17,7 +17,10 @@ import {
   NativeHttpsLeaseAcquisitionError,
 } from "../src/backends/native-https-owner.ts";
 import { NativeHttpsStartupError } from "../src/backends/native-https-startup-failure.ts";
-import { NATIVE_IMAGE_ENSURE_TIMEOUT_MS } from "../src/backends/native-image-policy.ts";
+import {
+  NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+  NativeImageBatchError,
+} from "../src/backends/native-image-policy.ts";
 import { selectNativeProfiles } from "../src/backends/native-profile-selection.ts";
 import {
   admitNativeProjectBuilds,
@@ -55,6 +58,7 @@ import {
 import {
   NATIVE_CONFIGURATION_REFUSAL,
   NATIVE_SHARED_SOURCE_REFUSAL,
+  NativeForegroundVmLostError,
   NativeStartupCanceledError,
   type NativeStartupProgress,
   nativeReadinessArgs,
@@ -75,6 +79,7 @@ import {
 import { NATIVE_EXITED_RUNTIME_NOTICE } from "../src/backends/native-runtime-preflight.ts";
 import { selectNativeServices } from "../src/backends/native-service-selection.ts";
 import {
+  classifyNativeLostProvider,
   NATIVE_START_POOL_CHECK_MS,
   NATIVE_START_POOL_GRACE_MS,
   watchNativeStartPool,
@@ -7925,6 +7930,186 @@ test.each([
   }
   // The start settling afterwards never exits a second time.
   expect(exits).toHaveLength(1);
+});
+
+/**
+ * HACK-2096 real-VM review: on a real VM the start's own error path reports a
+ * lost provider within 0.13 to 1.6 s, before the pool watch's check and grace,
+ * so the stage message never printed: a restart lost in its image pull said
+ * only `process_identity_unavailable`, a resumed `up` said "Image preparation
+ * failed ... hack up" (which refuses), and a started return said the generic
+ * cleanup text. Every path now goes through `classifyNativeLostProvider` and
+ * fails with the stage message, from the stage the graph reached. Here the
+ * watch never fires, as when the start error wins the race.
+ *
+ * - `request`: a runtime request refused `process_identity_unavailable`.
+ * - `image`: image preparation reported that code for an image.
+ * - `unwind`: the serve request failed, before or after a started return.
+ * - `record`: the error names no code, but the pool record shows the watched
+ *   boot's provider pid gone.
+ */
+test.each([
+  { path: "request", stage: "preparing-restore" },
+  { path: "image", stage: "preparing" },
+  { path: "image", stage: "preparing-restore" },
+  { path: "unwind", stage: "requested" },
+  { path: "unwind", stage: "ready" },
+  { path: "record", stage: "preparing" },
+] as const)("a start error from a lost provider fails with the stage message ($path, $stage)", async ({
+  path,
+  stage,
+}) => {
+  const { opts } = await fixture(false);
+  const boot = "87654321-4321-4321-4321-cba987654321";
+  const pid = 2345;
+  const lostRequest = () =>
+    new NativeRuntimeRequestError({
+      message:
+        "Native runtime request failed (process_identity_unavailable); inspect owned state before retrying.",
+      nativeCode: "process_identity_unavailable",
+    });
+  let watched: string | undefined;
+  // The watch is bound but never fires: the start error wins.
+  opts.dependencies.watchPool = (options) => {
+    watched = options.bootId;
+    return () => undefined;
+  };
+  opts.dependencies.classifyLostProvider = (options) =>
+    classifyNativeLostProvider({
+      ...options,
+      read: async () => ({
+        phase: "running",
+        token: "c".repeat(32),
+        guest_boot_id: boot,
+        process: { pid },
+      }),
+      gone: (candidate) => candidate === pid,
+    });
+  // Once the VM is lost, every later runtime request refuses, so the start's
+  // own unwind cannot confirm its cleanup (the real-VM row: "Native foreground
+  // exit cleanup is unconfirmed ... process_identity_unavailable").
+  let vmLost = false;
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[0] === "runtime" && request.args[1] === "up") {
+      return { phase: "running", process_alive: true, guest_boot_id: boot };
+    }
+    if (vmLost) {
+      throw lostRequest();
+    }
+    return await invoke(request);
+  };
+  let original: unknown;
+  if (path === "request") {
+    opts.dependencies.review = async () => {
+      original = lostRequest();
+      throw original;
+    };
+  } else if (path === "image" || path === "record") {
+    opts.dependencies.retainedImages = async () => {
+      original =
+        path === "image"
+          ? new NativeImageBatchError([
+              {
+                reference: "docker.io/library/python:3.10-alpine",
+                code: "process_identity_unavailable",
+                reason: "Cannot establish native provider process identity",
+                recovery: "Inspect hack doctor, then retry hack up.",
+                services: ["web"],
+              },
+            ])
+          : new Error("synthetic image read failure");
+      throw original;
+    };
+  } else {
+    const serve = opts.dependencies.serve!;
+    opts.dependencies.serve = async (request) => {
+      if (stage === "ready") {
+        // A started return (mapped), then the owner's request fails.
+        await serve(request);
+      }
+      vmLost = true;
+      original = lostRequest();
+      throw original;
+    };
+  }
+  const failure = await startNativeProject({
+    ...opts,
+    ...(stage === "ready" ? { waitForReady: false } : {}),
+    ...(stage === "preparing-restore"
+      ? {
+          restore: {
+            run: "1".repeat(32),
+            owner: "c".repeat(32),
+            namespace: "b".repeat(64),
+            planId: "a".repeat(64),
+          },
+        }
+      : {}),
+  }).then(
+    () => undefined,
+    (error: unknown) => error
+  );
+  expect(watched).toBe(boot);
+  expect(failure).toBeInstanceOf(NativeForegroundVmLostError);
+  const lost = failure as NativeForegroundVmLostError;
+  if (path === "request" || path === "image" || path === "record") {
+    // The thrown error is the original one, kept as the cause.
+    expect(lost.cause).toBe(original);
+  }
+  expect(lost.end).toEqual({ bootId: boot, providerPid: pid });
+  expect(lost.message).toContain(`pid ${pid}`);
+  expect(lost.message).toContain("exit code 1");
+  expect(lost.message).not.toContain("hack restart");
+  expect(lost.message).not.toContain("Image preparation failed");
+  if (stage === "preparing") {
+    expect(lost.loss).toEqual({ stage: "preparing", recorded: false });
+    expect(lost.message).not.toContain("hack down");
+    expect(lost.message.split("\n").at(-1)).toBe(
+      "Run hack up to start it again."
+    );
+  } else if (stage === "preparing-restore") {
+    expect(lost.loss).toEqual({ stage: "preparing", recorded: true });
+    expect(lost.message).toContain(
+      "Run hack down --recover to retire the interrupted start with the run's data kept, then hack up to start it again."
+    );
+  } else if (stage === "requested") {
+    expect(lost.loss).toEqual({ stage: "requested" });
+    expect(lost.message).not.toContain("hack down");
+    expect(lost.message).toContain("Keep this native home unchanged");
+  } else {
+    expect(lost.loss).toEqual({ stage: "ready" });
+    expect(lost.message).toContain(
+      "Run hack down --recover to retire this run with its data kept, then hack up to start it again."
+    );
+  }
+});
+
+test("a start error with no lost-provider evidence keeps its own message", async () => {
+  const { opts } = await fixture(false);
+  const boot = "87654321-4321-4321-4321-cba987654321";
+  opts.dependencies.watchPool = () => () => undefined;
+  opts.dependencies.classifyLostProvider = (options) =>
+    classifyNativeLostProvider({
+      ...options,
+      read: async () => ({
+        phase: "running",
+        token: "c".repeat(32),
+        guest_boot_id: boot,
+        process: { pid: 2345 },
+      }),
+      gone: () => false,
+    });
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) =>
+    request.args[0] === "runtime" && request.args[1] === "up"
+      ? { phase: "running", process_alive: true, guest_boot_id: boot }
+      : await invoke(request);
+  const original = new Error("synthetic image read failure");
+  opts.dependencies.retainedImages = async () => {
+    throw original;
+  };
+  await expect(startNativeProject(opts)).rejects.toBe(original);
 });
 
 /**

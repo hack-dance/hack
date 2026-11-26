@@ -11,6 +11,12 @@ import {
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
 import {
+  parseCliArgv,
+  parsePositionalsForCommand,
+  resolveCommand,
+} from "../src/cli/command.ts";
+import { CLI_SPEC } from "../src/cli/spec.ts";
+import {
   expectClosedRefusal,
   expectCodedRefusal,
 } from "./helpers/closed-refusal.ts";
@@ -119,6 +125,46 @@ test("one-off preserves default command or literal argv and fresh private delive
     });
   }
 });
+test("run's command reaches the run-service request as the replacement argv, with or without `--`", async () => {
+  // HACK-2740: the runtime replaces the service command with exactly the argv
+  // after `--` in the run-service request. `-c` belongs to the child, never Hack.
+  const opts = await fixture();
+  for (const cli of [
+    ["run", "db-ops", "sh", "-c", "echo x"],
+    ["run", "db-ops", "--", "sh", "-c", "echo x"],
+  ]) {
+    const parsed = parseCliArgv(CLI_SPEC, cli);
+    const resolved = resolveCommand(CLI_SPEC, parsed.positionals);
+    expect(resolved.path.map((command) => command.name)).toEqual(["run"]);
+    const positionals: Readonly<Record<string, unknown>> =
+      parsePositionalsForCommand(
+        resolved.command?.positionals ?? [],
+        resolved.remainingPositionals
+      );
+    const requested: string[] = [];
+    await nativeProjectOneOff({
+      ...opts,
+      service: String(positionals.service),
+      argv: positionals.cmd as string[],
+      invoke: async (request) => {
+        if (request.args[1] === "refresh-dependencies") {
+          return refreshed();
+        }
+        if (request.args[1] === "run-selection") {
+          return selection;
+        }
+        expect(request.args[1]).toBe("run-service");
+        expect(request.args).toContain("db-ops");
+        requested.push(
+          ...request.args.slice(request.args.indexOf("--") + 1).map(String)
+        );
+        return completion;
+      },
+    });
+    expect(requested).toEqual(["sh", "-c", "echo x"]);
+  }
+});
+
 test("stale selection and missing project never request a job", async () => {
   const opts = await fixture();
   let mutations = 0;

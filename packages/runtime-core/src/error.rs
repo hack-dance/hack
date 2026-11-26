@@ -44,6 +44,10 @@ pub struct StartupLogTail {
     pub stderr: String,
     /// Some of the requested tail lines were omitted to stay within the byte bound.
     pub truncated: bool,
+    /// The process's exit status when its container was observed exited before
+    /// cleanup; absent for a dead or otherwise failed container. Value-free.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

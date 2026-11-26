@@ -7,6 +7,7 @@ import {
   nativeForegroundPoolEndMessage,
   nativeLostProviderCode,
   nativeLostVmCauseLine,
+  nativePoolBootEnd,
   watchNativeStartPool,
 } from "../src/backends/native-start-pool-watch.ts";
 
@@ -271,6 +272,50 @@ test("the end carries its evidence: the gone provider pid, or none for an ended 
     stop();
     expect(ends).toEqual([expected]);
   }
+});
+
+test("a stopped record that still names its provider reads as a stopped boot, not a vanished process", async () => {
+  // Round-6 review: a stopped record keeps `process` and `guest_boot_id` until
+  // the next boot, so after an ordinary `runtime down` the dead pid must not
+  // turn the message into "its provider process (pid N) is gone".
+  const stopped = record({ phase: "stopped", process: { pid: 4242 } });
+  const reading = nativePoolBootEnd(stopped, {
+    bootId: boot,
+    gone: (pid) => pid === 4242,
+  });
+  expect(reading.end).toEqual({ bootId: boot });
+  const message = nativeForegroundPoolEndMessage(reading.end!, {
+    stage: "ready",
+  });
+  expect(message).toContain(
+    `The native runtime VM under this start stopped: guest boot ${boot} ended (the pool was stopped or booted again).`
+  );
+  expect(message).not.toContain("pid 4242");
+  // The watch and the classifier report the same end.
+  const ends: NativeStartPoolEnd[] = [];
+  const stop = watchNativeStartPool({
+    home: "/fixture",
+    bootId: boot,
+    checkMs: 5,
+    graceMs: 0,
+    read: () => Promise.resolve(stopped),
+    gone: (pid) => pid === 4242,
+    onEnded: (end) => {
+      ends.push(end);
+    },
+  });
+  await Bun.sleep(40);
+  stop();
+  expect(ends).toEqual([{ bootId: boot }]);
+  expect(
+    await classifyNativeLostProvider({
+      error: new Error("synthetic failure"),
+      home: "/unused",
+      bootId: boot,
+      read: async () => stopped,
+      gone: (pid) => pid === 4242,
+    })
+  ).toEqual({ bootId: boot });
 });
 
 test("a run lost after its graph was ready names down --recover, then hack up", () => {

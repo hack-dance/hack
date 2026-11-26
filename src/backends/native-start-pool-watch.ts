@@ -217,15 +217,18 @@ export function nativePoolBootEnd(
     owner ??= record.token;
     provider = providerPid(record);
   }
+  // A stopped or replaced boot first: a stopped record keeps `process` and
+  // `guest_boot_id` until the next boot, so an ordinary `runtime down` must
+  // read as a stopped boot, not as a provider process that vanished.
+  if (nativeHttpsPoolBootEnded(record, { bootId: opts.bootId, owner })) {
+    return { owner, end: { bootId: opts.bootId }, live: false };
+  }
   if (provider !== undefined && opts.gone(provider)) {
     return {
       owner,
       end: { bootId: opts.bootId, providerPid: provider },
       live: false,
     };
-  }
-  if (nativeHttpsPoolBootEnded(record, { bootId: opts.bootId, owner })) {
-    return { owner, end: { bootId: opts.bootId }, live: false };
   }
   return {
     owner,

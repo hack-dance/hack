@@ -101,6 +101,10 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
       ];
       for (const cmd of commands) {
         const child = Bun.spawn(cmd, {
+          // The compile stages a transient `.<hash>.bun-build` in its working
+          // directory: this test's root, never the checkout (HACK-2727). The
+          // Python harness already runs its children in `root`.
+          cwd: root,
           env: {
             ...env,
             ...Object.fromEntries(

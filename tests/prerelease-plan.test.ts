@@ -2008,7 +2008,7 @@ test("compiled CLI reports the embedded candidate version and ordinary source re
       [
         process.execPath,
         "build",
-        "index.ts",
+        join(import.meta.dir, "..", "index.ts"),
         "--compile",
         ...CLI_COMPILE_DEFINE_ARGS,
         "--define",
@@ -2016,7 +2016,9 @@ test("compiled CLI reports the embedded candidate version and ordinary source re
         "--outfile",
         executable,
       ],
-      { stdout: "pipe", stderr: "pipe" }
+      // The compiler stages a transient `.<hash>.bun-build` in its working
+      // directory: this test's root, never the checkout (HACK-2727).
+      { cwd: root, stdout: "pipe", stderr: "pipe" }
     );
     const errors = await new Response(build.stderr).text();
     expect(await build.exited).toBe(0);

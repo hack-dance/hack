@@ -266,7 +266,10 @@ import {
   monitorNativeServiceExits,
   type NativeServiceExit,
 } from "./native-service-exit-monitor.ts";
-import { nativeStartLeaseRefusal } from "./native-start-lease.ts";
+import {
+  markNativeStartLeaseRefusal,
+  nativeStartLeaseRefusal,
+} from "./native-start-lease.ts";
 import {
   classifyNativeLostProvider,
   NATIVE_START_POOL_GRACE_MS,
@@ -4314,9 +4317,12 @@ async function startNativeProjectAttempt(
           ) {
             throw unconfirmed("the host dependency plan");
           }
+          // The final inspection after serve settled, often after Ctrl-C: no start
+          // is waiting any more, so it keeps the short bound it had (5 s) and prints
+          // no start progress line (HACK-2724).
           const invokeInspect = () =>
             inspectNativeProjectGraph({
-              startupWait: true,
+              busyWaitMs: NATIVE_FINAL_INSPECT_BUSY_WAIT_MS,
               runtime: opts.runtime,
               projectRoot: opts.scope.projectRoot,
               run,
@@ -5035,6 +5041,12 @@ function reportForegroundStopFailure(failure: unknown, failed: boolean): void {
   }
 }
 
+/**
+ * How long the final inspection after `serve` settles retries a busy lease: the
+ * 5 s the runtime-side startup wait gave it before HACK-2724 raised that wait.
+ */
+const NATIVE_FINAL_INSPECT_BUSY_WAIT_MS = 5000;
+
 /** A start whose lease wait expired names the holder and a plain retry (HACK-2724). */
 function withStartupLockBlocker(error: unknown, detached: boolean): unknown {
   if (
@@ -5047,6 +5059,9 @@ function withStartupLockBlocker(error: unknown, detached: boolean): unknown {
     nativeMessage: error.nativeMessage,
     command: detached ? "hack up -d" : "hack up",
   });
+  // Only this raw refusal is the detached owner's start-lease report; a wrapped
+  // provider_busy keeps its own recovery step.
+  markNativeStartLeaseRefusal(error);
   return error;
 }
 

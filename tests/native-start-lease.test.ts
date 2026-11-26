@@ -12,7 +12,7 @@ const PROJECT_STOP =
 
 test("HACK-2724: the start's progress line names the holder the runtime reported", () => {
   expect(nativeStartLeaseWaitLine("project-stop")).toBe(
-    "Waiting for the native runtime lock, held by a project stop (hack down). This start continues once it is released (up to 35 s)."
+    "Waiting for the native runtime lock, held by a project stop. This start continues once it is released (up to 35 s)."
   );
   expect(nativeStartLeaseWaitLine("cleanup")).toContain("held by a cleanup.");
   expect(nativeStartLeaseWaitLine("start")).toContain("held by another start.");

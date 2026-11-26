@@ -11,6 +11,7 @@ import {
   NativeRuntimeRequestError,
   retainNativeRuntimeFailure,
 } from "../../src/backends/native-runtime-client.ts";
+import { markNativeStartLeaseRefusal } from "../../src/backends/native-start-lease.ts";
 import { handleRunCliError } from "../../src/cli/run.ts";
 import { ClosedCliError, HackCliError } from "../../src/lib/cli-result.ts";
 import {
@@ -545,6 +546,7 @@ if (role === "channel-holder") {
       "exit-first-failure",
       "failed-services",
       "lease-busy",
+      "wrapped-lease-busy",
       "exited-service",
       "exited-service-zero",
       "exited-service-inadmissible",
@@ -736,17 +738,28 @@ if (role === "channel-holder") {
         process.off("SIGTERM", terminate);
         return 1;
       }
-      if (mode === "lease-busy") {
-        // HACK-2724: the start waited on another project's stop, said so once,
-        // then gave up with nothing admitted.
+      if (mode === "lease-busy" || mode === "wrapped-lease-busy") {
+        // HACK-2724: the start waited on another project's stop and said so
+        // once, though two of its requests waited, then gave up with nothing
+        // admitted. A wrapped refusal is an unconfirmed exit cleanup instead.
         reportNativeStartLeaseWait("project-stop");
+        reportNativeStartLeaseWait("start");
+        const busy = new NativeRuntimeRequestError({
+          message: "synthetic-private-value",
+          nativeCode: "provider_busy",
+          nativeMessage:
+            "Provider lease acquisition refused; recorded holder: project stop; no operation was admitted.",
+        });
+        if (mode === "lease-busy") {
+          markNativeStartLeaseRefusal(busy);
+        }
         await nativeDetachedUpFailure(
-          new NativeRuntimeRequestError({
-            message: "synthetic-private-value",
-            nativeCode: "provider_busy",
-            nativeMessage:
-              "Provider lease acquisition refused; recorded holder: project stop; no operation was admitted.",
-          })
+          mode === "lease-busy"
+            ? busy
+            : retainNativeRuntimeFailure({
+                error: new ClosedCliError("synthetic-private-value"),
+                original: busy,
+              })
         );
         server.stop(true);
         process.off("SIGTERM", terminate);

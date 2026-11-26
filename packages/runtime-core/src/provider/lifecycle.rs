@@ -432,20 +432,40 @@ pub(super) fn graph_inventory_lease(candidate: &Candidate) -> Result<state::Lock
 /// earlier recorded sample of this home that `earlier` finds usable (`admission::opening`).
 /// The record is read under the lease. On failure RAII drops the lease, without granting
 /// owner/allocation authority.
-fn startup_admission_lease(
+///
+/// First under the lease, before any recheck: `running` reports a pool that a concurrent
+/// start booted while this one waited for the lease (HACK-2724). This start then returns
+/// the lease with it ([`LeasedBoot::Running`]) and resumes that pool, instead of failing
+/// the admission rechecks against the stopped pool it selected
+/// (`admission_owner_changed`, `foreign_state`). Nothing was sampled, recorded or
+/// forgotten under the lease in that case.
+#[allow(clippy::too_many_arguments)]
+fn startup_admission_lease<T>(
     root: &Path,
     wait: Duration,
     profile: super::Profile,
     opened: Option<admission::Opened>,
     clock: &impl process::Clock,
     earlier: &impl admission::Earlier,
+    running: impl FnOnce() -> Option<T>,
     observe: impl FnMut() -> Result<admission::Admission, CandidateError>,
-) -> Result<(state::Lock, admission::Leased), CandidateError> {
+) -> Result<LeasedBoot<T>, CandidateError> {
     let lock = crate::timings::measure(crate::timings::Step::VmStartupLease, None, |_| {
         startup_lease(root, wait)
     })?;
+    if let Some(running) = running() {
+        return Ok(LeasedBoot::Running(lock, running));
+    }
     let leased = admission::recheck_after_lease(profile, opened, clock, earlier, observe)?;
-    Ok((lock, leased))
+    Ok(LeasedBoot::Boot(lock, leased))
+}
+
+/// What a boot found once it held the startup lease.
+enum LeasedBoot<T> {
+    /// The pool is still not running: boot it, with the samples taken under the lease.
+    Boot(state::Lock, admission::Leased),
+    /// A concurrent start booted the pool while this one waited: resume it.
+    Running(state::Lock, T),
 }
 
 /// Read-only observation takes no mutation lease and detects lifecycle changes around each read.
@@ -1706,15 +1726,30 @@ fn start_pool_observed(
     let pool_root = root(candidate);
     let opening_host = admission::opening::System;
     let opening = admission::opening::Opening::new(&pool_root, &opening_host, admission_reuse);
-    let (lock, leased) = startup_admission_lease(
+    let (lock, leased) = match startup_admission_lease(
         &pool_root,
         START_LEASE_WAIT,
         profile,
         opened,
         &admission_clock,
         &opening,
+        // A select that fails is not a running pool: the rechecks below refuse as before.
+        || running_start::select(candidate, profile).ok().flatten(),
         || admission_pool::probe(candidate, profile, &admission_owner),
-    )?;
+    )? {
+        LeasedBoot::Boot(lock, leased) => (lock, leased),
+        LeasedBoot::Running(lock, running) => {
+            return crate::timings::measure(crate::timings::Step::VmReattach, None, |_| {
+                running_start::resume_leased(candidate, running, &request, &lock, || {
+                    #[cfg(target_os = "macos")]
+                    if let Some(guard) = &retained_guard {
+                        guard.verify(candidate)?;
+                    }
+                    Ok(())
+                })
+            });
+        }
+    };
     let admission::Leased {
         samples: fresh_samples,
         reused,

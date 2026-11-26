@@ -22,6 +22,28 @@ export const NATIVE_START_LEASE_WAIT_SECONDS = 35;
  */
 export const NATIVE_START_LEASE_REQUEST_TIMEOUT_MS = 60_000;
 
+/**
+ * The closed failure code a detached owner publishes for a start whose raw
+ * lease wait expired: exactly the refusals {@link markNativeStartLeaseRefusal}
+ * marked. A `provider_busy` that another failure wraps (for example an
+ * unconfirmed exit cleanup) keeps its own report and recovery step.
+ */
+export const NATIVE_START_LEASE_BUSY = "start_lease_busy";
+
+const startLeaseRefusals = new WeakSet<object>();
+
+/** Mark a start's own `provider_busy` refusal (nothing was admitted). */
+export function markNativeStartLeaseRefusal(error: object): void {
+  startLeaseRefusals.add(error);
+}
+
+/** Whether `error` is a start's own lease refusal that {@link markNativeStartLeaseRefusal} marked. */
+export function isNativeStartLeaseRefusal(error: unknown): boolean {
+  return (
+    typeof error === "object" && error !== null && startLeaseRefusals.has(error)
+  );
+}
+
 /** Holder tokens of the runtime's report, and the words its refusal uses. */
 const HOLDER_WORDS: Readonly<Record<string, string>> = {
   cleanup: "cleanup",
@@ -38,7 +60,7 @@ const HOLDER_WORDS: Readonly<Record<string, string>> = {
 /** The holder as the progress line names it, with its article. */
 const HOLDER_PHRASE: Readonly<Record<string, string>> = {
   cleanup: "a cleanup",
-  "project stop": "a project stop (hack down)",
+  "project stop": "a project stop",
   recovery: "a recovery",
   start: "another start",
   inspection: "an inspection",

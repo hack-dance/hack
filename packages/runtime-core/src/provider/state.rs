@@ -382,6 +382,13 @@ impl Drop for RecordProjectStop {
     }
 }
 
+/// The holder kind this thread would record in the provider lock now, for tests of the
+/// callers that set it.
+#[cfg(all(test, feature = "native-config-plan"))]
+pub(crate) fn recorded_operation() -> &'static str {
+    operation_label()
+}
+
 fn operation_label() -> &'static str {
     if PROJECT_STOP.with(std::cell::Cell::get) {
         return "project_stop";
@@ -1273,15 +1280,21 @@ mod tests {
     /// HACK-2724: another project's `hack down` holds the provider lease for its whole
     /// stop (about 31 s with a 30 s stop grace). A start that waited only
     /// `STARTUP_LEASE_WAIT` (5 s) refused `provider_busy` naming "native operation".
-    /// Here the stop releases at about 10 s, past that old bound: the start's wait
-    /// admits it, and its one progress line names the project stop.
+    /// Scaled down 50 times: the stop holds 600 ms, past the old bound (100 ms for 5 s) and
+    /// inside the start's bound; the start's wait admits it, and its one progress line
+    /// (after 60 ms for 3 s) names the project stop.
     #[test]
     fn a_start_waits_out_a_project_stop_past_the_old_bound_and_reports_it_once() {
         use super::super::lifecycle::{START_LEASE_WAIT, STARTUP_LEASE_WAIT, startup_lease};
         use std::time::{Duration, Instant};
-        const HOLD: Duration = Duration::from_secs(10);
+        const OLD_BOUND: Duration = Duration::from_millis(100);
+        const HOLD: Duration = Duration::from_millis(600);
+        const BOUND: Duration = Duration::from_secs(3);
+        const REPORT_AFTER: Duration = Duration::from_millis(60);
+        // The real bounds the scaled ones stand for.
         assert!(START_LEASE_WAIT >= Duration::from_secs(30) + Duration::from_secs(5));
-        assert!(HOLD > STARTUP_LEASE_WAIT && HOLD < START_LEASE_WAIT);
+        assert!(STARTUP_LEASE_WAIT < Duration::from_secs(31));
+        assert!(super::LEASE_WAIT_REPORT_AFTER < STARTUP_LEASE_WAIT);
         let fixture = fixture();
         let root = fixture.join("run/smolvm");
         drop(super::Lock::acquire(&root).unwrap());
@@ -1299,7 +1312,7 @@ mod tests {
             });
             holding.recv().unwrap();
             // The bound the old start used refuses, naming the stop.
-            let refused = startup_lease(&root, Duration::from_millis(100)).map(drop);
+            let refused = startup_lease(&root, OLD_BOUND).map(drop);
             assert!(
                 matches!(&refused, Err(error) if error.code == "provider_busy"
                     && error.message.contains("recorded holder: project stop;")),
@@ -1307,19 +1320,16 @@ mod tests {
             );
             let started = Instant::now();
             let lease = super::wait_reporting(
-                started + START_LEASE_WAIT,
+                started + BOUND,
                 || Ok(()),
                 || super::Lock::acquire(&root),
                 super::acquisition_expired,
-                super::LEASE_WAIT_REPORT_AFTER,
+                REPORT_AFTER,
                 &mut |line| lines.push(line.to_owned()),
             )
             .unwrap();
             let waited = started.elapsed();
-            assert!(
-                waited > STARTUP_LEASE_WAIT && waited < START_LEASE_WAIT,
-                "{waited:?}"
-            );
+            assert!(waited > OLD_BOUND && waited < BOUND, "{waited:?}");
             drop(lease);
             stop.join().unwrap();
         });
@@ -1339,39 +1349,25 @@ mod tests {
         std::fs::remove_dir_all(fixture).unwrap();
     }
 
-    /// Wiring guard (HACK-2724). The owners' stops need an owned VM, so their effects are
-    /// proven natively; this fails if either owner's own stop stops recording itself as a
-    /// project stop before it takes the provider lease.
+    /// Wiring guard (HACK-2724) for the compose owner's own stop, which needs an owned VM
+    /// and a live host relay runtime: this fails if that stop no longer records itself as
+    /// a project stop before it takes the provider lease. The native owner's stop is tested
+    /// by behaviour (`the_receipt_bound_native_cleanup_records_a_project_stop`).
     #[test]
-    fn both_owners_record_their_own_stop_before_taking_the_lease() {
-        fn body<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
-            let from = source.find(start).expect("function start");
-            let to = from + source[from..].find(end).expect("function end");
-            &source[from..to]
-        }
-        for (cleanup, lease) in [
-            (
-                body(
-                    include_str!("graph/startup/runtime.rs"),
-                    "    pub fn cleanup(",
-                    "    fn release_dependency_reservation(",
-                ),
-                "Engine::connect_cleanup_wait(",
-            ),
-            (
-                body(
-                    include_str!("graph/native/runtime.rs"),
-                    "pub(super) fn cleanup_guarded(",
-                    "pub(super) fn cleanup_recovery(",
-                ),
-                "cleanup_inner(",
-            ),
-        ] {
-            let recorded = cleanup
-                .find("RecordProjectStop::begin()")
-                .expect("the owner's stop records itself");
-            assert!(recorded < cleanup.find(lease).expect("the stop's lease"));
-        }
+    fn the_compose_owner_records_its_own_stop_before_taking_the_lease() {
+        let source = include_str!("graph/startup/runtime.rs");
+        let from = source.find("    pub fn cleanup(").expect("function start");
+        let cleanup = &source[from..];
+        let cleanup = &cleanup[..cleanup
+            .find("    fn release_dependency_reservation(")
+            .expect("function end")];
+        let recorded = cleanup
+            .find("RecordProjectStop::begin()")
+            .expect("the owner's stop records itself");
+        let lease = cleanup
+            .find("Engine::connect_cleanup_wait(")
+            .expect("the stop's lease");
+        assert!(recorded < lease);
     }
 
     /// A stop that keeps the lease past the start's bound is refused, naming the

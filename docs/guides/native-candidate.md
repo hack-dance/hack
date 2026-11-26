@@ -1004,14 +1004,25 @@ retained-start check, resuming the running pool, the pool boot's admission, and 
 startup reads before a restore. A short holder such as `hack ps` costs only its own
 hold, because the start takes the lease as soon as it is free. When the wait lasts
 about 3 seconds, the start prints one line that names the holder, for example
-`Waiting for the native runtime lock, held by a project stop (hack down).` A
-foreground owner that stops its own run records itself as `project stop` in the
-lock. The record is advisory and never names the project. If the holder keeps the
-lease past 35 seconds, the start refuses `provider_busy` with nothing started,
-names the holder, and tells you to retry the same command once that holder
-finishes. You do not need `hack down` or a pool stop first. This wait is only for
-starts: `hack exec` keeps its own 15-second wait, and `hack ps` and `hack logs`
-keep their short observer behavior.
+`Waiting for the native runtime lock, held by a project stop.` The line appears at
+most once per command, however many of the start's requests wait. A foreground owner
+that stops its own run records itself as `project stop` in the lock, whether after
+`hack down` or while it rolls back a failed start. The record is advisory and never
+names the project. If the holder keeps the lease past 35 seconds, the start refuses
+`provider_busy` with nothing started, names the holder, and tells you to retry the
+same command once that holder finishes. You do not need `hack down` or a pool stop
+first. This wait is only for starts: `hack exec` keeps its own 15-second wait,
+`hack ps` and `hack logs` keep their short observer behavior, and the inspection a
+foreground start makes after it ends (after Ctrl-C, for example) keeps its 5-second
+bound.
+
+When two projects start on a stopped pool at the same time, the first boots it. The
+second waits for the lease and, once it holds it, finds the pool running and joins
+it, as it would have if it had started later.
+
+While a start waits, it keeps its project's run lock. A `hack down` of the same
+project during that wait is refused `provider_busy` for up to 35 seconds. Run it
+again once the start has returned.
 
 `runtime down --force` stops the pool anyway, as a crash or a host reboot would. The
 projects' containers stop with the guest and their data is kept. Its JSON lists the

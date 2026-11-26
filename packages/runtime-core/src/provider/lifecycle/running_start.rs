@@ -132,6 +132,19 @@ pub(super) fn resume(
     verify_retained: impl Fn() -> Result<(), CandidateError>,
 ) -> Result<RuntimeStatus, CandidateError> {
     let lock = startup_lease(&root(candidate), START_LEASE_WAIT)?;
+    resume_leased(candidate, running, request, &lock, verify_retained)
+}
+
+/// [`resume`] under a startup lease the caller already holds: a boot that waited for the
+/// lease while a concurrent start booted the pool resumes it instead of refusing
+/// (HACK-2724). Every check below runs under that lease, as in [`resume`].
+pub(super) fn resume_leased(
+    candidate: &Candidate,
+    running: Running,
+    request: &StartRequest<'_>,
+    lock: &state::Lock,
+    verify_retained: impl Fn() -> Result<(), CandidateError>,
+) -> Result<RuntimeStatus, CandidateError> {
     restore_released_short_home(candidate)?;
     verify_retained()?;
     super::super::network_update::require_complete(candidate)?;
@@ -145,7 +158,7 @@ pub(super) fn resume(
     verify_running(candidate, &owner)?;
     super::super::graph::verify_owner_registry(candidate, &owner)?;
     super::super::dependency_socket::verify(candidate, &owner)?;
-    verify_trees(candidate, &owner, &lock)?;
+    verify_trees(candidate, &owner, lock)?;
     super::super::network_tools::verify(candidate)?;
     verify_retained()?;
     audit_boot(candidate, &owner)?;

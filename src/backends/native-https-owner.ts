@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { lstat, mkdir, realpath } from "node:fs/promises";
+import { lstat, mkdir, readdir, realpath, rename } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { syncDirectory } from "./native-https-empty-owner-recovery.ts";
 import { acquireNativeHttpsOwnerAdmission } from "./native-https-owner-admission.ts";
 import {
   decodeNativeHttpsOwnerFrame,
@@ -35,6 +36,7 @@ import {
   nativeHttpsReadFile,
   nativeHttpsReadRelease,
   nativeHttpsReadRetiredOwner,
+  nativeHttpsRecordRetiredOwner,
   nativeHttpsWriteNew,
 } from "./native-https-owner-storage.ts";
 import { nativeHttpsReleaseReplyError } from "./native-https-release-failure.ts";
@@ -44,6 +46,7 @@ import {
 } from "./native-https-startup-failure.ts";
 import {
   inspectActiveNativeHttpsOwner,
+  NATIVE_HTTPS_CHILD_STARTUP_MS,
   verifyActiveNativeHttpsConnection,
   verifyNativeHttpsHostname,
 } from "./native-project-https.ts";
@@ -108,12 +111,17 @@ export class NativeHttpsLeaseAcquisitionError extends ClosedCliError {
   }
 }
 
+/** What the frontend that spawned a shared owner knows about it: whether it exited. */
+export interface NativeHttpsSpawnedOwner {
+  readonly exited: () => boolean;
+}
+
 /** The exact reviewed executable is detached into its own process group. */
 export async function spawnNativeHttpsOwner(opts: {
   readonly frontend: { readonly binary: string; readonly sha256: string };
   readonly configurationPath: string;
   readonly home: string;
-}): Promise<void> {
+}): Promise<NativeHttpsSpawnedOwner | undefined> {
   if (
     (await nativeHttpsExecutableSha256(opts.frontend.binary)) !==
     opts.frontend.sha256
@@ -134,7 +142,12 @@ export async function spawnNativeHttpsOwner(opts: {
     child.once("error", () => reject(nativeHttpsOwnerRefused()));
     child.once("spawn", resolve);
   });
+  let exited = false;
+  child.once("exit", () => {
+    exited = true;
+  });
   child.unref();
+  return { exited: () => exited };
 }
 
 function sameBinding(
@@ -196,7 +209,12 @@ async function readNativeHttpsOwnerConfigurationAtHome(
 /** No stale directory is removed. Interrupted startup is explicit recovery work. */
 export async function ensureNativeHttpsOwner(opts: {
   readonly binding: NativeHttpsOwnerBinding;
-  readonly spawnOwner?: typeof spawnNativeHttpsOwner;
+  /** Test seam; a stand-in that reports nothing gives no exit observation. */
+  readonly spawnOwner?: (
+    opts: Parameters<typeof spawnNativeHttpsOwner>[0]
+  ) => Promise<unknown>;
+  /** This call spawned the owner: how its caller can tell that it exited. */
+  readonly onSpawned?: (owner: NativeHttpsSpawnedOwner) => void;
 }): Promise<NativeHttpsOwnerConfiguration> {
   const { binding } = opts;
   const root = nativeHttpsOwnerRoot(binding.runtime.home);
@@ -228,11 +246,15 @@ export async function ensureNativeHttpsOwner(opts: {
       await mkdir(join(root, "leases"), { mode: 0o700 });
       const configurationPath = join(root, "configuration.json");
       await nativeHttpsWriteNew(configurationPath, configuration);
-      await (opts.spawnOwner ?? spawnNativeHttpsOwner)({
+      const spawned = await (opts.spawnOwner ?? spawnNativeHttpsOwner)({
         frontend: binding.frontend,
         home: binding.runtime.home,
         configurationPath,
       });
+      if (isRecord(spawned) && typeof spawned.exited === "function") {
+        const exited = spawned.exited;
+        opts.onSpawned?.({ exited: () => exited() === true });
+      }
       return configuration;
     }
     // Only startup publication can be retried; no acquire/release request is replayed.
@@ -262,16 +284,27 @@ export async function ensureNativeHttpsOwner(opts: {
 async function endpointFor(
   configuration: NativeHttpsOwnerConfiguration
 ): Promise<NativeHttpsOwnerEndpoint> {
+  // A missing configuration (or owner root) means this owner is gone, for
+  // example retired after its startup failed; it will never publish an
+  // endpoint. Refuse at once instead of letting the connect loop retry ENOENT
+  // for the whole startup budget. Only a missing endpoint is waited for.
+  const ownerGone = (error: unknown): never => {
+    if (isRecord(error) && error.code === "ENOENT") {
+      throw nativeHttpsOwnerRefused();
+    }
+    throw error;
+  };
   const current = await readNativeHttpsOwnerConfiguration(
     configuration.binding.runtime
-  );
+  ).catch(ownerGone);
   if (
     current.ownerGeneration !== configuration.ownerGeneration ||
     !sameBinding(current.binding, configuration.binding)
   ) {
     throw nativeHttpsOwnerRefused();
   }
-  const startupFailure = await readNativeHttpsStartupFailure(configuration);
+  const startupFailure =
+    await readNativeHttpsStartupFailure(configuration).catch(ownerGone);
   if (startupFailure) {
     throw startupFailure;
   }
@@ -302,11 +335,31 @@ async function endpointFor(
   return endpoint;
 }
 
+/**
+ * How long a connector waits for a starting shared owner to publish its
+ * endpoint: longer than the owner's whole child startup (the authority's lease
+ * wait included), so no connector gives up on an owner that is still starting,
+ * then finds nothing it can release or recover. That holds for every connector,
+ * not only the frontend that spawned the owner: a second project that found the
+ * configuration and waited only 15 s had its run aborted and its recovery left
+ * unconfirmed (#1260 review, M2). A failed owner still fails fast: its recorded
+ * startup failure ends the wait (`endpointFor`).
+ */
+export const NATIVE_HTTPS_OWNER_STARTUP_WAIT_MS =
+  NATIVE_HTTPS_CHILD_STARTUP_MS + 15_000;
+
 export async function connectNativeHttpsOwner(
   configuration: NativeHttpsOwnerConfiguration,
-  waitForStartup = true
+  waitForStartup = true,
+  /**
+   * The frontend that spawned this owner also stops waiting once that process
+   * exits. Every connector waits for the whole startup
+   * ({@link NATIVE_HTTPS_OWNER_STARTUP_WAIT_MS}).
+   */
+  spawned?: NativeHttpsSpawnedOwner
 ): Promise<Socket> {
-  const deadline = Date.now() + (waitForStartup ? 15_000 : 1);
+  const deadline =
+    Date.now() + (waitForStartup ? NATIVE_HTTPS_OWNER_STARTUP_WAIT_MS : 1);
   for (;;) {
     try {
       const endpoint = await endpointFor(configuration);
@@ -340,7 +393,8 @@ export async function connectNativeHttpsOwner(
       if (
         !isRecord(error) ||
         error.code !== "ENOENT" ||
-        Date.now() >= deadline
+        Date.now() >= deadline ||
+        spawned?.exited()
       ) {
         throw error;
       }
@@ -443,12 +497,21 @@ export async function acquireNativeHttpsLease(
     httpsPort: opts.httpsPort,
     certificateNameLimit: opts.certificateNameLimit ?? 256,
   };
-  const configuration = await ensureNativeHttpsOwner({ binding });
+  let spawned: NativeHttpsSpawnedOwner | undefined;
+  const configuration = await ensureNativeHttpsOwner({
+    binding,
+    onSpawned: (owner) => {
+      spawned = owner;
+    },
+  });
   const intended = nativeHttpsLeaseIdentity(configuration, opts.lease);
   await opts.onIntent?.(intended);
   let socket: Socket;
   try {
-    socket = await connectNativeHttpsOwner(configuration);
+    // A starting owner may be waiting out a `hack down` of the same run for
+    // the provider lease (HACK-2707): wait for its whole startup rather than
+    // give up while it is still starting.
+    socket = await connectNativeHttpsOwner(configuration, true, spawned);
   } catch (startupFailure) {
     throw new NativeHttpsLeaseAcquisitionError(intended, { startupFailure });
   }
@@ -628,6 +691,153 @@ async function archivePreviousBootSharedHttps(opts: {
   return false;
 }
 
+/** Absence as a value; anything other than ENOENT (a foreign entry) refuses. */
+async function nativeHttpsPathAbsent(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return false;
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return true;
+    }
+    throw nativeHttpsOwnerRefused();
+  }
+}
+
+/**
+ * A startup failure that admitted nothing by contract: the hostname authority's
+ * lease wait expired (`authority-ready: provider_busy`, "no operation was
+ * admitted") and the owner confirmed its child pair stopped.
+ */
+function admittedNothing(
+  failure: NativeHttpsStartupError | undefined
+): boolean {
+  return (
+    failure !== undefined &&
+    failure.diagnostic.stage === "authority-ready" &&
+    failure.diagnostic.nativeCode === "provider_busy" &&
+    !failure.diagnostic.cleanupUnconfirmed
+  );
+}
+
+/**
+ * Retire the current owner generation of `identity` when its startup failed
+ * having admitted nothing (#1260 review, M3; HACK-2707 for any stop length).
+ *
+ * The authority waits 30 s for the provider lease, but a graph stop holds it
+ * for as long as the run's stop grace periods take (up to 540 s). A `hack down`
+ * right after `up -d` whose stop outlasts the wait made the shared owner's
+ * startup fail, and that failure was retained: the frontend's recovery of its
+ * lease could not be confirmed (`down` exited 1) and every later acquisition
+ * found the failed generation (the next `up` needed recovery). The retained
+ * record now no longer blocks once a recovery of a lease of that generation
+ * runs, which the frontend does only after its graph owner has settled and
+ * `down` only after the stop:
+ *
+ * - The record proves the generation never ran: the owner records a startup
+ *   failure only while still starting, so it never admitted a lease, and with
+ *   no `endpoint.json` no client could ever reach it. The lease directory must
+ *   still be empty and the child pair confirmed stopped.
+ * - Only `authority-ready: provider_busy` qualifies (see `admittedNothing`).
+ *   Every other startup failure is still retained as evidence, unchanged.
+ * - Under the owner admission lock (which also serializes a new owner's
+ *   creation) it takes two durable steps: it writes the retired-owner record,
+ *   then moves the whole owner root, still its exact inode, beside that record
+ *   as evidence (`released-leases/<generation>/failed-owner`) with one
+ *   `rename`. A crash between the two leaves the root exactly as the failed
+ *   owner left it, so the next recovery matches it again and finishes; a crash
+ *   after the rename leaves nothing to resume. No state in between can make a
+ *   later `up` wait on a configuration whose failure record is gone. Both
+ *   steps sync their directories, so the record is durable before the rename.
+ *   A process killed while it holds the admission lock leaves that lock
+ *   behind, so recovery fails closed until it is reviewed, the same as for
+ *   every other holder of that lock.
+ *
+ * The caller's retired-owner branch then verifies this lease's release through
+ * the graph (graph, bridges and publication claims), as for an idle-retired
+ * owner; no lease is acknowledged here.
+ */
+async function retireUnadmittedNativeHttpsOwner(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly identity: NativeHttpsLeaseIdentity;
+}): Promise<void> {
+  const home = opts.runtime.home;
+  const root = nativeHttpsOwnerRoot(home);
+  // Anything else (no owner, another generation, a live or foreign one, an
+  // unreadable record) is left to the rest of recovery, exactly as before.
+  const current = async () => {
+    try {
+      const configuration = await readNativeHttpsOwnerConfiguration(
+        opts.runtime
+      );
+      if (
+        configuration.ownerGeneration === opts.identity.ownerGeneration &&
+        configuration.binding.pool.owner === opts.identity.owner &&
+        admittedNothing(await readNativeHttpsStartupFailure(configuration))
+      ) {
+        return configuration;
+      }
+    } catch {
+      // Left to the rest of recovery.
+    }
+    return;
+  };
+  if (!(await current())) {
+    return;
+  }
+  const admission = await acquireNativeHttpsOwnerAdmission({
+    home,
+    waitMs: 15_000,
+  });
+  try {
+    // Everything again under admission: nothing can create or publish here now.
+    // The root's identity is taken first, so the rename below moves exactly
+    // the root whose contents were checked.
+    const rootIdentity = await lstat(root).catch(() => undefined);
+    const configuration = rootIdentity ? await current() : undefined;
+    if (!(rootIdentity && configuration)) {
+      return;
+    }
+    // An endpoint was published: a client could have reached this owner.
+    if (!(await nativeHttpsPathAbsent(join(root, "endpoint.json")))) {
+      return;
+    }
+    await nativeHttpsPrivateDirectory(join(root, "leases"));
+    if ((await readdir(join(root, "leases"))).length !== 0) {
+      return;
+    }
+    const generation = configuration.ownerGeneration;
+    try {
+      await nativeHttpsReadRetiredOwner(home, generation);
+    } catch (error) {
+      if (!isRecord(error) || error.code !== "ENOENT") {
+        throw error;
+      }
+      await nativeHttpsRecordRetiredOwner(configuration);
+    }
+    const released = join(home, "native-https", "released-leases");
+    // The record must be durable before the rename can be: otherwise a power
+    // loss could keep the rename but not the record, and recovery would then
+    // fail closed on a moved root with no retired owner.
+    await syncDirectory(join(released, generation));
+    await syncDirectory(released);
+    const evidence = join(released, generation, "failed-owner");
+    // `rename` would replace an empty directory: refuse any existing entry.
+    if (!(await nativeHttpsPathAbsent(evidence))) {
+      throw nativeHttpsOwnerRefused();
+    }
+    const before = await lstat(root);
+    if (before.dev !== rootIdentity.dev || before.ino !== rootIdentity.ino) {
+      throw nativeHttpsOwnerRefused();
+    }
+    await rename(root, evidence);
+    await syncDirectory(join(released, generation));
+    await syncDirectory(dirname(root));
+  } finally {
+    await admission.release();
+  }
+}
+
 /** Recovery never treats absent/dead helper state as permission to adopt its children. */
 export async function recoverNativeHttpsLease(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -664,6 +874,9 @@ export async function recoverNativeHttpsLease(opts: {
       throw error;
     }
   }
+  // An owner generation whose startup failed having admitted nothing is
+  // retired first; the retired-owner branch below then verifies the release.
+  await retireUnadmittedNativeHttpsOwner(opts);
   try {
     const retired = await nativeHttpsReadRetiredOwner(
       opts.runtime.home,

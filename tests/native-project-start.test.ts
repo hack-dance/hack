@@ -17,7 +17,10 @@ import {
   NativeHttpsLeaseAcquisitionError,
 } from "../src/backends/native-https-owner.ts";
 import { NativeHttpsStartupError } from "../src/backends/native-https-startup-failure.ts";
-import { NATIVE_IMAGE_ENSURE_TIMEOUT_MS } from "../src/backends/native-image-policy.ts";
+import {
+  NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+  NativeImageBatchError,
+} from "../src/backends/native-image-policy.ts";
 import { selectNativeProfiles } from "../src/backends/native-profile-selection.ts";
 import {
   admitNativeProjectBuilds,
@@ -54,7 +57,9 @@ import {
 } from "../src/backends/native-project-run.ts";
 import {
   NATIVE_CONFIGURATION_REFUSAL,
+  NATIVE_EXITED_RUNTIME_RECOVERY_FAILED,
   NATIVE_SHARED_SOURCE_REFUSAL,
+  NativeForegroundVmLostError,
   NativeStartupCanceledError,
   type NativeStartupProgress,
   nativeReadinessArgs,
@@ -62,7 +67,9 @@ import {
   nativeStoppedNotice,
   parseNativeHttpsSelection,
   prepareNativeProjectServices,
+  restartPreflightLossStage,
   reviewedNativeHttpsRoutes,
+  routeNativeLostVm,
   serviceExitedFailure,
   startedServiceSummary,
   startNativeProject,
@@ -75,7 +82,12 @@ import {
 } from "../src/backends/native-runtime-client.ts";
 import { NATIVE_EXITED_RUNTIME_NOTICE } from "../src/backends/native-runtime-preflight.ts";
 import { selectNativeServices } from "../src/backends/native-service-selection.ts";
-import { watchNativeStartPool } from "../src/backends/native-start-pool-watch.ts";
+import {
+  classifyNativeLostProvider,
+  NATIVE_START_POOL_CHECK_MS,
+  NATIVE_START_POOL_GRACE_MS,
+  watchNativeStartPool,
+} from "../src/backends/native-start-pool-watch.ts";
 import type { NativeStartupLogTail } from "../src/backends/native-startup-logs.ts";
 import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
@@ -5007,6 +5019,79 @@ test("lost shared HTTPS acquire reply retains intent and recovers only after gra
   }
 });
 
+test("a stop during a started return's HTTPS acquisition waits for it before cleanup (HACK-2707)", async () => {
+  // `hack down` right after `up -d`: the owner reaches its ready line, the
+  // frontend starts taking the shared HTTPS lease, and the stop ends the owner
+  // while that acquisition is still in flight (the shared owner is starting,
+  // its authority waiting for the lease the stop holds). Cleanup must wait for
+  // the acquisition to settle, then recover its intent, and only then
+  // acknowledge the lifetime. It must not report the refused acquire, which
+  // only says the graph is no longer ready, as an infrastructure failure.
+  for (const outcome of ["refused", "admitted"] as const) {
+    const { opts, events } = await httpsFixture();
+    let intent: ReturnType<typeof leaseIdentity> | undefined;
+    opts.dependencies.finalization = async (request) => {
+      const lifetime = await beginNativeProjectFinalization(request);
+      events.push(request.httpsLease ? "intent" : "lifetime");
+      return {
+        ...lifetime,
+        complete: async () => {
+          await lifetime.complete();
+          events.push("finalized");
+        },
+      };
+    };
+    opts.dependencies.https = async (selection) => {
+      // The shared owner takes a while to start (its authority waits out the
+      // stop's lease) before the intent and the acquire.
+      await Bun.sleep(150);
+      intent = leaseIdentity(selection);
+      await selection.onIntent?.(intent);
+      await Bun.sleep(50);
+      if (outcome === "refused") {
+        events.push("acquire-refused");
+        throw new Error("graph no longer ready");
+      }
+      events.push("acquire-admitted");
+      return {
+        identity: intent,
+        caPath: "/synthetic/root.crt",
+        httpsPort: 8443,
+        exited: new Promise(() => {}),
+        verifyHostname: async () => ({ statusCode: 200 }),
+        releaseAfterCleanup: async () => {
+          events.push("https-close");
+        },
+      };
+    };
+    opts.dependencies.recoverHttps = async ({ identity }) => {
+      if (!intent) {
+        throw new Error("missing acquire intent");
+      }
+      expect(identity).toEqual(intent);
+      events.push("recover-lease");
+    };
+    const progress: string[] = [];
+    expect(
+      await startNativeProject({
+        ...opts,
+        https: httpsSelection,
+        waitForReady: false,
+        onProgress: (event) => progress.push(event.phase),
+      })
+    ).toBe(0);
+    const settled =
+      outcome === "refused" ? "acquire-refused" : "acquire-admitted";
+    const cleanup = outcome === "refused" ? "recover-lease" : "https-close";
+    expect(events).toContain("intent");
+    expect(events.indexOf("intent")).toBeLessThan(events.indexOf(settled));
+    expect(events.indexOf(settled)).toBeLessThan(events.indexOf(cleanup));
+    expect(events.indexOf(cleanup)).toBeLessThan(events.indexOf("finalized"));
+    expect(events.filter((event) => event === cleanup)).toHaveLength(1);
+    expect(progress).not.toContain("routes-not-answering");
+  }
+});
+
 test("restart callback follows ready and acknowledgement follows all finalizers", async () => {
   const { opts, events } = await httpsFixture();
   opts.dependencies.finalization = async (request) => {
@@ -7970,6 +8055,694 @@ test.each([
     stopped.resolve();
     await attempt;
   }
+});
+
+/**
+ * How long a foreground start may outlive its lost VM (HACK-2096): one pool
+ * check, the in-progress grace, and margin. The production constants must fit.
+ */
+const FOREGROUND_POOL_END_BOUND_MS = 15_000;
+
+test("the foreground lost-VM bound covers one pool check and the grace", () => {
+  expect(NATIVE_START_POOL_CHECK_MS + NATIVE_START_POOL_GRACE_MS).toBeLessThan(
+    FOREGROUND_POOL_END_BOUND_MS
+  );
+});
+
+/**
+ * HACK-2096: a foreground start whose provider VM is killed under it. Before,
+ * only a detached owner watched its pool, so the foreground waited on a graph
+ * owner in a lost VM and never exited. Now it names the lost VM and what to run
+ * next, then exits non-zero: at once when ready, after the grace otherwise.
+ *
+ * - `serving`: ready, nothing left to finish.
+ * - `graph-ready`: the runtime reported the graph ready and the run is mapped,
+ *   and the frontend's own readiness work (here the caller's `onReady`, where
+ *   `hack restart` retires its intent) still runs. The run is retired across
+ *   boots by `hack down --recover`, which also retires a restart still pending.
+ * - `ready-unmapped`: a started return whose runtime frame came, but whose
+ *   mapping save is still running (review L4). `down` would find no run, so
+ *   it is still the requested stage, not the ready one.
+ * - `starting`: services requested, lost before the graph was ready, which no
+ *   command can retire yet (HACK-2714), so the message names none.
+ * - `preparing` / `preparing-restore`: lost during image pulls, before any
+ *   service was requested (review M1). A fresh `up` has no run record, so the
+ *   message names `hack up` alone; a restore (a restart's replacement, or a
+ *   resumed retained run) names `hack down --recover`, then `hack up`.
+ *
+ * Every case runs `beforeLostExit` (a restart releases its lock there) once,
+ * after the startup observation finished and before the exit.
+ */
+test.each([
+  { stage: "serving" },
+  { stage: "graph-ready" },
+  { stage: "ready-unmapped" },
+  { stage: "starting" },
+  { stage: "preparing" },
+  { stage: "preparing-restore" },
+] as const)("a foreground start exits non-zero when its provider VM dies ($stage)", async ({
+  stage,
+}) => {
+  const { opts } = await fixture(false);
+  const boot = "87654321-4321-4321-4321-cba987654321";
+  const pid = 2345;
+  const graceMs = 40;
+  let providerGone = false;
+  let watched: string | undefined;
+  const warnings: string[] = [];
+  const exits: number[] = [];
+  const order: string[] = [];
+  const reached = Promise.withResolvers<void>();
+  const released = Promise.withResolvers<void>();
+  const exited = Promise.withResolvers<void>();
+  opts.dependencies.warn = (line) => void warnings.push(line);
+  if (stage === "preparing" || stage === "preparing-restore") {
+    // Lost while the start acquires its images.
+    const retainedImages = opts.dependencies.retainedImages!;
+    opts.dependencies.retainedImages = async (request) => {
+      reached.resolve();
+      await released.promise;
+      return await retainedImages(request);
+    };
+  }
+  if (stage === "ready-unmapped") {
+    // The mapping save of a started return is still in flight.
+    const save = opts.dependencies.save!;
+    opts.dependencies.save = async (request) => {
+      reached.resolve();
+      await released.promise;
+      return await save(request);
+    };
+  }
+  opts.dependencies.watchPool = (options) => {
+    watched = options.bootId;
+    return watchNativeStartPool({
+      ...options,
+      checkMs: 5,
+      // Keep the production choice (0 once ready), with a short in-progress grace.
+      graceMs: () =>
+        typeof options.graceMs === "function" && options.graceMs() === 0
+          ? 0
+          : graceMs,
+      read: async () => ({
+        phase: "running",
+        token: "c".repeat(32),
+        guest_boot_id: boot,
+        process: { pid },
+      }),
+      gone: (candidate) => candidate === pid && providerGone,
+    });
+  };
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) =>
+    request.args[0] === "runtime" && request.args[1] === "up"
+      ? { phase: "running", process_alive: true, guest_boot_id: boot }
+      : await invoke(request);
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    if (stage === "starting") {
+      // The VM is lost while the owner is still starting its services.
+      reached.resolve();
+      await released.promise;
+      return 1;
+    }
+    return await serve({
+      ...request,
+      onReady: async () => {
+        await request.onReady();
+        if (stage === "serving") {
+          reached.resolve();
+          await released.promise;
+        }
+      },
+    });
+  };
+  const started = performance.now();
+  // No watchPool option: a foreground start watches by default.
+  const attempt = startNativeProject({
+    ...opts,
+    ...(stage === "graph-ready"
+      ? {
+          // The caller's readiness work, which runs before `ready` progress.
+          onReady: async () => {
+            reached.resolve();
+            await released.promise;
+          },
+        }
+      : {}),
+    // A started return: the mapping is saved after the runtime's frame.
+    ...(stage === "ready-unmapped" ? { waitForReady: false } : {}),
+    // A restart's replacement (or a resumed retained run) has a run record.
+    ...(stage === "preparing-restore"
+      ? {
+          restore: {
+            run: "1".repeat(32),
+            owner: "c".repeat(32),
+            namespace: "b".repeat(64),
+            planId: "a".repeat(64),
+          },
+        }
+      : {}),
+    beforeLostExit: async () => {
+      order.push("beforeLostExit");
+    },
+    exitOnPoolEnd: () => {
+      order.push("exit");
+      exits.push(performance.now() - started);
+      exited.resolve();
+    },
+  });
+  try {
+    await Promise.race([reached.promise, attempt]);
+    expect(watched).toBe(boot);
+    await Bun.sleep(30);
+    expect(exits).toEqual([]);
+    expect(warnings.join("\n")).not.toContain("native runtime VM");
+    const killedAt = performance.now();
+    providerGone = true;
+    await Promise.race([
+      exited.promise,
+      Bun.sleep(FOREGROUND_POOL_END_BOUND_MS),
+    ]);
+    expect(exits).toHaveLength(1);
+    expect(order).toEqual(["beforeLostExit", "exit"]);
+    const elapsed = performance.now() - killedAt;
+    expect(elapsed).toBeLessThan(FOREGROUND_POOL_END_BOUND_MS);
+    if (stage === "serving") {
+      // Ready: nothing left to finish, so no grace (checks every 5 ms).
+      expect(elapsed).toBeLessThan(graceMs);
+    } else {
+      // Still starting or finishing readiness: the start keeps its grace.
+      expect(elapsed).toBeGreaterThanOrEqual(graceMs - 5);
+    }
+    const message = warnings.find((line) => line.includes("native runtime VM"));
+    expect(message).toContain(`pid ${pid}`);
+    expect(message).toContain(boot);
+    expect(message).toContain("exit code 1");
+    expect(message).not.toContain("hack restart");
+    if (stage === "starting" || stage === "ready-unmapped") {
+      expect(message).not.toContain("hack down");
+      expect(message).not.toContain("hack up");
+      expect(message).toContain("Keep this native home unchanged");
+    } else if (stage === "preparing") {
+      expect(message).not.toContain("hack down");
+      expect(message?.split("\n").at(-1)).toBe(
+        "Run hack up to start it again."
+      );
+    } else if (stage === "preparing-restore") {
+      expect(message).toContain(
+        "Run hack down --recover to retire the interrupted start with the run's data kept, then hack up to start it again."
+      );
+    } else {
+      expect(message).toContain(
+        "Run hack down --recover to retire this run with its data kept, then hack up to start it again."
+      );
+    }
+  } finally {
+    released.resolve();
+    await attempt.catch(() => undefined);
+  }
+  // The start settling afterwards never exits a second time.
+  expect(exits).toHaveLength(1);
+});
+
+/**
+ * HACK-2096 real-VM review: on a real VM the start's own error path reports a
+ * lost provider within 0.13 to 1.6 s, before the pool watch's check and grace,
+ * so the stage message never printed: a restart lost in its image pull said
+ * only `process_identity_unavailable`, a resumed `up` said "Image preparation
+ * failed ... hack up" (which refuses), and a started return said the generic
+ * cleanup text. Every path now goes through `classifyNativeLostProvider` and
+ * fails with the stage message, from the stage the graph reached. Here the
+ * watch never fires, as when the start error wins the race.
+ *
+ * - `request`: a runtime request refused `process_identity_unavailable`.
+ * - `image`: image preparation reported that code for an image.
+ * - `unwind`: the serve request failed, before or after a started return.
+ * - `record`: the error names no code, but the pool record shows the watched
+ *   boot's provider pid gone.
+ */
+test.each([
+  { path: "request", stage: "preparing-restore" },
+  { path: "image", stage: "preparing" },
+  { path: "image", stage: "preparing-restore" },
+  { path: "unwind", stage: "requested" },
+  { path: "unwind", stage: "ready" },
+  { path: "unwind", stage: "started" },
+  { path: "record", stage: "preparing" },
+] as const)("a start error from a lost provider fails with the stage message ($path, $stage)", async ({
+  path,
+  stage,
+}) => {
+  const { opts } = await fixture(false);
+  const boot = "87654321-4321-4321-4321-cba987654321";
+  const pid = 2345;
+  const lostRequest = () =>
+    new NativeRuntimeRequestError({
+      message:
+        "Native runtime request failed (process_identity_unavailable); inspect owned state before retrying.",
+      nativeCode: "process_identity_unavailable",
+    });
+  let watched: string | undefined;
+  // The watch is bound but never fires: the start error wins.
+  opts.dependencies.watchPool = (options) => {
+    watched = options.bootId;
+    return () => undefined;
+  };
+  opts.dependencies.classifyLostProvider = (options) =>
+    classifyNativeLostProvider({
+      ...options,
+      read: async () => ({
+        phase: "running",
+        token: "c".repeat(32),
+        guest_boot_id: boot,
+        process: { pid },
+      }),
+      gone: (candidate) => candidate === pid,
+    });
+  // Once the VM is lost, every later runtime request refuses, so the start's
+  // own unwind cannot confirm its cleanup (the real-VM row: "Native foreground
+  // exit cleanup is unconfirmed ... process_identity_unavailable").
+  let vmLost = false;
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[0] === "runtime" && request.args[1] === "up") {
+      return { phase: "running", process_alive: true, guest_boot_id: boot };
+    }
+    if (vmLost) {
+      throw lostRequest();
+    }
+    return await invoke(request);
+  };
+  let original: unknown;
+  if (path === "request") {
+    opts.dependencies.review = async () => {
+      original = lostRequest();
+      throw original;
+    };
+  } else if (path === "image" || path === "record") {
+    opts.dependencies.retainedImages = async () => {
+      original =
+        path === "image"
+          ? new NativeImageBatchError([
+              {
+                reference: "docker.io/library/python:3.10-alpine",
+                code: "process_identity_unavailable",
+                reason: "Cannot establish native provider process identity",
+                recovery: "Inspect hack doctor, then retry hack up.",
+                services: ["web"],
+              },
+            ])
+          : new Error("synthetic image read failure");
+      throw original;
+    };
+  } else {
+    const serve = opts.dependencies.serve!;
+    opts.dependencies.serve = async (request) => {
+      if (stage === "ready") {
+        // A started return (mapped), then the owner's ready line, then
+        // the owner's request fails.
+        await serve(request);
+      } else if (stage === "started") {
+        // Real-VM row 2: a started return (mapped) whose owner never
+        // reached its ready line; the runtime has not confirmed the start.
+        await request.onReady();
+      }
+      vmLost = true;
+      original = lostRequest();
+      throw original;
+    };
+  }
+  const failure = await startNativeProject({
+    ...opts,
+    ...(stage === "ready" || stage === "started"
+      ? { waitForReady: false }
+      : {}),
+    ...(stage === "preparing-restore"
+      ? {
+          restore: {
+            run: "1".repeat(32),
+            owner: "c".repeat(32),
+            namespace: "b".repeat(64),
+            planId: "a".repeat(64),
+          },
+        }
+      : {}),
+  }).then(
+    () => undefined,
+    (error: unknown) => error
+  );
+  expect(watched).toBe(boot);
+  expect(failure).toBeInstanceOf(NativeForegroundVmLostError);
+  const lost = failure as NativeForegroundVmLostError;
+  if (path === "request" || path === "image" || path === "record") {
+    // The thrown error is the original one, kept as the cause.
+    expect(lost.cause).toBe(original);
+  }
+  expect(lost.end).toEqual({ bootId: boot, providerPid: pid });
+  // The stage message, then the start's own error on one cause line (round-4
+  // review: a misclassification stays diagnosable).
+  const lines = lost.message.split("\n");
+  const causeLine = lines.at(-1) ?? "";
+  const advice = lines.slice(0, -1).join("\n");
+  expect(causeLine.startsWith("(cause: ")).toBe(true);
+  if (path === "unwind") {
+    // The start's own unwind error (real-VM row 2's shape), whichever of its
+    // cleanup refusals the fixture reaches.
+    expect(causeLine.startsWith("(cause: Native foreground ")).toBe(true);
+  } else if (original instanceof Error) {
+    expect(causeLine).toContain(original.message.split("\n")[0]!);
+  }
+  expect(advice).toContain(`pid ${pid}`);
+  expect(advice).toContain("exit code 1");
+  expect(advice).not.toContain("hack restart");
+  expect(advice).not.toContain("Image preparation failed");
+  if (stage === "preparing") {
+    expect(lost.loss).toEqual({ stage: "preparing", recorded: false });
+    expect(advice).not.toContain("hack down");
+    expect(lines.at(-2)).toBe("Run hack up to start it again.");
+  } else if (stage === "preparing-restore") {
+    expect(lost.loss).toEqual({ stage: "preparing", recorded: true });
+    expect(advice).toContain(
+      "Run hack down --recover to retire the interrupted start with the run's data kept, then hack up to start it again."
+    );
+  } else if (stage === "requested" || stage === "started") {
+    expect(lost.loss).toEqual({ stage: "requested" });
+    expect(advice).not.toContain("hack down");
+    expect(advice).toContain("Keep this native home unchanged");
+    // HACK-2714: nothing retires the run, so the cause names no step either.
+    expect(causeLine).not.toContain("hack down");
+  } else {
+    expect(lost.loss).toEqual({ stage: "ready" });
+    expect(advice).toContain(
+      "Run hack down --recover to retire this run with its data kept, then hack up to start it again."
+    );
+  }
+});
+
+/**
+ * Round-4 review: the runtime also reports `process_identity_unavailable` for
+ * failures on a healthy VM (an image build's context snapshot, an incarnation
+ * read, a helper scan). A live provider on the watched boot vetoes the code.
+ */
+test.each([
+  { error: "plain" },
+  { error: "lost-provider code" },
+] as const)("a start error on a live VM keeps its own message ($error)", async ({
+  error,
+}) => {
+  const { opts } = await fixture(false);
+  const boot = "87654321-4321-4321-4321-cba987654321";
+  opts.dependencies.watchPool = () => () => undefined;
+  opts.dependencies.classifyLostProvider = (options) =>
+    classifyNativeLostProvider({
+      ...options,
+      read: async () => ({
+        phase: "running",
+        token: "c".repeat(32),
+        guest_boot_id: boot,
+        process: { pid: 2345 },
+      }),
+      gone: () => false,
+    });
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) =>
+    request.args[0] === "runtime" && request.args[1] === "up"
+      ? { phase: "running", process_alive: true, guest_boot_id: boot }
+      : await invoke(request);
+  const original =
+    error === "plain"
+      ? new Error("synthetic image read failure")
+      : new NativeImageBatchError([
+          {
+            reference: "docker.io/library/python:3.10-alpine",
+            code: "process_identity_unavailable",
+            reason: "Cannot establish native provider process identity",
+            recovery: "Inspect hack doctor, then retry hack up.",
+            services: ["web"],
+          },
+        ]);
+  opts.dependencies.retainedImages = async () => {
+    throw original;
+  };
+  await expect(startNativeProject(opts)).rejects.toBe(original);
+});
+
+/**
+ * HACK-2096 real-VM row 6 at c624229e: `hack restart` pulls images in its
+ * preflight, before it saves its intent or stops anything, so a provider killed
+ * there printed only the raw `process_identity_unavailable`. The preflight now
+ * runs through `routeNativeLostVm`, with the stage its restart is in.
+ */
+test("a restart preflight lost with its VM fails with the stage message", async () => {
+  const boot = "87654321-4321-4321-4321-cba987654321";
+  const running = {
+    phase: "running",
+    token: "c".repeat(32),
+    guest_boot_id: boot,
+    process: { pid: 2345 },
+  };
+  const original = new NativeRuntimeRequestError({
+    message:
+      "Native runtime request failed (process_identity_unavailable); inspect owned state before retrying.",
+    nativeCode: "process_identity_unavailable",
+  });
+  const route = (gone: boolean, record: unknown = running) =>
+    routeNativeLostVm({
+      home: "/unused",
+      loss: restartPreflightLossStage({
+        cleanedRetry: false,
+        preparedRetry: false,
+      }),
+      read: async () => record,
+      classify: (options) =>
+        classifyNativeLostProvider({
+          ...options,
+          read: async () => record,
+          gone: () => gone,
+        }),
+      run: async () => {
+        throw original;
+      },
+    }).then(
+      () => undefined,
+      (error: unknown) => error
+    );
+  const lost = await route(true);
+  expect(lost).toBeInstanceOf(NativeForegroundVmLostError);
+  expect((lost as NativeForegroundVmLostError).loss).toEqual({
+    stage: "ready",
+  });
+  expect((lost as Error).message).toContain(
+    "Run hack down --recover to retire this run with its data kept, then hack up to start it again."
+  );
+  expect((lost as Error).message).toContain(
+    "(cause: Native runtime request failed (process_identity_unavailable)"
+  );
+  // A live provider keeps the preflight's own error, code and all.
+  expect(await route(false)).toBe(original);
+  // No running boot when the preflight began: nothing to classify against.
+  expect(await route(true, { phase: "stopped", token: "c".repeat(32) })).toBe(
+    original
+  );
+});
+
+/**
+ * HACK-2096 real-VM row 7 at c624229e: after a fresh `up` lost its VM, the
+ * `hack up` its message names failed at once: `runtime up` refused
+ * `process_identity_unavailable` because the dead provider's record still said
+ * `running`, and a fresh start has no retained preflight to trigger the
+ * HACK-2579 recovery. `runtime up` now recovers an exited provider first, once.
+ */
+test.each([
+  { status: "process-exited", recovers: true },
+  { status: "running", recovers: false },
+] as const)("a fresh up recovers an exited provider before runtime up ($status)", async ({
+  status,
+  recovers,
+}) => {
+  const { opts, events } = await fixture(false);
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => void notices.push(line);
+  let ups = 0;
+  let recovered = false;
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    const [area, command] = request.args;
+    if (area === "runtime" && command === "up") {
+      ups++;
+      events.push("runtime up");
+      if (!recovered) {
+        throw new NativeRuntimeRequestError({
+          message:
+            "Native runtime request failed (process_identity_unavailable); inspect owned state before retrying.",
+          nativeCode: "process_identity_unavailable",
+        });
+      }
+      return { phase: "running", process_alive: true };
+    }
+    if (area === "runtime" && command === "status") {
+      events.push(`runtime status ${status}`);
+      return { phase: status, process_alive: status === "running" };
+    }
+    if (area === "runtime" && command === "recover") {
+      events.push("runtime recover");
+      recovered = true;
+      return { phase: "recovered-unclean" };
+    }
+    return await invoke(request);
+  };
+  const started = startNativeProject({ ...opts, watchPool: false });
+  if (recovers) {
+    expect(await started).toBe(0);
+    expect(ups).toBe(2);
+    expect(events).toContain("runtime recover");
+    expect(notices).toContain(NATIVE_EXITED_RUNTIME_NOTICE);
+  } else {
+    await expect(started).rejects.toBeInstanceOf(NativeRuntimeRequestError);
+    expect(ups).toBe(1);
+    expect(events).not.toContain("runtime recover");
+  }
+});
+
+test("a failed exited-provider recovery says so, then keeps the original refusal", async () => {
+  const { opts } = await fixture(false);
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => void notices.push(line);
+  const original = new NativeRuntimeRequestError({
+    message:
+      "Native runtime request failed (process_identity_unavailable); inspect owned state before retrying.",
+    nativeCode: "process_identity_unavailable",
+  });
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    const [area, command] = request.args;
+    if (area === "runtime" && command === "up") {
+      throw original;
+    }
+    if (area === "runtime" && command === "status") {
+      return { phase: "process-exited", process_alive: false };
+    }
+    if (area === "runtime" && command === "recover") {
+      throw new Error("synthetic recovery failure");
+    }
+    return await invoke(request);
+  };
+  await expect(startNativeProject({ ...opts, watchPool: false })).rejects.toBe(
+    original
+  );
+  expect(
+    notices.filter((line) => line === NATIVE_EXITED_RUNTIME_RECOVERY_FAILED)
+  ).toHaveLength(1);
+});
+
+test("a restart preflight's loss stage follows the restart it retries", () => {
+  expect(
+    restartPreflightLossStage({ cleanedRetry: false, preparedRetry: false })
+  ).toEqual({ stage: "ready" });
+  expect(
+    restartPreflightLossStage({ cleanedRetry: true, preparedRetry: false })
+  ).toEqual({ stage: "preparing", recorded: true });
+  expect(
+    restartPreflightLossStage({ cleanedRetry: false, preparedRetry: true })
+  ).toEqual({ stage: "requested" });
+});
+
+/**
+ * HACK-2096 review: once the graph is confirmed stopped, the pool counts as
+ * idle, and another project's up (or a runtime down) may stop it while this
+ * start still runs its lifecycle cleanup, down.after and the finalization
+ * acknowledgement. That is not a lost VM: the start finishes on its own, with
+ * no lost-VM message and no exit.
+ */
+test.each([
+  { readyFirst: true },
+  { readyFirst: false },
+])("a foreground start whose graph has stopped ignores a later pool stop (ready: $readyFirst)", async ({
+  readyFirst,
+}) => {
+  const { opts, events } = await fixture(false);
+  const boot = "87654321-4321-4321-4321-cba987654321";
+  const pid = 2345;
+  const graceMs = 40;
+  let providerGone = false;
+  let watched: string | undefined;
+  const warnings: string[] = [];
+  const exits: number[] = [];
+  const finishing = Promise.withResolvers<void>();
+  const finished = Promise.withResolvers<void>();
+  opts.dependencies.warn = (line) => void warnings.push(line);
+  opts.dependencies.watchPool = (options) => {
+    watched = options.bootId;
+    return watchNativeStartPool({
+      ...options,
+      checkMs: 5,
+      graceMs: () =>
+        typeof options.graceMs === "function" && options.graceMs() === 0
+          ? 0
+          : graceMs,
+      read: async () => ({
+        phase: "running",
+        token: "c".repeat(32),
+        guest_boot_id: boot,
+        process: { pid },
+      }),
+      gone: (candidate) => candidate === pid && providerGone,
+    });
+  };
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) =>
+    request.args[0] === "runtime" && request.args[1] === "up"
+      ? { phase: "running", process_alive: true, guest_boot_id: boot }
+      : await invoke(request);
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    if (readyFirst) {
+      return await serve(request);
+    }
+    // The owner fails before ready and stops its graph: never serving.
+    await serve({
+      ...request,
+      onStarted: async () => {},
+      onReady: async () => {},
+    });
+    return 1;
+  };
+  // Lifecycle cleanup runs after the graph is confirmed stopped and before
+  // down.after and the finalization acknowledgement: hold the start there.
+  const before = opts.before;
+  opts.before = async () => {
+    const hooks = await before();
+    return {
+      ...hooks,
+      cleanup: async () => {
+        finishing.resolve();
+        await finished.promise;
+        await hooks.cleanup();
+      },
+    };
+  };
+  const attempt = startNativeProject({
+    ...opts,
+    exitOnPoolEnd: () => {
+      exits.push(performance.now());
+    },
+  });
+  try {
+    await Promise.race([finishing.promise, attempt]);
+    expect(watched).toBe(boot);
+    // The pool stops under the finishing start (another project's up stops
+    // the idle pool): well past one check and the grace, nothing happens.
+    providerGone = true;
+    await Bun.sleep(graceMs * 4);
+    expect(exits).toEqual([]);
+    expect(warnings.join("\n")).not.toContain("native runtime VM");
+  } finally {
+    finished.resolve();
+    await attempt.catch(() => undefined);
+  }
+  expect(exits).toEqual([]);
+  expect(events).toContain("cleanup");
 });
 
 test("up keeps the owner-exited refusal on a running pool without recovery or runtime up", async () => {

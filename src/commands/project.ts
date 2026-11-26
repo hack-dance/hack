@@ -170,6 +170,8 @@ import { preflightNativeProjectSource } from "../backends/native-project-source-
 import {
   NativeStartupCanceledError,
   type NativeStartupProgress,
+  restartPreflightLossStage,
+  routeNativeLostVm,
   startNativeProject,
 } from "../backends/native-project-start.ts";
 import {
@@ -7592,34 +7594,45 @@ async function restartNativeImageProject({
             }),
         }
       : undefined,
-    preflight: async (run, { cleanedRetry, preparedRetry, signal }) => {
-      await preflightNativeProjectSource({
-        runtime: native,
-        projectRoot: startup.scope.projectRoot,
-      });
-      // The replacement start pins exactly the build images checked here,
-      // so nothing is built after the old graph stopped (HACK-2533).
-      verifiedBuildImages = await preflightNativeRestart({
+    // A VM lost during the preflight (its image pulls, before the restart saves
+    // its intent or stops anything) gets the stage message (HACK-2096 real-VM
+    // row 6). The old run is still the live run, so a loss is retired like a
+    // ready one; a retry of a cleaned restart has its old run stopped; a
+    // prepared one has an unconfirmed stop, which no command retires yet.
+    preflight: async (run, { cleanedRetry, preparedRetry, signal }) =>
+      await routeNativeLostVm({
+        home: startup.runtime.home,
         signal,
-        runtime: native,
-        scope: startup.scope,
-        composeFile: startup.composeFile,
-        adaptationFile: startup.adaptationFile,
-        adaptationFileByEnv: startup.adaptationFileByEnv,
-        dependencyFile: startup.dependencyFile,
-        dependencyFileByEnv: startup.dependencyFileByEnv,
-        internalExtraHosts: startup.internalExtraHosts,
-        dependencyOwners: startup.dependencyOwners,
-        internalExtraHostSources: startup.internalExtraHostSources,
-        allowedHosts: startup.allowedHosts,
-        runtimeMetadata: startup.runtimeMetadata,
-        httpsPort: startup.https?.httpsPort ?? null,
-        run,
-        cleanedRetry,
-        preparedRetry,
-        recoverStopped: recovery !== undefined,
-      });
-    },
+        loss: restartPreflightLossStage({ cleanedRetry, preparedRetry }),
+        run: async () => {
+          await preflightNativeProjectSource({
+            runtime: native,
+            projectRoot: startup.scope.projectRoot,
+          });
+          // The replacement start pins exactly the build images checked here,
+          // so nothing is built after the old graph stopped (HACK-2533).
+          verifiedBuildImages = await preflightNativeRestart({
+            signal,
+            runtime: native,
+            scope: startup.scope,
+            composeFile: startup.composeFile,
+            adaptationFile: startup.adaptationFile,
+            adaptationFileByEnv: startup.adaptationFileByEnv,
+            dependencyFile: startup.dependencyFile,
+            dependencyFileByEnv: startup.dependencyFileByEnv,
+            internalExtraHosts: startup.internalExtraHosts,
+            dependencyOwners: startup.dependencyOwners,
+            internalExtraHostSources: startup.internalExtraHostSources,
+            allowedHosts: startup.allowedHosts,
+            runtimeMetadata: startup.runtimeMetadata,
+            httpsPort: startup.https?.httpsPort ?? null,
+            run,
+            cleanedRetry,
+            preparedRetry,
+            recoverStopped: recovery !== undefined,
+          });
+        },
+      }),
     down: async () => {
       dropEnvFingerprint();
       const code = await handleDown({
@@ -7663,12 +7676,22 @@ async function restartNativeImageProject({
       }
     },
     progress,
-    start: ({ run, onReady, signal, onStopSignals, onStopRequested }) =>
+    start: ({
+      run,
+      onReady,
+      signal,
+      onStopSignals,
+      onStopRequested,
+      releaseLock,
+    }) =>
       startNativeProject({
         ...startup,
         ...nativeRestartSelection({ run }),
         restore: run,
         verifiedBuildImages,
+        // A replacement that ends the process on a lost VM must not leave the
+        // restart's operation lock held (HACK-2096).
+        beforeLostExit: releaseLock,
         // The restart's own bookkeeping first, then the startup's ready
         // report: a detached owner (`restart --json`) tells its launcher here.
         onReady: async (services, addresses) => {

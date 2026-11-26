@@ -6,14 +6,21 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  NATIVE_LOST_REMOVAL_NOTE,
+  NATIVE_LOST_REMOVAL_UNREPAIRABLE,
   NATIVE_OWNER_EXIT_NOTICE,
+  NATIVE_RECOVERED_RESTART_NOTE,
+  NATIVE_RESTART_INTENT_UNREADABLE_NOTE,
+  NATIVE_RESTART_KEPT_UNCONFIRMED_NOTE,
   nativeDownEnvironment,
   nativeProjectDown,
+  nativeRestartLockHeldNote,
 } from "../src/backends/native-project-down.ts";
 import {
   beginNativeProjectFinalization,
@@ -22,11 +29,18 @@ import {
   waitNativeProjectFinalization,
 } from "../src/backends/native-project-finalization.ts";
 import {
+  completeNativeRestartCleanup,
   loadNativeProjectRun,
+  loadNativeRestartIntent,
   type NativeProjectRun,
   type NativeProjectRunScope,
+  type NativeRestartIntent,
+  nativeRestartOperationLock,
   removeNativeProjectRun,
+  retireCleanedNativeRestart,
   saveNativeProjectRun,
+  saveNativeRestartIntent,
+  withNativeRestartLock,
 } from "../src/backends/native-project-run.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import {
@@ -169,6 +183,55 @@ test("down waits for the captured frontend after cleanup and lifecycle retiremen
   expect((await result).status).toBe("stopped");
   expect(stopped).toBe(true);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test("down follows the HTTPS lease a started return adds to its lifetime during the stop (HACK-2707)", async () => {
+  // `hack down` right after `up -d`: the frontend's HTTPS acquisition at the
+  // owner's ready line runs beside this stop, so its lease intent can reach the
+  // lifetime (version 2 to 3, same attempt) after down captured it. Down waits
+  // on the lifetime that now carries the lease instead of refusing.
+  const opts = await fixture();
+  const lifetime = await beginNativeProjectFinalization({
+    scope: opts.scope,
+    run,
+    httpsPort: null,
+  });
+  expect(lifetime.token.version).toBe(2);
+  let leased: Awaited<ReturnType<typeof beginNativeProjectFinalization>>;
+  let cleaned = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    after: async () => {
+      leased = await beginNativeProjectFinalization({
+        scope: opts.scope,
+        run,
+        httpsPort: 18_443,
+        httpsLease: {
+          version: 1,
+          ownerGeneration: "1".repeat(32),
+          leaseId: "2".repeat(32),
+          run: run.run,
+          attempt: lifetime.token.attempt,
+          owner: run.owner,
+          namespace: run.namespace,
+          planId: run.planId,
+        },
+      });
+      expect(leased.token.version).toBe(3);
+      setTimeout(() => void leased.complete(), 50);
+    },
+    invoke: async (request) => {
+      if (request.args[1] === "cleanup") {
+        cleaned = true;
+        return {};
+      }
+      return snapshot(cleaned);
+    },
+  });
+  expect(result.status).toBe("stopped");
+  expect(
+    await captureNativeProjectFinalization({ scope: opts.scope, run })
+  ).toMatchObject({ version: 3, attempt: lifetime.token.attempt });
 });
 
 test("missing frontend identity refuses before hooks or cleanup without leaking paths", async () => {
@@ -2947,4 +3010,390 @@ test("the restart coordinator's down never starts a stopped pool", async () => {
   });
   await expect(attempt).rejects.toBeInstanceOf(NativeRuntimeRequestError);
   expect(calls).toEqual(["inspect"]);
+});
+
+/**
+ * HACK-2096: a `hack restart` whose replacement was lost (its VM died) after its
+ * old run was stopped leaves a `cleaned` restart intent, and `hack up` refuses
+ * while it is pending. Once `hack down --recover` retires the replacement with
+ * its data kept, the project is an ordinary stopped one: the recovery retires
+ * the intent too, so its one named follow-up, `hack up`, works.
+ */
+async function lostReplacementDown(opts: {
+  readonly recover: boolean;
+  readonly phase: NativeRestartIntent["phase"];
+  readonly intentRun?: string;
+  readonly lockHeld?: boolean;
+  /** An inspect under the restart lock no longer reads the run as stopped. */
+  readonly resumedUnderLock?: boolean;
+  /** The intent on disk cannot be read. */
+  readonly unreadable?: boolean;
+  /** How many inspects under the restart lock answer `provider_busy` first. */
+  readonly busyUnderLock?: number;
+  /** The re-inspect's busy wait (the production default is 15 s). */
+  readonly retireBusyWaitMs?: number;
+}) {
+  const fx = await fixture();
+  const { lock } = await nativeRestartOperationLock(fx.scope);
+  const locked = () =>
+    stat(lock).then(
+      () => true,
+      () => false
+    );
+  const intentRun = { ...run, run: opts.intentRun ?? run.run };
+  const prepared: NativeRestartIntent = {
+    phase: "prepared",
+    run: intentRun,
+    finalization: {
+      ...(await captureNativeProjectFinalization({ scope: fx.scope, run })),
+      run: intentRun.run,
+    },
+  };
+  await saveNativeRestartIntent({ ...fx.scope, intent: prepared });
+  if (opts.phase === "cleaned") {
+    await completeNativeRestartCleanup({ ...fx.scope, expected: prepared });
+  }
+  const intentFile = lock.replace(/\.lock\.operation$/, ".json");
+  if (opts.unreadable) {
+    await writeFile(intentFile, "{}\n", { mode: 0o600 });
+  }
+  await deadFrontend(fx.scope);
+  let inspectsUnderLock = 0;
+  const notices: string[] = [];
+  let recovered = false;
+  const down = () =>
+    nativeProjectDown({
+      ...fx,
+      recover: opts.recover,
+      ...(opts.retireBusyWaitMs === undefined
+        ? {}
+        : { restartRetireBusyWaitMs: opts.retireBusyWaitMs }),
+      notice: (line) => {
+        notices.push(line);
+      },
+      invoke: async (request) => {
+        const command = request.args[1]!;
+        if (command === "foreground-owner") {
+          return ownerSelection("exited");
+        }
+        if (command === "recover-live-owner") {
+          recovered = true;
+          return {
+            run: run.run,
+            phase: "stopped-data-retained",
+            recovered: true,
+            data_retained: true,
+            publisher_retired: true,
+            same_boot: true,
+          };
+        }
+        if (command === "managed-hostname-authority") {
+          return { authority: { present: false } };
+        }
+        expect(command).toBe("inspect");
+        if (!opts.lockHeld && (await locked())) {
+          inspectsUnderLock++;
+          if (inspectsUnderLock <= (opts.busyUnderLock ?? 0)) {
+            // A `hack ps`, `hack logs` or another project's starting `up`
+            // holds the provider lease.
+            throw new NativeRuntimeRequestError({
+              message:
+                "Native runtime request failed (provider_busy); inspect owned state before retrying.",
+              nativeCode: "provider_busy",
+            });
+          }
+          // Another owner resumed the run between the down and the lock.
+          return snapshot(recovered && !opts.resumedUnderLock);
+        }
+        return snapshot(recovered);
+      },
+    });
+  const result = opts.lockHeld
+    ? await withNativeRestartLock(fx.scope, async () => await down())
+    : await down();
+  return {
+    result,
+    notices,
+    lock,
+    inspectsUnderLock,
+    intent: opts.unreadable
+      ? await readFile(intentFile, "utf8")
+      : await loadNativeRestartIntent(fx.scope),
+  };
+}
+
+test("down --recover retires a cleaned restart whose replacement was lost, so hack up can resume", async () => {
+  const { result, notices, intent } = await lostReplacementDown({
+    recover: true,
+    phase: "cleaned",
+  });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(intent).toBeNull();
+  expect(notices).toContain(NATIVE_RECOVERED_RESTART_NOTE);
+});
+
+test.each([
+  { name: "plain down", recover: false, phase: "cleaned" },
+  { name: "a prepared intent", recover: true, phase: "prepared" },
+  {
+    name: "an intent for another run",
+    recover: true,
+    phase: "cleaned",
+    intentRun: "9".repeat(32),
+  },
+  {
+    name: "a restart that holds its lock",
+    recover: true,
+    phase: "cleaned",
+    lockHeld: true,
+  },
+  {
+    // HACK-2096 review L5: the run is re-inspected under the lock.
+    name: "a run resumed before the lock was taken",
+    recover: true,
+    phase: "cleaned",
+    resumedUnderLock: true,
+  },
+] as const)("down keeps the pending restart for $name", async (opts) => {
+  const { result, notices, intent, inspectsUnderLock } =
+    await lostReplacementDown(opts);
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(typeof intent === "string" ? undefined : intent?.phase).toBe(
+    opts.phase
+  );
+  expect(notices).not.toContain(NATIVE_RECOVERED_RESTART_NOTE);
+  if ("resumedUnderLock" in opts) {
+    expect(inspectsUnderLock).toBe(1);
+    // Kept, but not silently (HACK-2096 round-2 review).
+    expect(notices).toContain(NATIVE_RESTART_KEPT_UNCONFIRMED_NOTE);
+  }
+});
+
+test("down --recover waits out a briefly busy provider and retires the pending restart", async () => {
+  // HACK-2096 round-2 review: a read-only `hack ps` or another project's
+  // starting `up` holds the lease for a moment; that is no sign of a resume.
+  const { result, notices, intent, inspectsUnderLock } =
+    await lostReplacementDown({
+      recover: true,
+      phase: "cleaned",
+      busyUnderLock: 3,
+      retireBusyWaitMs: 2000,
+    });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(inspectsUnderLock).toBe(4);
+  expect(intent).toBeNull();
+  expect(notices).toContain(NATIVE_RECOVERED_RESTART_NOTE);
+  expect(notices).not.toContain(NATIVE_RESTART_KEPT_UNCONFIRMED_NOTE);
+});
+
+test("down --recover keeps the pending restart past the busy wait and says to run it again", async () => {
+  // The retry itself is proven by the briefly-busy test; this one only needs
+  // the wait to run out, so it asserts no retry count (no clock dependence).
+  const { result, notices, intent, inspectsUnderLock } =
+    await lostReplacementDown({
+      recover: true,
+      phase: "cleaned",
+      busyUnderLock: Number.POSITIVE_INFINITY,
+      retireBusyWaitMs: 120,
+    });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(inspectsUnderLock).toBeGreaterThanOrEqual(1);
+  expect(typeof intent === "string" ? undefined : intent?.phase).toBe(
+    "cleaned"
+  );
+  expect(notices).not.toContain(NATIVE_RECOVERED_RESTART_NOTE);
+  const kept = notices.filter(
+    (line) => line === NATIVE_RESTART_KEPT_UNCONFIRMED_NOTE
+  );
+  expect(kept).toHaveLength(1);
+  expect(kept[0]).toContain("pending hack restart was kept");
+  expect(kept[0]).toContain(
+    "If the run should not be running, run hack down --recover again"
+  );
+  expect(kept[0]).not.toContain("\n");
+});
+
+test("down --recover names the pending restart and the held lock it kept", async () => {
+  // HACK-2096 review L6: a held lock is no longer skipped silently.
+  const { result, notices, lock } = await lostReplacementDown({
+    recover: true,
+    phase: "cleaned",
+    lockHeld: true,
+  });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(notices).toContain(nativeRestartLockHeldNote(lock));
+  const line = notices.find((notice) => notice.includes(lock));
+  expect(line).toContain("pending hack restart");
+  expect(line).toContain("run hack down --recover again");
+  expect(line).not.toContain("\n");
+});
+
+test("an unreadable restart intent does not fail a down --recover that stopped the run", async () => {
+  // HACK-2096 review L7: the stop stands; the intent is reported, not retired.
+  const { result, notices, intent } = await lostReplacementDown({
+    recover: true,
+    phase: "cleaned",
+    unreadable: true,
+  });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(notices).toContain(NATIVE_RESTART_INTENT_UNREADABLE_NOTE);
+  expect(notices).not.toContain(NATIVE_RECOVERED_RESTART_NOTE);
+  expect(intent).toBe("{}\n");
+});
+
+/**
+ * HACK-2096 real-VM row 8: the provider was killed seconds after a `hack down`
+ * removed the run's containers, during the next `hack up`'s image pull. The
+ * guest engine's removal had not reached its disk, so the next boot listed the
+ * web container again, `exited` (137), while the receipt records it removed.
+ * `hack down --recover` refused ("cleanup is unconfirmed") and `hack up`
+ * refused the mapping: a dead end. `down --recover` now has the runtime remove
+ * exactly those containers again (`graph cleanup`, volumes kept), confirms them
+ * absent, and `hack up` can start the run.
+ */
+function lostRemovalSnapshot(webState: string) {
+  const base = snapshot(true);
+  return {
+    ...base,
+    receipt: {
+      ...base.receipt,
+      resources: {
+        "container:web": {
+          ...base.receipt.resources["container:web"],
+          phase: "absent",
+        },
+      },
+    },
+    observations: {
+      "container:web": { state: webState, health: null },
+    },
+  };
+}
+async function lostRemovalDown(opts: {
+  readonly recover: boolean;
+  readonly webState: "exited" | "running";
+  /** Whether the runtime's cleanup actually removes the container. */
+  readonly cleanupClears?: boolean;
+  /** The runtime refuses an owner-less cleanup (real-VM row 8 at c624229e). */
+  readonly ownerRequired?: boolean;
+}) {
+  const fx = await fixture();
+  const calls: string[] = [];
+  const notices: string[] = [];
+  let cleaned = false;
+  const down = nativeProjectDown({
+    ...fx,
+    recover: opts.recover,
+    notice: (line) => {
+      notices.push(line);
+    },
+    before: async () => {
+      throw new Error("replayed before");
+    },
+    after: async () => {
+      throw new Error("replayed after");
+    },
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "cleanup") {
+        expect(request.args).toEqual([
+          "graph",
+          "cleanup",
+          "--run-id",
+          run.run,
+          "--json",
+        ]);
+        if (opts.ownerRequired) {
+          // A relay-enrolled receipt: cleanup goes through the owner, gone.
+          throw new NativeRuntimeRequestError({
+            message:
+              "Native runtime request failed (graph_owner_recovery); inspect owned state before retrying.",
+            nativeCode: "graph_owner_recovery",
+          });
+        }
+        cleaned = true;
+        return {};
+      }
+      if (command === "foreground-owner") {
+        return ownerSelection("exited");
+      }
+      if (command === "managed-hostname-authority") {
+        return { authority: { present: false } };
+      }
+      expect(command).toBe("inspect");
+      return lostRemovalSnapshot(
+        cleaned && opts.cleanupClears !== false ? "absent" : opts.webState
+      );
+    },
+  });
+  const result = await down.then(
+    (value) => value,
+    (error: unknown) => error
+  );
+  return { result, calls, notices };
+}
+
+test("down --recover removes containers a lost VM brought back, so hack up can start", async () => {
+  const { result, calls, notices } = await lostRemovalDown({
+    recover: true,
+    webState: "exited",
+  });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(calls).toEqual(["inspect", "foreground-owner", "cleanup", "inspect"]);
+  expect(notices).toContain(NATIVE_LOST_REMOVAL_NOTE);
+});
+
+test.each([
+  { name: "a plain down", recover: false, webState: "exited" },
+  { name: "a container still running", recover: true, webState: "running" },
+] as const)("down never replays cleanup of a stopped run for $name", async (opts) => {
+  const { result, calls, notices } = await lostRemovalDown(opts);
+  expect(result).toBeInstanceOf(Error);
+  expect(String(result)).toContain("cleanup is unconfirmed");
+  expect(calls).not.toContain("cleanup");
+  expect(notices).not.toContain(NATIVE_LOST_REMOVAL_NOTE);
+});
+
+test("down --recover prints no removal note when the re-inspection still finds the container", async () => {
+  // Round-4 review: the note prints only after the re-inspection verifies.
+  const { result, calls, notices } = await lostRemovalDown({
+    recover: true,
+    webState: "exited",
+    cleanupClears: false,
+  });
+  expect(result).toBeInstanceOf(Error);
+  expect(String(result)).toContain("cleanup is unconfirmed");
+  expect(calls).toContain("cleanup");
+  expect(notices).not.toContain(NATIVE_LOST_REMOVAL_NOTE);
+});
+
+test("down --recover says plainly when the runtime cannot remove brought-back containers without the owner", async () => {
+  // Real-VM row 8 at c624229e: the receipt is relay-enrolled, so `graph
+  // cleanup` goes through the run's foreground owner, which is gone, and the
+  // runtime refuses (`graph_owner_recovery`). The refusal names no command
+  // that fails and none that discards the data.
+  const { result, calls, notices } = await lostRemovalDown({
+    recover: true,
+    webState: "exited",
+    ownerRequired: true,
+  });
+  expect(result).toBeInstanceOf(Error);
+  expect((result as Error).message).toBe(NATIVE_LOST_REMOVAL_UNREPAIRABLE);
+  expect(calls).toContain("cleanup");
+  expect(notices).not.toContain(NATIVE_LOST_REMOVAL_NOTE);
+  expect(NATIVE_LOST_REMOVAL_UNREPAIRABLE).toContain("data kept");
+  expect(NATIVE_LOST_REMOVAL_UNREPAIRABLE).not.toContain("--remove-data");
+  expect(NATIVE_LOST_REMOVAL_UNREPAIRABLE).not.toContain("run hack up");
+});
+
+test("retiring a cleaned restart is a no-op without one", async () => {
+  const fx = await fixture();
+  expect(
+    await retireCleanedNativeRestart({
+      ...fx.scope,
+      run: run.run,
+      stillStopped: async () => true,
+    })
+  ).toEqual({ status: "none" });
 });

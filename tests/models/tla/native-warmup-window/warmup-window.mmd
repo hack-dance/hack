@@ -1,0 +1,33 @@
+---
+title: WarmupWindow · HTTPS warm-up
+---
+stateDiagram-v2
+  direction TB
+  [*] --> pending
+  pending --> authority : Spawn [ready line]
+  pending --> none : Skip [owner gone]
+  authority --> authority : Tick [held, waits]
+  authority --> verify : AuthorityStart
+  authority --> startupFailed : AuthorityExpire [held]
+  verify --> verify : Tick [held, waits]
+  verify --> admitted : VerifyTake [ready]
+  verify --> refused : VerifyTake [stopping]
+  verify --> refused : VerifyExpire [held]
+  admitted --> releasing : CleanupStart
+  refused --> releasing : CleanupStart
+  startupFailed --> releasing : CleanupStart [retired]
+  releasing --> released : ReleaseTake [free]
+  releasing --> retained : ReleaseExpire [held]
+  none --> [*]
+  released --> [*]
+  retained --> [*]
+  class pending wait
+  class authority wait
+  class verify wait
+  class releasing wait
+  class admitted live
+  class released ok
+  class none idle
+  class refused idle
+  class retained fail
+  class startupFailed idle

@@ -620,6 +620,105 @@ export async function removeNativeRestartIntent(
     await rmdir(p.lock);
   }
 }
+/**
+ * What {@link retireCleanedNativeRestart} did. Only `retired` changed anything.
+ * - `none`: nothing to retire (no intent, a `prepared` one, or another run's).
+ * - `locked`: the operation lock (`lock`) is held by a restart, a filesystem
+ *   recovery or a data removal, live or interrupted before HACK-2096.
+ * - `running`: under the lock, the run no longer read as stopped with its data
+ *   retained; whoever resumed it owns the intent.
+ * - `unconfirmed`: the inspect under the lock failed (for example the provider
+ *   stayed busy past the wait), so the run could not be confirmed stopped.
+ * - `unreadable`: the intent could not be read, or removed once read.
+ */
+export type NativeRestartRetirement =
+  | {
+      readonly status:
+        | "retired"
+        | "none"
+        | "running"
+        | "unconfirmed"
+        | "unreadable";
+    }
+  | { readonly status: "locked"; readonly lock: string };
+/**
+ * After `hack down --recover` confirmed `run` stopped with its data retained,
+ * retire a pending restart of that run whose old run was already cleaned
+ * (HACK-2096). Such an intent is left by a replacement start that ended before
+ * readiness, for example when its VM was lost. Its old run is stopped and
+ * finalized, and its replacement is now retired with the same retained data, so
+ * the project is an ordinary stopped project that `hack up` resumes, as after a
+ * restart canceled once its cleanup finished.
+ *
+ * The intent and the run are read again under the operation lock: a restart,
+ * recovery or removal may have acted between the down and the lock, so
+ * `stillStopped` must confirm there that the run is still
+ * `stopped-data-retained`. A `prepared` intent (the old run's stop is
+ * unconfirmed), an intent for another run, a held lock and a run that no longer
+ * reads as stopped leave the intent alone. Nothing here fails the down that
+ * already succeeded: an intent that cannot be read is reported, not retired.
+ */
+export async function retireCleanedNativeRestart(
+  opts: NativeProjectRunScope & {
+    readonly run: string;
+    readonly stillStopped: () => Promise<boolean>;
+  }
+): Promise<NativeRestartRetirement> {
+  const pending = (intent: NativeRestartIntent | null) =>
+    intent?.phase === "cleaned" && intent.run.run === opts.run;
+  const read = () =>
+    loadNativeRestartIntent(opts).then(
+      (intent) => ({ intent }),
+      () => undefined
+    );
+  const first = await read();
+  if (!first) {
+    return { status: "unreadable" };
+  }
+  if (!pending(first.intent)) {
+    return { status: "none" };
+  }
+  const { lock } = await nativeRestartOperationLock(opts);
+  let entered = false;
+  try {
+    return await withNativeRestartLock(
+      opts,
+      async (): Promise<NativeRestartRetirement> => {
+        entered = true;
+        const current = await read();
+        if (!current) {
+          return { status: "unreadable" };
+        }
+        if (!(current.intent && pending(current.intent))) {
+          return { status: "none" };
+        }
+        const stopped = await opts.stillStopped().then(
+          (value) => (value ? "stopped" : "running"),
+          () => "unconfirmed" as const
+        );
+        if (stopped !== "stopped") {
+          return { status: stopped };
+        }
+        try {
+          await removeNativeRestartIntent({
+            ...opts,
+            expected: current.intent,
+          });
+        } catch {
+          return { status: "unreadable" };
+        }
+        return { status: "retired" };
+      }
+    );
+  } catch (error) {
+    if (!entered) {
+      // A live restart, recovery or removal (or a restart interrupted before
+      // HACK-2096) holds the lock; the intent stays for it.
+      return { status: "locked", lock };
+    }
+    throw error;
+  }
+}
 function record(value: unknown, identity: unknown): NativeProjectRun {
   if (
     !isRecord(value) ||

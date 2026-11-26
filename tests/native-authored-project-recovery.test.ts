@@ -1358,5 +1358,10 @@ originalCase(
     const saved = JSON.parse(await Bun.file(current.paths.intent).text());
     expect(saved.record.live_stop_retired).toBe(true);
     expect(saved.record.live_stop.settled).not.toBeNull();
+    // The recovery selected the dead owner's own leftover admission lock (review
+    // round 4): its committed intent names that owner, and the lock is gone.
+    expect(saved.record.admission.kind).toBe("native-private-interrupted-lock");
+    expect(saved.record.admission.owner.pid).toBe(current.child.pid);
+    expect(saved.record.live_stop.original.parent).toBe(current.child.pid);
   }
 );

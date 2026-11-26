@@ -160,6 +160,9 @@
 \*                     run stays selectable by the dead-owner recovery. FALSE is
 \*                     3c88966f (seen on a real VM): `hack down`, `up -d` and `exec`
 \*                     refused for good: `owner-exits-released`.
+\*   HookExitsAsCrash - the same for a project with lifecycle hooks (review round
+\*                     4): its hook path ends as a crash would too. FALSE is
+\*                     c0e29741: `hook-owner-exits-released`.
 \* nstartedFor  - this `hack down` started the pool for a live owner's stop.
 \* nunconfirmed - a `hack down` ended with an unconfirmed stop and the run left.
 \* forcedOwner  - a forced stop left a native owner running.
@@ -169,13 +172,14 @@ CONSTANTS Fixed, Strict, ByHand, OtherBoots, RecoveryFaults, MaxBoot, MaxFaults,
           ReuseBind, ListenerCheck, IdleRestart, SecondCheck, DownRefuses,
           TwoProjects, AdmitEndedBoot, NativeCrossBoot, NativeStartsPool,
           NativeMidStart, OwnerStopsEndedBoot, NativeChecksFirst, NativeBoundState,
-          OwnerStopFirst, OwnerWatchesPool, CrashSeen, ExitsAsCrash
+          OwnerStopFirst, OwnerWatchesPool, CrashSeen, ExitsAsCrash,
+          HookExitsAsCrash
 
 VARIABLES pool, boot, run, runBoot, owner, pub, faults, recovering, https,
           httpsBoot, fin, finBoot, port, overListener, restart, stoppedLive,
           downOverLive, nrun, nrunBoot, nowner, nbound, nwasted, nstartedFor,
-          nunconfirmed, forcedOwner
-X == <<nstartedFor, nunconfirmed, forcedOwner>>
+          nunconfirmed, forcedOwner, nhooks
+X == <<nstartedFor, nunconfirmed, forcedOwner, nhooks>>
 N == <<nrun, nrunBoot, nowner, nbound, nwasted, X>>
 vars == <<pool, boot, run, runBoot, owner, pub, faults, recovering, https,
           httpsBoot, fin, finBoot, port, overListener, restart, stoppedLive,
@@ -198,6 +202,7 @@ TypeOK ==
     /\ nrun \in {"none", "preparing", "ready", "removed"} /\ nrunBoot \in 0..MaxBoot
     /\ nowner \in {"none", "live", "dead", "gone"} /\ nbound \in BOOLEAN /\ nwasted \in BOOLEAN
     /\ nstartedFor \in BOOLEAN /\ nunconfirmed \in BOOLEAN /\ forcedOwner \in BOOLEAN
+    /\ nhooks \in BOOLEAN
 
 Init ==
     /\ pool = "stopped" /\ boot = 0 /\ run = "none" /\ runBoot = 0
@@ -208,6 +213,7 @@ Init ==
     /\ nrun = "none" /\ nrunBoot = 0 /\ nowner = "none"
     /\ nbound = FALSE /\ nwasted = FALSE
     /\ nstartedFor = FALSE /\ nunconfirmed = FALSE /\ forcedOwner = FALSE
+    /\ nhooks = FALSE
 
 CanBoot == boot < MaxBoot
 \* Recovery of a dead owner's ready run in the current boot `b`.
@@ -234,7 +240,9 @@ EndedRecoverable == ~nbound /\ (nrun = "ready" \/ NativeMidStart)
 \* would, keeping its admission lock for the dead-owner recovery ("dead"). Without
 \* it (3c88966f, seen on a real VM) it returned normally and released the lock, a
 \* state ("gone") that no recovery selects.
-Exited == IF ExitsAsCrash THEN "dead" ELSE "gone"
+\* `nhooks`: the native project has lifecycle hooks, so its owner ends through the
+\* hook path; with HookExitsAsCrash it too ends as a crash would (review round 4).
+Exited == IF ExitsAsCrash /\ (~nhooks \/ HookExitsAsCrash) THEN "dead" ELSE "gone"
 \* A boot-bound run of an ended boot: refused by name, data kept (the named outcome),
 \* with no live owner left running (HACK-2715 review round 2).
 NativeStranded == nbound /\ NativeEnded /\ nowner /= "live"
@@ -267,7 +275,7 @@ RuntimeDownForce ==
     /\ UNCHANGED <<boot, run, runBoot, owner, pub, recovering>>
     /\ UNCHANGED <<https, httpsBoot, fin, finBoot, port, overListener, restart,
                    stoppedLive, downOverLive>>
-    /\ UNCHANGED <<nrun, nrunBoot, nbound, nwasted, nstartedFor, nunconfirmed>>
+    /\ UNCHANGED <<nrun, nrunBoot, nbound, nwasted, nstartedFor, nunconfirmed, nhooks>>
 \* The VM or its provider dies (or the host reboots).
 Crash ==
     /\ Fault /\ pool = "running"
@@ -446,7 +454,9 @@ NativeStart ==
     /\ nowner = "none"
     /\ nrun' = "preparing" /\ nrunBoot' = boot /\ nowner' = "live"
     /\ nbound' \in (IF NativeBoundState THEN BOOLEAN ELSE {FALSE})
-    /\ UNCHANGED nwasted /\ UNCHANGED NU /\ UNCHANGED NH /\ UNCHANGED X
+    /\ nhooks' \in BOOLEAN
+    /\ UNCHANGED nwasted /\ UNCHANGED NU /\ UNCHANGED NH
+    /\ UNCHANGED <<nstartedFor, nunconfirmed, forcedOwner>>
 \* The start completes in its own boot.
 NativeReady ==
     /\ nrun = "preparing" /\ nowner = "live" /\ pool = "running" /\ nrunBoot = boot
@@ -482,7 +492,7 @@ NativeStop ==
        \/ OwnerStopsEndedBoot /\ EndedRecoverable
     /\ nrun' = "removed" /\ nowner' = "none"
     /\ UNCHANGED <<nrunBoot, nbound, nwasted>> /\ UNCHANGED NU /\ UNCHANGED NH
-    /\ nstartedFor' = FALSE /\ UNCHANGED <<nunconfirmed, forcedOwner>>
+    /\ nstartedFor' = FALSE /\ UNCHANGED <<nunconfirmed, forcedOwner, nhooks>>
 \* Its dead-owner recovery (`hack down --recover`, or plain `hack down` once the
 \* owner is gone) on a running pool: the cleanup removes the run, data kept, and
 \* retires the publication. A ready run in its own boot; a run of an ended boot with
@@ -511,7 +521,7 @@ NativeDownStartsPool ==
                                                     ELSE NativeCrossBoot))
     /\ UNCHANGED <<run, runBoot, owner, pub, faults, recovering>> /\ UNCHANGED NH
     /\ UNCHANGED <<nrun, nrunBoot, nowner, nbound>>
-    /\ nstartedFor' = (nowner = "live") /\ UNCHANGED <<nunconfirmed, forcedOwner>>
+    /\ nstartedFor' = (nowner = "live") /\ UNCHANGED <<nunconfirmed, forcedOwner, nhooks>>
 \* Its `hack down` of a run of an ended boot with a live owner whose stop cannot
 \* clear it (review round 2): on a stopped pool with OwnerStopFirst for every run,
 \* elsewhere for a boot-bound one. The stop needs no pool. Its cleanup refuses
@@ -534,7 +544,7 @@ NativeStopAfterStartFails ==
     /\ TwoProjects /\ nstartedFor /\ pool = "running" /\ nrun = "ready"
     /\ nowner = "live"
     /\ nowner' = "dead" /\ nunconfirmed' = TRUE /\ nstartedFor' = FALSE
-    /\ UNCHANGED <<nrun, nrunBoot, nbound, nwasted, forcedOwner>>
+    /\ UNCHANGED <<nrun, nrunBoot, nbound, nwasted, forcedOwner, nhooks>>
     /\ UNCHANGED NU /\ UNCHANGED NH
 \* OwnerWatchesPool: a ready run's owner notices from the pool record that its
 \* boot ended (the pool stopped, or booted again) and exits without a cleanup

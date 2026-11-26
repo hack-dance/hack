@@ -177,14 +177,20 @@ export class NativeAuthoredProjectStartError extends Error {
       opts.compilerCode && COMPILER_CODES.has(opts.compilerCode)
         ? opts.compilerCode
         : undefined;
-    const detail = {
-      "not-started": "no native consumer was started",
-      removed: "exact native cleanup was confirmed",
-      unreserved:
-        "native runtime state was never reserved; the startup intent was retired and nothing is retained",
-      retained:
-        "startup evidence is retained; inspect owned state before retrying",
-    }[opts.outcome];
+    // HACK-2715 review round 4: a start refused because an earlier run is still
+    // retained (for example after its pool stopped under it and its owner ended
+    // as a crash would) names the command that clears it.
+    const detail =
+      stage === "retained-state" && opts.outcome === "retained"
+        ? "an earlier run of this project is retained; run hack down in this project first, then start again"
+        : {
+            "not-started": "no native consumer was started",
+            removed: "exact native cleanup was confirmed",
+            unreserved:
+              "native runtime state was never reserved; the startup intent was retired and nothing is retained",
+            retained:
+              "startup evidence is retained; inspect owned state before retrying",
+          }[opts.outcome];
     const configuration = readNativeConfigurationRefusals(
       opts.configurationRefusals
     );
@@ -829,18 +835,22 @@ async function runPreparedLifecycle(ctx: {
     );
   }
   if (
-    ctx.hookOwner === undefined &&
-    liveStop !== undefined &&
+    (ctx.hookOwner !== undefined || liveStop !== undefined) &&
     ctx.admitted.ready !== undefined &&
     poolEnded
   ) {
     // HACK-2715 review round 2 (seen on a real VM at 3c88966f): the ready run's
     // graph owner exited because its pool boot ended (it noticed, or its own
     // cleanup found no engine). No cleanup can run here. Returning would retire
-    // the attempt's locks normally and leave ready, start and live-stop records
-    // with no interrupted admission lock, which the dead-owner recovery cannot
-    // select: every later `hack down`, `up -d` and `exec` then refused. End as a
-    // crash would instead; its settlement proof is already written.
+    // the attempt's locks normally and leave ready, start and live-stop (or hook
+    // owner) records with no interrupted admission lock, which the dead-owner
+    // recovery cannot select: every later `hack down`, `up -d` and `exec` then
+    // refused. End as a crash would instead; the no-host settlement proof is
+    // already written. A hook project (review round 4) runs no down hook on the
+    // ended pool: a requested stop already ran `down.before`, `down.after`
+    // follows only a proven removal, and the recovery after Removed retires its
+    // host processes and hook journal as after any crash.
+    ctx.hookOwner?.graphSettled();
     await (ctx.options.exitOnPoolEnd ?? exitAsCrash)();
   }
   ctx.hookOwner?.graphSettled();

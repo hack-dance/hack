@@ -3224,7 +3224,7 @@ const contracts: readonly ModelContract[] = [
       // VM). Its controls: a start caught mid-way refused by admission and
       // recovery; the live owner's stop same-boot only; `hack down` starting a
       // stopped pool without checking the receipt first.
-      { name: "two-projects", negative: false, states: 6296 },
+      { name: "two-projects", negative: false, states: 12_290 },
       {
         name: "admission-ended-boot",
         negative: true,
@@ -3334,6 +3334,14 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NativeCanComeUp",
         fields: ['nowner = "gone"', 'nrun = "ready"'],
+      },
+      // Review round 4 (High): a project with lifecycle hooks took the hook path
+      // once its pool boot ended and released the admission lock the same way.
+      {
+        name: "hook-owner-exits-released",
+        negative: true,
+        invariant: "NativeCanComeUp",
+        fields: ['nowner = "gone"', 'nrun = "ready"', "nhooks = TRUE"],
       },
     ],
   },

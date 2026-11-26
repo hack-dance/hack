@@ -852,7 +852,10 @@ The second review round adds two switches, from the review and from a real-VM ru
   ends as a crash would: its admission lock, live-stop record and settlement proof
   stay for the dead-owner recovery. At 3c88966f it returned normally and released the
   lock (`nowner = "gone"`), which no recovery selects, so `hack down`, `up -d` and
-  `exec` refused for good.
+  `exec` refused for good. `HookExitsAsCrash` (review round 4) is the same for a
+  project with lifecycle hooks (`nhooks`), whose owner ends through the hook path; it
+  runs no down hook on the ended pool, and the recovery after Removed retires its host
+  processes and hook journal as after any crash.
 
 `NoDeadEnd` says that from every reachable state some named command can act, or
 the owner is still noticing its guest is gone. `Recovers` (`[]<>Settled` under weak
@@ -863,7 +866,7 @@ publication left. `BootBoundUnreached` shows the boot bound (8) never limits a c
 | Control | Switches | Result |
 | --- | --- | --- |
 | `positive` | stopped-pool recovery and recovery from any earlier boot; something else may boot the pool; a fault may strike between a recovery's boot and its graph recovery | 210 states; `NoDeadEnd`, `CanComeUp`, `BootBoundUnreached`, `NoDownOverLiveRun` and `Recovers` hold |
-| `two-projects` | `positive` plus the native-authored project, with every HACK-2715 part and its review fixes; the native run may start, be caught mid-start, and keep boot-bound state | 6296 states; `NoDeadEnd`, `CanComeUp`, `NativeCanComeUp`, `NoWastedPoolStart`, `DownConfirms`, `NoOwnerLeftByForce`, `NativeDownActs`, `BootBoundUnreached`, `NoDownOverLiveRun`, `Recovers` and `NativeRecovers` hold |
+| `two-projects` | `positive` plus the native-authored project, with every HACK-2715 part and its review fixes; the native run may start, be caught mid-start, and keep boot-bound state | 12290 states; `NoDeadEnd`, `CanComeUp`, `NativeCanComeUp`, `NoWastedPoolStart`, `DownConfirms`, `NoOwnerLeftByForce`, `NativeDownActs`, `BootBoundUnreached`, `NoDownOverLiveRun`, `Recovers` and `NativeRecovers` hold |
 | `admission-ended-boot` | `two-projects`, but admission refuses the native run of an ended boot (`AdmitEndedBoot = FALSE`, `next` before HACK-2715) | `CanComeUp` fails: the native run (ready or mid-start) of an earlier boot, and the Compose start is refused |
 | `native-same-boot` | `two-projects`, but the native recovery accepts only its own boot (`NativeCrossBoot = FALSE`) | `NativeCanComeUp` fails: pool running in a later boot, the native run left, `nowner = "dead"` |
 | `native-stopped-pool` | `two-projects`, but the native `hack down` does not start a stopped pool (`NativeStartsPool = FALSE`) | `NativeCanComeUp` fails: pool stopped, the native run left |
@@ -873,6 +876,7 @@ publication left. `BootBoundUnreached` shows the boot bound (8) never limits a c
 | `native-bound-owner` | `two-projects`, but `hack down` refuses a boot-bound run of an ended boot before its owner's stop on a stopped pool, and owners do not watch the pool (`OwnerStopFirst = FALSE`, `OwnerWatchesPool = FALSE`, the code at the first review-fix head) | `NativeCanComeUp` fails: pool stopped, `nrun = "ready"`, `nbound = TRUE`, `nowner = "live"`: the owner and its publication stay up |
 | `native-stop-after-start` | the same switches; invariant `DownConfirms` | fails: `hack down` started the pool for the live owner's stop, the stop did not confirm, and the run is left (`nunconfirmed = TRUE`, `nowner = "dead"`, `nrun = "ready"`) |
 | `force-leaves-owner` | `two-projects`, but owners do not watch the pool (`OwnerWatchesPool = FALSE`) | `NoOwnerLeftByForce` fails: pool stopped by `--force`, `nowner = "live"` |
+| `hook-owner-exits-released` | `two-projects`, but a project with lifecycle hooks (`nhooks`) still returns through its hook path and releases its admission lock (`HookExitsAsCrash = FALSE`, c0e29741) | `NativeCanComeUp` fails: `nowner = "gone"`, `nrun = "ready"`, `nhooks = TRUE` |
 | `owner-exits-released` | `two-projects`, but an owner whose pool boot ended returns normally and releases its admission lock (`ExitsAsCrash = FALSE`, 3c88966f) | `NativeCanComeUp` fails: `nowner = "gone"`, `nrun = "ready"`, and nothing recovers the run |
 | `native-down-on-crash` | `two-projects`, but `hack down` does not recover a pool whose provider died, and owners do not see a dead provider (`CrashSeen = FALSE`) | `NativeDownActs` fails: `pool = "crashed"` with the native run left, and only `hack native recover` acts |
 | `negative` | `next` before HACK-2456 | `NoDeadEnd` fails in an `OwnerCrash` or `OwnerNotices` state: stopped pool, ready run, dead owner, publication left |

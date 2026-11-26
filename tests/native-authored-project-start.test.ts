@@ -831,3 +831,55 @@ macTest(
   },
   CASE_TIMEOUT_MS
 );
+
+// HACK-2715 review round 4 (High): a project with lifecycle hooks takes the hook
+// path once its pool boot ended. That path's `confirmRemoved` cannot succeed on
+// an ended pool, and unwinding released the admission lock, the same root cause
+// as the no-host regression. It now ends as a crash would too, keeping the hook
+// owner journal, the ready and start records and the admission lock for the
+// dead-owner recovery, with no down hook run on the ended pool.
+macTest(
+  "HACK-2715 review round 4: a hook project's owner whose pool boot ended exits as a crash would, keeping its hook journal and admission lock",
+  async () => {
+    const selected = await fixture({
+      finiteHooks: true,
+      poolEndsAfterReady: true,
+    });
+    const runs = join(
+      selected.scope.projectDir,
+      ".internal",
+      "native-authored-runs"
+    );
+    const ended = new Error("ended as a crash would");
+    let kept: string[] | undefined;
+    let hookOrder: string | undefined;
+    const result = await serveNativeAuthoredProject({
+      ...selected,
+      run,
+      startupTimeoutMs: STARTUP_TIMEOUT_MS,
+      onReady: () => {
+        void writeFile(join(selected.root, "pool-ended"), "ended", {
+          mode: 0o600,
+        });
+        return undefined;
+      },
+      exitOnPoolEnd: async () => {
+        kept = (await readdir(runs)).sort();
+        hookOrder = await readFile(
+          join(selected.scope.projectRoot, "hook-order"),
+          "utf8"
+        ).catch(() => "");
+        throw ended;
+      },
+    }).catch((error: unknown) => error);
+    expect(result).toBeInstanceOf(NativeAuthoredProjectStartError);
+    expect(kept).toBeDefined();
+    const names = kept ?? [];
+    for (const suffix of [".admission.lock", ".start.json", ".hooks.json"]) {
+      expect(names.some((name) => name.endsWith(suffix))).toBe(true);
+    }
+    // No down hook ran against the ended pool.
+    expect(hookOrder ?? "").not.toContain("down-");
+  },
+  CASE_TIMEOUT_MS
+);

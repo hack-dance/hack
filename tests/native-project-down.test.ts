@@ -2368,6 +2368,63 @@ test("down keeps its refusal at once when the stopped pool's owner is running bu
   expect(calls).not.toContain("up");
 });
 
+// HACK-2715 review round 6 (seen on a real VM at 2d0d6b08, the hook row): after
+// `runtime down --force`, a project with lifecycle hooks ran `down.before` and
+// `down.after` while `hack down` recovered its run on the pool it started. The
+// services had stopped with the ended boot; no down hook runs for such a down.
+test("down that starts a stopped pool to recover a dead owner's run runs no down hook", async () => {
+  const opts = await fixture();
+  const phases: string[] = [];
+  const calls: string[] = [];
+  let pool = false;
+  let cleaned = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    hooks: {
+      configured: true,
+      run: async ({ phase }) => {
+        phases.push(phase);
+      },
+    },
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "up") {
+        pool = true;
+        return { phase: "running" };
+      }
+      if (command === "foreground-owner") {
+        return {
+          ...ownerSelection("exited", "ready-observed"),
+          dead_owner_recovery: pool ? "7".repeat(64) : null,
+        };
+      }
+      if (!pool) {
+        throw poolStoppedError();
+      }
+      if (command === "cleanup") {
+        // The owner exited with the ended boot: the authenticated stop finds no
+        // owner to answer it.
+        throw new NativeRuntimeRequestError({
+          message: "Native runtime request failed (graph_owner_recovery).",
+          nativeCode: "graph_owner_recovery",
+        });
+      }
+      if (command === "recover-cleanup") {
+        cleaned = true;
+        return { run: run.run, recovered: true, data_retained: true };
+      }
+      if (command === "retire-recovered-publisher") {
+        return { run: run.run, publisher_retired: true, data_retained: true };
+      }
+      return snapshot(cleaned);
+    },
+  });
+  expect(result).toMatchObject({ status: "stopped", runtimeStarted: true });
+  expect(calls).toContain("recover-cleanup");
+  expect(phases).toEqual([]);
+});
+
 test("plain down on a stopped pool with a dead owner also starts the pool to recover", async () => {
   const opts = await fixture();
   const calls: string[] = [];

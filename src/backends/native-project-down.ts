@@ -1053,6 +1053,15 @@ async function nativeProjectDownOnce(opts: {
    * under a dead owner's live run may be started once (HACK-2456).
    */
   readonly startStoppedPool?: boolean;
+  /**
+   * Set by {@link nativeProjectDown} once this down found the run's pool boot
+   * ended under it: it started the stopped pool, or recovered a pool whose
+   * provider exited (HACK-2715 review round 6, seen on a real VM at 2d0d6b08).
+   * The run's services stopped with that boot, so no down hook runs: a
+   * `down.before` would act on services that are gone, and nothing owed is
+   * replayed.
+   */
+  readonly bootEnded?: boolean;
   /** Test seams of the HACK-2572 wait: the pool record proof and its bound. */
   readonly poolBootEnded?: (home: string) => Promise<boolean>;
   readonly endedBootOwnerWaitMs?: number;
@@ -1236,7 +1245,7 @@ async function nativeProjectDownOnce(opts: {
       return;
     }
   };
-  const hooks = opts.hooks;
+  const hooks = opts.bootEnded === true ? undefined : opts.hooks;
   const owedAfterStop = async () => {
     if (!hooks) {
       return;
@@ -1471,7 +1480,10 @@ async function retirePendingRestartAfterRecover(opts: {
  * coordinator (`deferFinalization`) never starts it.
  */
 export async function nativeProjectDown(
-  opts: Omit<Parameters<typeof nativeProjectDownOnce>[0], "startStoppedPool">
+  opts: Omit<
+    Parameters<typeof nativeProjectDownOnce>[0],
+    "startStoppedPool" | "bootEnded"
+  >
 ): Promise<
   Awaited<ReturnType<typeof nativeProjectDownOnce>> & {
     readonly runtimeStarted?: true;
@@ -1486,6 +1498,7 @@ export async function nativeProjectDown(
       const result = await nativeProjectDownOnce({
         ...opts,
         startStoppedPool: opts.deferFinalization !== true && !started,
+        bootEnded: started || recovered,
         startupWaitMs,
       });
       if (result.status === "stopped") {

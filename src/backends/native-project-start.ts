@@ -232,7 +232,7 @@ import {
 } from "./native-project-run.ts";
 import {
   nativeProjectRuntimeUpArgs,
-  nativeRuntimePoolStopped,
+  nativeRuntimeStatusStopped,
 } from "./native-project-runtime-up.ts";
 import { selectNativeEnvFile } from "./native-project-selection.ts";
 import { preflightNativeProjectSource } from "./native-project-source-preflight.ts";
@@ -2411,8 +2411,9 @@ async function selectNativeGraphExtension(opts: {
  * can recover the run without a running pool. When `runtime status` shows the
  * pool stopped, `recover` (`hack down --recover` for this instance) starts it
  * and recovers the run with data retained; the selection then runs once more.
- * A running pool, an unreadable status or any other refusal keeps the original
- * error: its message already names `hack down --recover`, which works there.
+ * On a running pool (another project's command started it again, HACK-2715
+ * review round 6) `recover` recovers the run the same way without a start. An
+ * unreadable status or any other refusal keeps the original error.
  */
 async function selectNativeStartupRecoveringStoppedPool(opts: {
   readonly select: () => ReturnType<typeof selectNativeStartup>;
@@ -2485,23 +2486,61 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
       return selected;
     }
   }
-  if (
-    !(
-      opts.recover &&
-      failure instanceof NativeRuntimeRequestError &&
-      failure.nativeCode === NATIVE_FOREGROUND_OWNER_EXITED &&
-      !opts.signal?.aborted &&
-      (await nativeRuntimePoolStopped(opts))
-    )
-  ) {
+  const pool =
+    opts.recover &&
+    failure instanceof NativeRuntimeRequestError &&
+    failure.nativeCode === NATIVE_FOREGROUND_OWNER_EXITED &&
+    !opts.signal?.aborted
+      ? await ownerExitedPool(opts)
+      : undefined;
+  if (!(opts.recover && pool)) {
     throw failure;
   }
   await opts.recover();
   requireActiveStartup(opts.signal);
   opts.warn(
-    "The native runtime had stopped under this run. It was started and the run was recovered with data retained; starting it again."
+    pool === "stopped"
+      ? "The native runtime had stopped under this run. It was started and the run was recovered with data retained; starting it again."
+      : NATIVE_EXITED_OWNER_RECOVERED_NOTE
   );
   return await opts.select();
+}
+
+/**
+ * HACK-2715 review round 6 (seen on a real VM at 2d0d6b08): after `runtime down
+ * --force`, another project's `hack down` may start the pool again before this
+ * project's `hack up`. Its run's owner had exited with the old boot, and the
+ * refusal used to name `hack down --recover` then `hack up` only in that order,
+ * while the forced-stop line said `hack up`. `hack up` now recovers the exited
+ * owner's run (with data retained) on a running pool as on a stopped one, so the
+ * named command works whichever project goes first.
+ */
+export const NATIVE_EXITED_OWNER_RECOVERED_NOTE =
+  "The earlier owner of this run had exited (for example when the native runtime stopped under it), and its run was recovered with data retained; starting it again.";
+
+/** The pool state `runtime status` reports for an owner-exited refusal: a
+ * proven stopped pool, a running pool, or undefined when it cannot tell. */
+async function ownerExitedPool(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<"stopped" | "running" | undefined> {
+  const status = await opts
+    .invoke({
+      runtime: opts.runtime,
+      cwd: opts.projectRoot,
+      args: ["runtime", "status", "--json"],
+      timeoutMs: 30_000,
+    })
+    .catch(() => undefined);
+  if (nativeRuntimeStatusStopped(status)) {
+    return "stopped";
+  }
+  return isRecord(status) &&
+    status.phase === "running" &&
+    status.process_alive === true
+    ? "running"
+    : undefined;
 }
 /** Shown when `runtime recover` for an exited provider failed before `runtime up`. */
 export const NATIVE_EXITED_RUNTIME_RECOVERY_FAILED =
@@ -3011,8 +3050,8 @@ type NativeProjectStartOptions = {
    * Recovers this instance's run when the pool stopped under it (HACK-2456):
    * `hack down --recover`, which starts the pool and stops the run with data
    * retained. Called at most once, only when the retained preflight refuses
-   * `graph_foreground_owner_exited` and the pool is stopped. Omitted keeps
-   * that refusal.
+   * `graph_foreground_owner_exited` and `runtime status` reads the pool
+   * stopped or running (HACK-2715 review round 6). Omitted keeps that refusal.
    */
   readonly recoverStoppedPool?: () => Promise<void>;
 };

@@ -57,6 +57,7 @@ import {
 } from "../src/backends/native-project-run.ts";
 import {
   NATIVE_CONFIGURATION_REFUSAL,
+  NATIVE_EXITED_OWNER_RECOVERED_NOTE,
   NATIVE_EXITED_RUNTIME_RECOVERY_FAILED,
   NATIVE_SHARED_SOURCE_REFUSAL,
   NativeForegroundVmLostError,
@@ -8672,8 +8673,36 @@ test.each([
   expect(events).toContain("cleanup");
 });
 
-test("up keeps the owner-exited refusal on a running pool without recovery or runtime up", async () => {
+// HACK-2715 review round 6 (seen on a real VM at 2d0d6b08, rows 2 and crash):
+// after `runtime down --force`, the native-authored project's `hack down`
+// started the pool again before this Compose project's `hack up`. The run's
+// owner had exited with the old boot; `hack up` refused and named `hack down
+// --recover`, while the forced-stop line had named `hack up`. It now recovers the
+// run on the running pool too, once, then starts it.
+test("up on a running pool whose run's owner exited recovers the run with data retained, then starts it", async () => {
+  const { start, events, notices } =
+    await stoppedPoolUnderRunFixture("running");
+  expect(await startNativeProject(start)).toBe(0);
+  expect(events.slice(0, 4)).toEqual([
+    "graph retained-preflight refused",
+    "runtime status",
+    "down --recover",
+    "graph retained-preflight",
+  ]);
+  expect(events.filter((event) => event === "down --recover")).toHaveLength(1);
+  expect(notices).toContain(NATIVE_EXITED_OWNER_RECOVERED_NOTE);
+});
+
+test("up keeps the owner-exited refusal when the pool's status cannot be read", async () => {
   const { start, events } = await stoppedPoolUnderRunFixture("running");
+  const invoke = start.dependencies.invoke!;
+  start.dependencies.invoke = async (request) => {
+    if (request.args[0] === "runtime" && request.args[1] === "status") {
+      events.push("runtime status unreadable");
+      throw new Error("unreadable");
+    }
+    return await invoke(request);
+  };
   const error = await startNativeProject(start).catch(
     (caught: unknown) => caught
   );
@@ -8683,7 +8712,7 @@ test("up keeps the owner-exited refusal on a running pool without recovery or ru
   );
   expect(events).toEqual([
     "graph retained-preflight refused",
-    "runtime status",
+    "runtime status unreadable",
   ]);
 });
 

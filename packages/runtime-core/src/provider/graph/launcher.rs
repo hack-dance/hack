@@ -111,20 +111,22 @@ pub(super) fn validate(config: &Value) -> Result<(), Refused> {
         field: ProcessField::User,
         error,
     })?;
-    let executable = config["Entrypoint"]
-        .as_array()
-        .and_then(|entry| entry.first())
-        .and_then(Value::as_str)
-        .is_some_and(super::image_process::executable);
-    if !executable
-        || !config["Entrypoint"]
-            .as_array()
-            .is_some_and(|entry| entry.iter().all(Value::is_string))
-    {
+    // `attach` and the release barrier run `Entrypoint ++ Cmd`, where a missing
+    // Cmd is empty. A command-only process has an explicit empty entrypoint.
+    let cmd = config["Cmd"].as_array().map_or(&[][..], Vec::as_slice);
+    let explicit = config["Entrypoint"].as_array().is_some_and(|entry| {
+        entry
+            .first()
+            .or_else(|| cmd.first())
+            .and_then(Value::as_str)
+            .is_some_and(super::image_process::executable)
+            && entry.iter().chain(cmd).all(Value::is_string)
+    });
+    if !explicit {
         return Err(Refused::new(
             ProcessField::Entrypoint,
             "environment_entrypoint",
-            "Environment delivery requires an explicit entrypoint that names an executable.",
+            "Environment delivery requires an explicit entrypoint or command that names an executable.",
         ));
     }
     if config["StopSignal"]
@@ -342,6 +344,26 @@ mod tests {
         assert_eq!(value["Entrypoint"][5], "space argument");
     }
     #[test]
+    fn adapter_runs_a_command_only_process_as_the_same_argv() {
+        let mut value = config();
+        value["Entrypoint"] = json!([]);
+        value["Cmd"] = json!(["python", "-u", "-m", "http.server"]);
+        attach(&mut value, "/run/slot/values.json", "/storage/launcher").unwrap();
+        assert_eq!(
+            value["Entrypoint"],
+            json!([
+                "/run/hack-environment-launcher",
+                "/run/hack-environment.json",
+                "/run/hack-environment.expires",
+                "python",
+                "-u",
+                "-m",
+                "http.server"
+            ])
+        );
+        assert_eq!(value["Cmd"], json!([]));
+    }
+    #[test]
     fn health_delivery_preserves_command_and_timing_and_refuses_shells() {
         let mut value = config();
         value["Healthcheck"] = json!({"Test":["CMD","/bin/check","space argument"],"Interval":1000000000,"Timeout":2000000000,"Retries":3});
@@ -494,7 +516,21 @@ mod tests {
         ] {
             let mut value = config();
             value["Entrypoint"] = entry;
+            value["Cmd"] = json!([]);
             assert_eq!(validate(&value).unwrap_err().field, field);
+        }
+        // A command-only process (HACK-2740): an explicit empty entrypoint and
+        // the command as Cmd. The command must still name an executable.
+        let mut value = config();
+        value["Entrypoint"] = json!([]);
+        value["Cmd"] = json!(["python", "-m", "http.server"]);
+        assert!(validate(&value).is_ok());
+        for cmd in [json!(null), json!([""]), json!(["/"]), json!(["app", 5])] {
+            value["Cmd"] = cmd;
+            assert_eq!(
+                validate(&value).unwrap_err().field,
+                ProcessField::Entrypoint
+            );
         }
         let mut value = config();
         value["StopSignal"] = json!("SIGUSR1");

@@ -150,23 +150,26 @@ fn exec_form_health(create: &Value, image: &Value) -> Result<Option<Value>, Refu
 /// Materialize exactly the selected process for a private environment/dependency
 /// wrapper. All validation precedes mutation.
 ///
-/// Docker runs `Entrypoint ++ Cmd`; with no entrypoint, `Cmd` alone is the
-/// process, so it becomes the materialized entrypoint (the same argv). An
-/// executable name without `/` (such as `docker-entrypoint.sh`) is kept as is:
-/// the wrapper resolves it through the container's PATH at exec time exactly as
-/// Docker does, never through a host or wrapper PATH. A `CMD-SHELL` health check
-/// becomes the equivalent exec-form test. Only an empty process refuses.
+/// Docker runs `Entrypoint ++ Cmd`. Both fields become explicit, so no image
+/// default can apply later, and they keep Docker's split: with no entrypoint the
+/// result is an explicit empty `Entrypoint`, and `Cmd` alone is the process. A
+/// one-off command (`hack run <service> <cmd...>`) replaces exactly `Cmd`, as
+/// Compose `run` does, so the command must never be folded into the entrypoint
+/// (HACK-2740). Applying this to its own output changes nothing. An executable
+/// name without `/` (such as `docker-entrypoint.sh`) is kept as is: the wrapper
+/// resolves it through the container's PATH at exec time exactly as Docker does,
+/// never through a host or wrapper PATH. A `CMD-SHELL` health check becomes the
+/// equivalent exec-form test. Only an empty process refuses.
 pub(super) fn apply_private(create: &mut Value, image: &Value) -> Result<(), Refused> {
-    let process = resolve(image, create).map_err(|error| Refused {
+    let Resolved { entrypoint, cmd } = resolve(image, create).map_err(|error| Refused {
         field: ProcessField::Entrypoint,
         error,
     })?;
-    let (entrypoint, cmd) = if process.entrypoint.is_empty() {
-        (process.cmd, Vec::new())
-    } else {
-        (process.entrypoint, process.cmd)
-    };
-    if !entrypoint.first().is_some_and(|name| executable(name)) {
+    if !entrypoint
+        .first()
+        .or_else(|| cmd.first())
+        .is_some_and(|name| executable(name))
+    {
         return Err(Refused::new(
             ProcessField::Entrypoint,
             "environment_entrypoint",
@@ -332,8 +335,48 @@ mod tests {
         ] {
             let mut create = create;
             apply_private(&mut create, &image).unwrap();
-            assert_eq!(create["Entrypoint"], argv);
-            assert_eq!(create["Cmd"], json!([]));
+            // Docker's own split: an explicit empty entrypoint, Cmd is the process.
+            assert_eq!(create["Entrypoint"], json!([]));
+            assert_eq!(create["Cmd"], argv);
+            // Materializing the materialized process again changes nothing.
+            let once = create.clone();
+            apply_private(&mut create, &image).unwrap();
+            assert_eq!(create, once);
+        }
+    }
+
+    #[test]
+    fn a_replaced_command_replaces_the_process_only_where_compose_run_would() {
+        // HACK-2740: a one-off derived from a materialized template replaces Cmd.
+        // Without an entrypoint the new command is the whole process; with one,
+        // the entrypoint stays and receives the new command, as `compose run` does.
+        let replaced = json!(["sh", "-c", "echo x"]);
+        for (image, create, process) in [
+            (
+                json!({"Cmd":["/bin/sh"]}),
+                json!({"Cmd":["python","-u","-m","http.server","8080"]}),
+                json!(["sh", "-c", "echo x"]),
+            ),
+            (
+                json!({"Entrypoint":["docker-entrypoint.sh"],"Cmd":["node"]}),
+                json!({"Cmd":["node","server.js"]}),
+                json!(["docker-entrypoint.sh", "sh", "-c", "echo x"]),
+            ),
+            (
+                json!({"Cmd":["/bin/sh"]}),
+                json!({"Entrypoint":["/entry"],"Cmd":["serve"]}),
+                json!(["/entry", "sh", "-c", "echo x"]),
+            ),
+        ] {
+            let mut template = create;
+            apply_private(&mut template, &image).unwrap();
+            let mut job = template.clone();
+            job["Cmd"] = replaced.clone();
+            // The job of a wrapped service is materialized again before its wrapper.
+            apply_private(&mut job, &image).unwrap();
+            let mut argv = job["Entrypoint"].as_array().unwrap().clone();
+            argv.extend(job["Cmd"].as_array().unwrap().iter().cloned());
+            assert_eq!(json!(argv), process);
         }
     }
 

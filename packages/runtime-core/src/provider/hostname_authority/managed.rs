@@ -204,8 +204,16 @@ mod tests {
             drop(held);
         });
         let start = Instant::now();
-        let result =
-            serve_with_startup_wait(&candidate, None, Duration::from_secs(2), &|| Ok(()), None);
+        // The production bound: the release above ends the wait, so a busy host
+        // that runs the releasing thread late cannot turn this into a timeout
+        // (HACK-2743).
+        let result = serve_with_startup_wait(
+            &candidate,
+            None,
+            lifecycle::AUTHORITY_STARTUP_LEASE_WAIT,
+            &|| Ok(()),
+            None,
+        );
         worker.join().unwrap();
         assert!(start.elapsed() >= Duration::from_millis(100));
         // The exact production path gets past contention and rejects the unprepared
@@ -545,7 +553,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         // A healthy owner holds the pipe longer than one check interval.
-        std::thread::sleep(Duration::from_millis(1500));
+        let interval = Duration::from_millis(super::super::OWNER_CHECK_MS as u64);
+        std::thread::sleep(interval + interval / 2);
         assert!(
             socket.exists() && ended.try_recv().is_err(),
             "the authority stopped while its owner held the pipe"
@@ -553,13 +562,13 @@ mod tests {
         let closed = Instant::now();
         unsafe { libc::close(writer) };
         let result = ended
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(2 * interval)
             .expect("the authority kept serving after its owner's pipe closed");
         let after = closed.elapsed();
         unsafe { libc::close(reader) };
         let request = caddy.join().unwrap();
         assert!(result.is_ok(), "{result:?}");
-        assert!(after < Duration::from_secs(2), "noticed after {after:?}");
+        assert!(after < 2 * interval, "noticed after {after:?}");
         assert!(
             request.starts_with(b"POST /stop HTTP/1.1\r\n"),
             "{:?}",
@@ -576,9 +585,12 @@ mod tests {
         let session = SocketDirectory::new("open");
         let (admin, caddy) = caddy_admin(&session);
         fs::set_permissions(&session.0, fs::Permissions::from_mode(0o755)).unwrap();
+        let patience = Duration::from_secs(2);
         let started = Instant::now();
-        super::super::stop_caddy(&admin, Duration::from_secs(2));
-        assert!(started.elapsed() < Duration::from_millis(500));
+        super::super::stop_caddy(&admin, patience);
+        // Refused at once: well short of the patience it would otherwise spend.
+        let elapsed = started.elapsed();
+        assert!(elapsed < patience / 2, "{elapsed:?}");
         fs::set_permissions(&session.0, fs::Permissions::from_mode(0o700)).unwrap();
         // The stand-in is still waiting: end it with a request of our own,
         // kept open until the stand-in has read it.
@@ -657,6 +669,11 @@ mod tests {
     /// #1271 review, M1: an owner killed after it spawned Caddy but before Caddy
     /// bound its admin socket. With patience the stop waits for the socket to
     /// appear in the session directory, then stops that Caddy.
+    ///
+    /// The stand-in binds and then sets mode 0600, as Caddy does. The patience
+    /// is the test's own and generous: the stop returns as soon as it has
+    /// stopped the stand-in, so only a stop that never reaches it waits it out
+    /// (HACK-2743: a 2 s patience left a loaded host little room).
     #[test]
     fn caddy_still_starting_is_stopped_once_its_admin_socket_appears() {
         let session = SocketDirectory::new("late");
@@ -667,10 +684,41 @@ mod tests {
             caddy_admin_in(&directory).1
         });
         let started = Instant::now();
-        super::super::stop_caddy(&admin, Duration::from_secs(2));
+        super::super::stop_caddy(&admin, Duration::from_secs(10));
         let elapsed = started.elapsed();
         let request = late.join().unwrap().join().unwrap();
         assert!(elapsed >= Duration::from_millis(400), "{elapsed:?}");
+        assert!(
+            request.starts_with(b"POST /stop HTTP/1.1\r\n"),
+            "{:?}",
+            String::from_utf8_lossy(&request)
+        );
+    }
+
+    /// HACK-2743: Caddy binds its admin socket before it applies `|0600`, so a
+    /// Caddy still starting can show a socket others could open. The stop must
+    /// not connect to it, and must not give up on it either: it waits, within
+    /// its patience, until the socket is private, then stops that Caddy.
+    #[test]
+    fn caddy_stop_waits_for_its_admin_socket_to_become_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let session = SocketDirectory::new("mode");
+        let (admin, caddy) = caddy_admin(&session);
+        fs::set_permissions(&admin, fs::Permissions::from_mode(0o644)).unwrap();
+        let (done, stopped) = std::sync::mpsc::channel();
+        let target = admin.clone();
+        let stopper = std::thread::spawn(move || {
+            super::super::stop_caddy(&target, Duration::from_secs(10));
+            let _ = done.send(());
+        });
+        // Several retry steps: a stop that gave up has finished by now.
+        assert!(
+            stopped.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the stop gave up on a socket that was not private yet"
+        );
+        fs::set_permissions(&admin, fs::Permissions::from_mode(0o600)).unwrap();
+        stopper.join().unwrap();
+        let request = caddy.join().unwrap();
         assert!(
             request.starts_with(b"POST /stop HTTP/1.1\r\n"),
             "{:?}",
@@ -685,6 +733,12 @@ mod tests {
     fn caddy_stop_is_bounded_when_its_admin_socket_is_missing_refusing_or_silent() {
         use std::os::unix::fs::PermissionsExt;
         let patience = Duration::from_secs(2);
+        // The lower bounds show the patience was spent; the upper bounds only
+        // show the stop ended, so they allow one I/O timeout of scheduling
+        // slack rather than a fraction of a retry step (HACK-2743).
+        let io = super::super::CADDY_STOP_IO;
+        let waited = patience + io;
+        let silent_bound = super::super::CADDY_STOP_WAIT + 2 * io;
         let missing = SocketDirectory::new("missing");
         let admin = missing.0.join("admin.sock");
         let started = Instant::now();
@@ -694,7 +748,7 @@ mod tests {
         super::super::stop_caddy(&admin, patience);
         let elapsed = started.elapsed();
         assert!(
-            elapsed >= Duration::from_millis(1900) && elapsed < Duration::from_millis(2600),
+            elapsed >= Duration::from_millis(1900) && elapsed < waited,
             "missing: {elapsed:?}"
         );
 
@@ -707,7 +761,7 @@ mod tests {
         super::super::stop_caddy(&admin, patience);
         let elapsed = started.elapsed();
         assert!(
-            elapsed >= Duration::from_millis(1900) && elapsed < Duration::from_millis(2600),
+            elapsed >= Duration::from_millis(1900) && elapsed < waited,
             "refusing: {elapsed:?}"
         );
 
@@ -718,7 +772,7 @@ mod tests {
         let started = Instant::now();
         super::super::stop_caddy(&admin, patience);
         let elapsed = started.elapsed();
-        assert!(elapsed < Duration::from_millis(3500), "silent: {elapsed:?}");
+        assert!(elapsed < silent_bound, "silent: {elapsed:?}");
     }
 
     /// A listener for the serving loop alone, in a private short directory.

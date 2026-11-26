@@ -289,6 +289,11 @@ function checkoutCompiles(opts: {
   return { checked, found };
 }
 
+// Budget (60 s, below): the scan waits on no timer. It reads and parses every
+// tracked TypeScript file under tests/ and scripts/ (over a thousand), so its
+// wall time is CPU and file-system work that grows with host load: about 1 s
+// alone, and past Bun's 5 s default once in ten rounds beside the suite's
+// compile-heavy files (HACK-2727). A hang guard, not a speed assertion.
 test("no test or script compiles with the checkout as its working directory", async () => {
   const listed = runFixtureGitSync({
     cwd: REPO,
@@ -312,7 +317,7 @@ test("no test or script compiles with the checkout as its working directory", as
   ).toEqual([]);
   // The scan reached the known compile sites in tests, fixtures and scripts.
   expect(checked).toBeGreaterThanOrEqual(11);
-});
+}, 60_000);
 
 test("the scan binds cwd to the spawn that runs the compile", () => {
   const scan = (text: string) =>

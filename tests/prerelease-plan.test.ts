@@ -1530,6 +1530,13 @@ test("packages exactly the native payload members despite macOS source extended 
   }
 });
 
+// Budget (60 s, below): this case waits on no timer of its own. It packages
+// and verifies the prerelease several times, and each pass hashes and archives
+// the bundle and starts every MCP executable's capability probe, so its wall
+// time is file and process-start work that grows with host load. It takes
+// 0.66 s alone and at most 0.58 s in 12-file batches, but 4.7 s, and past
+// Bun's 5 s default in every round, beside the suite's other compile-heavy
+// files (HACK-2727). A hang guard, not a speed assertion.
 test("packages a verified MCP selection with exact nested checksums and inventory", async () => {
   const root = await mkdtemp(join(tmpdir(), "hack-prerelease-mcp-"));
   try {
@@ -1616,7 +1623,7 @@ test("packages a verified MCP selection with exact nested checksums and inventor
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-});
+}, 60_000);
 
 test("local dry-run has no publishing effects and refuses SHA mismatch and injected input", async () => {
   const root = await mkdtemp(join(tmpdir(), "hack-prerelease-plan-"));

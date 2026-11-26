@@ -271,7 +271,9 @@ fn explicit_host_pin_witness_recovers_only_selected_previous_boot_run() {
     selected_owner.child.kill().unwrap();
     selected_owner.wait(deadline);
     assert_eq!(
-        crate::provider::lifecycle::down(&candidate).unwrap().phase,
+        crate::provider::lifecycle::down(&candidate, crate::provider::LiveRuns::Interrupt)
+            .unwrap()
+            .phase,
         "stopped"
     );
     let new_boot = crate::provider::lifecycle::up(&candidate)

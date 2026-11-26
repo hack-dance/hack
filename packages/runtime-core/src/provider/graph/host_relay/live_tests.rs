@@ -137,7 +137,7 @@ fn owned_graph_registration_live() -> Result<(), CandidateError> {
     let root = std::env::var("HACK_RELAY_GRAPH_ROOT").expect("explicit private root");
     let candidate = Candidate::discover(Path::new(&root))?;
     if std::env::var_os("HACK_RELAY_GRAPH_CLEANUP").is_some() {
-        let status = provider::down(&candidate)?;
+        let status = provider::down(&candidate, provider::LiveRuns::Interrupt)?;
         assert_eq!(status.process_alive, Some(false));
         println!("owned-graph-relay-cleanup-complete");
         return Ok(());
@@ -582,7 +582,7 @@ fn owned_graph_registration_live() -> Result<(), CandidateError> {
         );
         Ok(())
     })();
-    let stopped = provider::down(&candidate)?;
+    let stopped = provider::down(&candidate, provider::LiveRuns::Interrupt)?;
     assert_eq!(stopped.process_alive, Some(false));
     result
 }

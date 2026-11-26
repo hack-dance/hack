@@ -275,7 +275,12 @@ fn explicit_absent_publication_cleanup_retains_selected_volume_and_sibling() {
     let old_boot = old_owner.guest_boot_id.clone().unwrap();
     selected_owner.child.kill().unwrap();
     selected_owner.wait(deadline);
-    assert_eq!(lifecycle::down(&candidate).unwrap().phase, "stopped");
+    assert_eq!(
+        lifecycle::down(&candidate, lifecycle::LiveRuns::Interrupt)
+            .unwrap()
+            .phase,
+        "stopped"
+    );
     let new_boot = lifecycle::up(&candidate).unwrap().guest_boot_id.unwrap();
     assert_ne!(old_boot, new_boot);
 

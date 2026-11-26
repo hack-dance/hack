@@ -11,6 +11,7 @@ import {
   nativeCodesReportRuntimeNotRunning,
   nativeFailureDetail,
   resolveNativeRuntimeSelection,
+  takeLeaseWaitLines,
 } from "../src/backends/native-runtime-client.ts";
 import { ClosedCliError } from "../src/lib/cli-result.ts";
 import {
@@ -153,6 +154,22 @@ if (process.argv.includes("image-wait-fixture")) {
   await Bun.sleep(10);
   process.stderr.write("it:begin\\nhack.image-wait:end\\n");
   console.error(JSON.stringify({code:"image_tag_download_busy"}));
+  process.exit(2);
+}
+if (process.argv.includes("lease-wait-fixture")) {
+  if (process.env.HACK_INTERNAL_REPORT_LEASE_WAIT !== "1") {
+    console.error(JSON.stringify({code:"lease_wait_unrequested"}));
+    process.exit(2);
+  }
+  process.stderr.write("hack.lease-wa");
+  await Bun.sleep(10);
+  process.stderr.write("it:begin project-stop\\nhack.lease-wait:end\\n");
+  console.error(JSON.stringify({code:"provider_busy",message:"Provider lease acquisition refused; recorded holder: project stop; no operation was admitted.",message_fixed:true}));
+  process.exit(2);
+}
+if (process.argv.includes("lease-image-fixture")) {
+  process.stderr.write("hack.lease-wait:begin start\\nhack.image-wait:begin\\nhack.lease-wait:end\\nhack.image-wait:end\\n");
+  console.error(JSON.stringify({code:"provider_busy"}));
   process.exit(2);
 }
 if (process.argv.includes("hang")) await Bun.sleep(60_000);
@@ -2022,6 +2039,76 @@ test("HACK-2418: a failed provider command shows the provider's own last line, v
     );
   }
 });
+
+bunTest(
+  "HACK-2724: a start's lease wait report survives split stderr, and the refusal keeps the holder",
+  async () => {
+    const runtime = await fixture();
+    const holders: string[] = [];
+    const error = await invokeNativeRuntime({
+      runtime,
+      cwd: runtime.home,
+      args: ["lease-wait-fixture"],
+      onLeaseWait: (holder) => holders.push(holder),
+    }).catch((failure: unknown) => failure);
+    // One begin per wait; the end line is consumed without a report.
+    expect(holders).toEqual(["project-stop"]);
+    expect(error).toBeInstanceOf(NativeRuntimeRequestError);
+    expect((error as NativeRuntimeRequestError).nativeCode).toBe(
+      "provider_busy"
+    );
+    expect((error as NativeRuntimeRequestError).nativeMessage).toBe(
+      "Provider lease acquisition refused; recorded holder: project stop; no operation was admitted."
+    );
+    // Without a reporter the runtime is not asked to report at all.
+    const unrequested = await invokeNativeRuntime({
+      runtime,
+      cwd: runtime.home,
+      args: ["lease-wait-fixture"],
+    }).catch((failure: unknown) => failure);
+    expect((unrequested as NativeRuntimeRequestError).nativeCode).toBe(
+      "lease_wait_unrequested"
+    );
+    // Image and lease lines interleave without losing the refusal.
+    const wait: boolean[] = [];
+    const interleaved = await invokeNativeRuntime({
+      runtime,
+      cwd: runtime.home,
+      args: ["lease-image-fixture"],
+      onImageWait: (waiting) => wait.push(waiting),
+      onLeaseWait: (holder) => holders.push(holder),
+    }).catch((failure: unknown) => failure);
+    expect(wait).toEqual([true, false]);
+    expect(holders).toEqual(["project-stop", "start"]);
+    expect((interleaved as NativeRuntimeRequestError).nativeCode).toBe(
+      "provider_busy"
+    );
+  }
+);
+
+bunTest(
+  "HACK-2724: only well-formed leading lease-wait lines are consumed",
+  () => {
+    const holders: string[] = [];
+    const report = (holder: string) => holders.push(holder);
+    expect(
+      takeLeaseWaitLines(
+        'hack.lease-wait:begin cleanup\nhack.lease-wait:end\n{"code":"x"}',
+        report
+      )
+    ).toBe('{"code":"x"}');
+    // A partial line waits for the rest of its bytes.
+    expect(takeLeaseWaitLines("hack.lease-wait:beg", report)).toBe(
+      "hack.lease-wait:beg"
+    );
+    // A malformed token or other leading text stops the scan untouched.
+    expect(
+      takeLeaseWaitLines("hack.lease-wait:begin Project Stop\n{}", report)
+    ).toBe("hack.lease-wait:begin Project Stop\n{}");
+    expect(takeLeaseWaitLines('{"code":"x"}', report)).toBe('{"code":"x"}');
+    expect(holders).toEqual(["cleanup"]);
+  }
+);
 
 bunTest(
   "image wait markers survive split stderr and preserve the final refusal",

@@ -13,6 +13,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub(in crate::provider) mod changes;
+#[cfg(all(test, target_os = "macos"))]
+pub(in crate::provider) mod command_lease_tests;
 #[cfg(any(target_os = "macos", test))]
 mod exec_io;
 #[cfg(all(test, target_os = "macos"))]
@@ -244,6 +246,24 @@ fn rejection_category(bytes: &[u8]) -> &'static str {
 
 fn failure(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("engine_protocol", message)
+}
+
+/// A bounded lease wait that ended before any attempt saw the lease busy.
+fn lease_expired() -> CandidateError {
+    CandidateError::new(
+        "provider_busy",
+        "Provider lease acquisition expired before admission.",
+    )
+}
+
+/// A caller cancelled a bounded lease wait (an owner signal, a disconnected
+/// client); nothing was admitted.
+#[cfg(target_os = "macos")]
+pub(in crate::provider) fn acquisition_cancelled() -> CandidateError {
+    CandidateError::new(
+        "provider_acquisition_cancelled",
+        "Provider acquisition was cancelled before admission.",
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -519,10 +539,7 @@ impl<'a> Engine<'a> {
     ) -> Result<Self, CandidateError> {
         Self::connect_for_start(candidate, ConnectionMode::Allocation, deadline, &|| {
             if cancelled() {
-                Err(CandidateError::new(
-                    "provider_acquisition_cancelled",
-                    "Provider acquisition was cancelled before admission.",
-                ))
+                Err(acquisition_cancelled())
             } else {
                 Ok(())
             }
@@ -539,12 +556,7 @@ impl<'a> Engine<'a> {
             deadline,
             check,
             || Self::connect_mode(candidate, mode == ConnectionMode::Cleanup),
-            || {
-                CandidateError::new(
-                    "provider_busy",
-                    "Provider lease acquisition expired before admission.",
-                )
-            },
+            lease_expired,
         )?;
         check()?;
         Ok(engine)
@@ -576,19 +588,75 @@ impl<'a> Engine<'a> {
         )
     }
 
-    /// One service command keeps its original budget through every engine query.
+    /// One authored service command (the owner-side native `exec`, interactive `exec`
+    /// and one-off `run`, and the compose interactive exec) keeps its original budget
+    /// through every engine query. Lease contention is waited out inside that same
+    /// budget, for at most [`COMMAND_LEASE_WAIT`](super::lifecycle::COMMAND_LEASE_WAIT)
+    /// (HACK-2669). This is deliberate: the native requester reads the owner's answer
+    /// for a fixed 40 s against the owner's 30 s budget, so the wait must not extend
+    /// the budget, and after a full 15 s wait the command has the other 15 s.
+    /// `check` (the caller's guard: owner signals, publication and pin, or the
+    /// interactive frontend's liveness) runs before every attempt and once more after
+    /// acquisition, so a pending signal ends the wait within one backoff step (at most
+    /// 50 ms). Waiting admits nothing; all identity checks run after acquisition.
     #[cfg(target_os = "macos")]
     pub(in crate::provider) fn connect_command_until(
         candidate: &'a Candidate,
         deadline: Instant,
+        check: &dyn Fn() -> Result<(), CandidateError>,
     ) -> Result<Self, CandidateError> {
         super::managed_environment::remaining_until(deadline)?;
-        Self::from_guest_until(OwnedGuest::connect(candidate)?, false, Some(deadline))
+        let lease = deadline.min(Instant::now() + super::lifecycle::COMMAND_LEASE_WAIT);
+        let engine = super::state::wait_for_acquisition(
+            lease,
+            check,
+            || Self::from_guest_until(OwnedGuest::connect(candidate)?, false, Some(deadline)),
+            lease_expired,
+        )?;
+        check()?;
+        Ok(engine)
+    }
+
+    /// The mutation lease for one finite service command: the compose `hack exec`, and
+    /// the dependency refresh that `hack exec` and `hack run` send first (on both the
+    /// requesting and the owner side). A ready foreground owner holds the lease briefly
+    /// and often, so this waits while another holder has it, until `deadline` and for
+    /// at most [`COMMAND_LEASE_WAIT`](super::lifecycle::COMMAND_LEASE_WAIT), instead of
+    /// refusing at once (HACK-2669). It is the bounded acquisition of `connect_until`
+    /// with that cap and a caller check: `check` runs before every attempt and once more after
+    /// acquisition, so a caller on an owner's loop thread passes its signal and
+    /// disconnect checks, and the wait ends within one backoff step of them. Waiting
+    /// admits nothing; all identity checks run after acquisition, and a command never
+    /// replaces or cancels the holder. The compose exec's own timeout starts after
+    /// this returns; its frontend bound covers the wait.
+    pub(in crate::provider) fn connect_command(
+        candidate: &'a Candidate,
+        deadline: Instant,
+        check: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<Self, CandidateError> {
+        let lease = deadline.min(Instant::now() + super::lifecycle::COMMAND_LEASE_WAIT);
+        Self::connect_for_start(candidate, ConnectionMode::Allocation, lease, check)
     }
 
     #[cfg(target_os = "macos")]
     pub(super) fn connect_cleanup_wait(candidate: &'a Candidate) -> Result<Self, CandidateError> {
         Self::from_guest(OwnedGuest::connect_cleanup_wait(candidate)?, true)
+    }
+
+    /// The cleanup connection of a run's own owner or of its recovery: it waits for a
+    /// briefly held provider lease, as the Compose owner's cleanup does, because an owner
+    /// that gives up its cleanup exits with its services still bound (HACK-2715 review
+    /// round 2). Other platforms, and the receipt-only test engine, connect at once.
+    #[cfg(feature = "native-config-plan")]
+    pub(super) fn connect_owned_cleanup(candidate: &'a Candidate) -> Result<Self, CandidateError> {
+        #[cfg(all(test, target_os = "macos"))]
+        if fixture::active(candidate) {
+            return Self::connect_mode(candidate, true);
+        }
+        #[cfg(target_os = "macos")]
+        return Self::connect_cleanup_wait(candidate);
+        #[cfg(not(target_os = "macos"))]
+        Self::connect_cleanup(candidate)
     }
 
     fn connect_mode(candidate: &'a Candidate, cleanup_only: bool) -> Result<Self, CandidateError> {

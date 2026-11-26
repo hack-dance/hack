@@ -108,6 +108,7 @@ fn lease_wait_pressure_change_refuses_owner_commit_and_releases_the_mutation_lea
         Some(opened),
         &clock,
         &NoRecord,
+        || None::<()>,
         || {
             // Sampled only once the window has passed, and only under the lease.
             assert!(clock.0.get() >= admission::DEVELOPMENT_WINDOW);
@@ -117,11 +118,79 @@ fn lease_wait_pressure_change_refuses_owner_commit_and_releases_the_mutation_lea
             Ok(report(pressure.load(Ordering::SeqCst)))
         },
     )
-    .map(|(_lease, _samples)| fs::write(&owner, b"must-not-create-owner").unwrap());
+    .map(|_| fs::write(&owner, b"must-not-create-owner").unwrap());
     worker.join().unwrap();
     assert!(matches!(checked, Err(error) if error.code == "admission_rejected"));
     assert!(!owner.exists());
     // A failed fresh sample does not leave a lease or grant allocation authority.
+    assert!(state::Lock::acquire(&path).is_ok());
+}
+
+/// HACK-2724 review: two `up -d` on a stopped pool. B selected the boot path and waited for
+/// the lease while A booted the pool. Under the lease B finds the pool running before any
+/// recheck: it takes no sample, consults and forgets no record, and keeps the lease for the
+/// resume (`running_start::resume_leased`), instead of refusing `admission_owner_changed`.
+#[test]
+fn a_boot_that_waited_out_a_peer_boot_resumes_the_running_pool_under_the_lease() {
+    struct Forgets(std::cell::Cell<bool>);
+    impl admission::Earlier for Forgets {
+        fn usable(&self) -> Option<admission::Recorded> {
+            panic!("no record is read once the pool is running")
+        }
+        fn now(&self) -> Option<Duration> {
+            None
+        }
+        fn in_age(&self, _: &admission::Recorded, _: Duration) -> bool {
+            false
+        }
+        fn forget(&self) {
+            self.0.set(true);
+        }
+    }
+    let scratch = Scratch::new("peer-boot");
+    let path = scratch.0.clone();
+    let peer = state::Lock::acquire(&path).unwrap();
+    let booted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let boot = Arc::clone(&booted);
+    let worker = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        // The peer's boot completes, then it releases the lease.
+        boot.store(true, Ordering::SeqCst);
+        drop(peer);
+    });
+    let clock = Skipping(std::cell::Cell::new(Duration::ZERO));
+    let opened = admission::open(&report(1), &clock).unwrap();
+    let earlier = Forgets(std::cell::Cell::new(false));
+    let leased = startup_admission_lease(
+        &path,
+        Duration::from_secs(5),
+        Profile::Development,
+        Some(opened),
+        &clock,
+        &earlier,
+        || {
+            // Asked only under this start's lease, after the peer released it.
+            assert!(
+                matches!(state::Lock::acquire(&path), Err(error) if error.code == "provider_busy")
+            );
+            booted.load(Ordering::SeqCst).then_some("running")
+        },
+        || -> Result<Admission, CandidateError> {
+            panic!("a running pool takes no admission sample")
+        },
+    )
+    .unwrap();
+    worker.join().unwrap();
+    let LeasedBoot::Running(lease, running) = leased else {
+        panic!("the boot path did not see the running pool");
+    };
+    assert_eq!(running, "running");
+    assert!(!earlier.0.get());
+    // The clock never slept the admission window: nothing was sampled.
+    assert_eq!(clock.0.get(), Duration::ZERO);
+    // The resume runs under this very lease.
+    assert!(matches!(state::Lock::acquire(&path), Err(error) if error.code == "provider_busy"));
+    drop(lease);
     assert!(state::Lock::acquire(&path).is_ok());
 }
 
@@ -175,13 +244,14 @@ fn a_start_that_reuses_a_recorded_sample_still_takes_and_records_two_samples() {
     clock.0.set(Duration::from_millis(103_100));
     let reuse = opening::Reuse::parse(None).unwrap();
     let earlier = opening::Opening::new(&path, &host, reuse);
-    let (lease, leased) = startup_admission_lease(
+    let LeasedBoot::Boot(lease, leased) = startup_admission_lease(
         &path,
         Duration::from_secs(2),
         Profile::Development,
         Some(opened),
         &clock,
         &earlier,
+        || None::<()>,
         || {
             // The start's own second sample, taken under the lease.
             assert!(
@@ -190,7 +260,9 @@ fn a_start_that_reuses_a_recorded_sample_still_takes_and_records_two_samples() {
             Ok(sample())
         },
     )
-    .unwrap();
+    .unwrap() else {
+        panic!("no pool is running in this fixture");
+    };
     // No wait: the clock stands where the lease was taken.
     assert_eq!(clock.0.get(), Duration::from_millis(103_100));
     assert_eq!(leased.reused, Some(true));
@@ -270,6 +342,10 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
             "let mut proven_trees = proven_trees?;",
         ),
         ("AcquireLease, Recheck, Qualify", "startup_admission_lease("),
+        (
+            "ResumeAfterPeerBoot: a pool booted while this start waited (HACK-2724)",
+            "running_start::resume_leased(candidate, running, &request, &lock,",
+        ),
         (
             "RefuseTreeRecheck, the tree guard of Settle and ObserveRunning",
             "leased_trees::recheck(candidate, &lock, &mut proven_trees)?;",
@@ -457,7 +533,7 @@ fn down_samples_the_host_beside_the_stop_and_settles_it_after() {
             .unwrap_or_else(|| panic!("down_observed no longer contains `{step}`"))
     };
     let steps = [
-        "let lock = state::Lock::acquire(&root(candidate))?;",
+        "let lock = down_lease(&root(candidate), DOWN_LEASE_WAIT)?;",
         "let mut owner = Owner::load(candidate)?;",
         "let stopped = provider_stopped(&owner.phase, initial.process_alive);",
         "admission::opening::StopSample::beside(",

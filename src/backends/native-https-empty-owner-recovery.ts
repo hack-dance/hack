@@ -230,6 +230,44 @@ async function boundedCommand(
   }
 }
 
+/**
+ * Whether any process runs the shared owner invocation of this configuration:
+ * `<frontend> --internal-native-https-owner <configuration path>`, as
+ * `spawnNativeHttpsOwner` starts it. An absence proof for one exact owner, so
+ * any line naming both the argument and the path counts as running, and an
+ * unreadable inventory counts as running too. Raw process arguments are never
+ * returned (HACK-2720).
+ */
+export async function nativeHttpsOwnerInvocationRunning(opts: {
+  readonly configurationPath: string;
+}): Promise<boolean> {
+  let lines: string[];
+  try {
+    lines = (
+      await boundedCommand("/bin/ps", ["-axo", "pid=,command=", "-ww"], [0])
+    ).split("\n");
+  } catch {
+    return true;
+  }
+  for (const line of lines) {
+    if (line.trim() === "") {
+      continue;
+    }
+    const match = PS_LINE.exec(line);
+    if (!match) {
+      return true;
+    }
+    const command = match[2] ?? "";
+    if (
+      command.includes(` ${NATIVE_HTTPS_OWNER_ARGUMENT} `) &&
+      command.includes(opts.configurationPath)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 const productionInspection: EmptyNativeHttpsOwnerInspection = {
   originalSpawnerAbsent(pid) {
     try {
@@ -408,7 +446,8 @@ async function noRecoveryClaims(
     }
   }
 }
-async function syncDirectory(path: string): Promise<void> {
+/** fsync a directory so entries created or renamed in it survive power loss. */
+export async function syncDirectory(path: string): Promise<void> {
   const file = await open(path, constants.O_RDONLY);
   try {
     await file.sync();

@@ -5,12 +5,19 @@ import {
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
+import {
+  NATIVE_RECOVERABLE_LIVE_PHASES,
+  nativeCrossBootRecoverable,
+} from "./native-cross-boot-recovery.ts";
 import { awaitNativeEndedBootOwner } from "./native-ended-boot-owner.ts";
 import {
   nativeFrontendGone,
   nativeFrontendGoneSettled,
 } from "./native-frontend-identity.ts";
-import { openNativeDownHookSession } from "./native-project-down-hooks.ts";
+import {
+  type NativeDownHookSession,
+  openNativeDownHookSession,
+} from "./native-project-down-hooks.ts";
 import {
   captureNativeProjectFinalization,
   inspectNativeProjectFinalizationLifetime,
@@ -21,6 +28,7 @@ import {
   waitNativeProjectFinalization,
 } from "./native-project-finalization.ts";
 import {
+  INSPECT_BUSY_WAIT_MS,
   inspectNativeProjectGraph,
   isNativeProviderBusy,
   observeStartingNativeProjectGraph,
@@ -46,6 +54,7 @@ import {
   nativeProjectStartupPending,
   nativeRunEnvironmentChange,
   removeNativeProjectRun,
+  retireCleanedNativeRestart,
 } from "./native-project-run.ts";
 import { nativeProjectRuntimeUpArgs } from "./native-project-runtime-up.ts";
 import {
@@ -131,19 +140,6 @@ const RECEIPT_SHA = /^[a-f0-9]{64}$/;
 const RECOVERY_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 const FOREGROUND_STATES = new Set(["absent", "running", "exited", "uncertain"]);
-/**
- * Graph phases in which an exited foreground owner is recovered: ready, or every
- * service started with some goal still unmet (`started-observed`, written only
- * under `--report-started`). Only a run with a saved mapping gets here. A fresh
- * start saves its mapping only at ready today, so in the started phase this is a
- * restored run; PR B saves the mapping at started.
- */
-const RECOVERABLE_LIVE_PHASES: ReadonlySet<string> = new Set([
-  "ready-observed",
-  "started-observed",
-  "reconciled-cleanup-only",
-]);
-
 /** What `graph foreground-owner` selected; it grants no recovery authority. */
 type ForegroundOwnerSelection = {
   readonly phase: string;
@@ -156,6 +152,12 @@ type ForegroundOwnerSelection = {
   readonly deadOwnerRecoveryComplete: boolean;
   readonly deadOwnerRecoveryError: string | null;
   readonly failedStartRecoverable: boolean;
+  /**
+   * The runtime's cross-boot recovery admits this receipt as a start lost before
+   * ready (`cross_boot_start`: a lost-start phase, a settled relay startup and no
+   * cleanup marker). Absent from an older runtime, which never admitted one.
+   */
+  readonly crossBootStart: boolean;
 };
 
 /**
@@ -227,6 +229,7 @@ async function selectForegroundOwner(opts: {
     !isRecord(value) ||
     value.version !== 1 ||
     !optionalBoolean(value.failed_start_recoverable) ||
+    !optionalBoolean(value.cross_boot_start) ||
     value.run !== opts.run.run ||
     value.owner !== opts.run.owner ||
     typeof value.phase !== "string" ||
@@ -265,6 +268,7 @@ async function selectForegroundOwner(opts: {
   return {
     phase: value.phase,
     failedStartRecoverable: value.failed_start_recoverable === true,
+    crossBootStart: value.cross_boot_start === true,
     receiptSha256: value.receipt_sha256,
     foreground: value.foreground as ForegroundOwnerSelection["foreground"],
     liveOwnerRecovery:
@@ -585,7 +589,7 @@ function requireRecoverableOwner(
   }
   if (
     selection.foreground === "exited" &&
-    !RECOVERABLE_LIVE_PHASES.has(selection.phase) &&
+    !NATIVE_RECOVERABLE_LIVE_PHASES.has(selection.phase) &&
     !selection.failedStartRecoverable
   ) {
     throw exitedOwnerRefused(selection.phase, verb);
@@ -677,6 +681,33 @@ async function resumeSelectedOwner(opts: {
 /** How often a down that waits for an unpublished start checks it again. */
 const STARTUP_WAIT_POLL_MS = 500;
 
+/** After this long, a `down` that still waits for its run's frontend says so. */
+export const FINALIZATION_NOTICE_MS = 5000;
+
+/**
+ * Run `wait`, printing `line` once if it is still pending after `afterMs`
+ * (#1271: a `down` that waited for its frontend printed nothing at all).
+ */
+export async function withSlowNotice<T>(opts: {
+  readonly wait: () => Promise<T>;
+  readonly line: string;
+  readonly afterMs?: number;
+  readonly notice?: (line: string) => void;
+}): Promise<T> {
+  const timer = setTimeout(
+    () =>
+      (opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+        opts.line
+      ),
+    opts.afterMs ?? FINALIZATION_NOTICE_MS
+  );
+  try {
+    return await opts.wait();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Wait for a live start of this instance to end (HACK-2351): a detached start
  * whose launcher gave up can still hold the native runtime while it builds or
@@ -742,21 +773,58 @@ class RetainedRunResumed extends Error {}
  */
 class StoppedPoolStarted extends Error {}
 
-/** Shown after a down started the pool to recover its run (HACK-2456). */
-export const NATIVE_RECOVERY_RUNTIME_STARTED_NOTE =
-  "The native runtime was started to recover this run and is still running; run `runtime down` to stop it.";
+/**
+ * Shown when `hack down --recover` also retired a pending `hack restart` whose
+ * replacement was lost (HACK-2096): the next `hack up` resumes the retained data.
+ */
+export const NATIVE_RECOVERED_RESTART_NOTE =
+  "The interrupted hack restart of this run was retired with its data kept; hack up starts the project again.";
+
+/**
+ * Shown when `hack down --recover` stopped the run but left its pending
+ * `hack restart` because the restart's operation lock is held (HACK-2096): by a
+ * live restart, recovery or data removal of this project, or one interrupted
+ * before the fix. Down does not wait for or remove the lock.
+ */
+export function nativeRestartLockHeldNote(lock: string): string {
+  return `The pending hack restart of this run was kept: its operation lock (${lock}) is held by another hack restart, recovery or data removal of this project. Once that finishes, run hack down --recover again to retire it; hack up refuses while it is pending.`;
+}
+
+/**
+ * Shown when `hack down --recover` stopped the run but kept its pending
+ * restart because, under the restart lock, it could not confirm the run still
+ * stopped: the runtime stayed busy past the wait, the inspect failed, or the
+ * run no longer read as stopped (HACK-2096 review). The stop itself stands.
+ * A run that is running again may have been resumed on purpose, so the next
+ * step is conditional.
+ */
+export const NATIVE_RESTART_KEPT_UNCONFIRMED_NOTE =
+  "The run was stopped with its data kept, but its pending hack restart was kept: the run could not be confirmed still stopped (the native runtime stayed busy, or the run is running again). If the run should not be running, run hack down --recover again to retire it; hack up refuses while it is pending.";
+
+/**
+ * Shown when `hack down --recover` stopped the run but could not read (or
+ * remove) its pending restart intent (HACK-2096). The stop itself stands.
+ */
+export const NATIVE_RESTART_INTENT_UNREADABLE_NOTE =
+  "The run was stopped with its data kept, but its pending hack restart could not be read, so it was not retired; hack up refuses while it is pending. Inspect native state before recovery.";
 
 /**
  * Whether the lock-free `graph foreground-owner` selection (host files only;
  * it needs no running pool) shows an exited owner whose run the recovery after a
  * boot can still recover. Starting the pool begins a new boot, so only the
- * cross-boot dead-owner recovery applies: a ready run, or an interrupted
- * dead-owner recovery resuming by its own selection. The same-boot recoveries
- * (`recover-live-owner`, which a recoverable failed start and an interrupted
- * live-owner recovery use) need the original boot's relay identity and cannot run
- * after it, so those cases, an exited owner of a start that was never confirmed
- * (`preparing`, `restoring`), a live, absent or uncertain owner, a retained stop
- * (whose unadmitted owner is retired without the pool) and an unreadable
+ * cross-boot dead-owner recovery applies: a ready run, a start lost before it
+ * was ready (`failed-retained` after the owner's own unwind, or `preparing` or
+ * `restoring` without one; HACK-2714), or an interrupted dead-owner recovery
+ * resuming by its own
+ * selection. The runtime admits a lost start only with a settled relay startup
+ * and no cleanup marker (`crossBootStart`, read from the receipt before the pool
+ * is started), and revalidates the dead owner and the ended boot. The
+ * same-boot recoveries (`recover-live-owner`, which an interrupted live-owner
+ * recovery uses) need the original boot's relay identity and cannot run after
+ * it, so that case, an exited owner of a restart in progress (`restarting`) or
+ * of a lost start the runtime would refuse, a live, absent or uncertain owner, a
+ * retained
+ * stop (whose unadmitted owner is retired without the pool) and an unreadable
  * selection are all false: the caller keeps its refusal and never starts a pool
  * it could not then use.
  */
@@ -776,7 +844,7 @@ async function deadOwnerOfLiveRun(opts: {
     }
     if (
       selection.foreground === "exited" &&
-      (RECOVERABLE_LIVE_PHASES.has(selection.phase) ||
+      (nativeCrossBootRecoverable(selection) ||
         selection.deadOwnerRecovery !== null)
     ) {
       return true;
@@ -882,6 +950,89 @@ class ExitedPoolRecovered extends Error {
   }
 }
 
+/**
+ * HACK-2096 (real VM, row 8): a stopped retained run whose receipt records
+ * every container removed, while the engine still shows some of them, stopped
+ * (`exited`) and none running. Seen after the provider was killed seconds
+ * after a `hack down` removed the run's containers: the guest engine's removal
+ * had not reached the storage disk, so the next boot listed the containers
+ * again, as exited (137). Nothing is running, but `verify` needs every
+ * container absent, so `hack down --recover` refused ("cleanup is
+ * unconfirmed") and `hack up` refused the mapping. Only this exact shape is
+ * repaired, by the runtime's own `graph cleanup` of the receipt's resources
+ * (exact ids; named volumes and data kept, a container's anonymous volumes go
+ * with it as in the original down); anything running, uncertain or unrecorded is not.
+ * The run's owner retired its publication when that down finished, so the
+ * runtime removes them under that retirement's lock, without an owner
+ * (HACK-2719). A cleanup also flushes the guest disk before it records the
+ * removal now, so a new down no longer leaves this shape behind.
+ */
+function lostContainerRemovals(snapshot: unknown): boolean {
+  if (
+    !(
+      stoppedRetained(snapshot) &&
+      isRecord(snapshot) &&
+      snapshot.journal_incomplete === false &&
+      isRecord(snapshot.receipt) &&
+      isRecord(snapshot.receipt.resources) &&
+      isRecord(snapshot.observations)
+    )
+  ) {
+    return false;
+  }
+  const observations = snapshot.observations;
+  const containers = Object.values(snapshot.receipt.resources).filter(
+    (resource) => isRecord(resource) && resource.kind === "container"
+  );
+  const states = containers.map((resource) => {
+    if (!isRecord(resource) || resource.phase !== "absent") {
+      return "unrecorded";
+    }
+    const observation = observations[`container:${String(resource.key)}`];
+    return isRecord(observation) ? observation.state : undefined;
+  });
+  const settled = states.every(
+    (state) => state === "absent" || state === "exited"
+  );
+  // A repair that removed them but ended before its storage barrier confirmed
+  // (`lost_removal_pending`): run it again, so the stop becomes durable.
+  return settled && (states.includes("exited") || lostRemovalPending(snapshot));
+}
+
+/** A lost-removal repair whose storage barrier has not confirmed yet. */
+function lostRemovalPending(snapshot: unknown): boolean {
+  return isRecord(snapshot) && snapshot.lost_removal_pending === true;
+}
+
+/**
+ * The refusal of a plain `hack down` while a lost-removal repair is unfinished:
+ * the containers are gone from the guest's list, but not yet durably.
+ */
+export const NATIVE_LOST_REMOVAL_PENDING =
+  "This run is stopped with its data kept, but an earlier hack down --recover removed containers a lost VM had brought back and ended before it confirmed that the removal reached the guest disk. Run hack down --recover to finish it; hack up refuses the run until then.";
+
+/**
+ * The refusal when the runtime does not remove the brought-back containers
+ * (real-VM row 8): its owner-less repair needs the owner's publication retired
+ * and each container exactly as recorded and stopped (`graph_lost_removal`), and
+ * without a retired publication the cleanup goes to an owner that is gone
+ * (`graph_owner_recovery`). Since HACK-2719 an ordinary row 8 is repaired, so
+ * this is shown only when one of those proofs fails. It names no command that
+ * would fail, and none that would discard the data.
+ */
+export const NATIVE_LOST_REMOVAL_UNREPAIRABLE =
+  "This run is stopped with its data kept and nothing of it is running, but stopped containers that an earlier hack down had removed are listed again, most likely because the VM was lost seconds after that down, before the removal reached its disk. The runtime could not prove that this run's foreground owner retired and that each container is the stopped one it recorded, so it did not remove them, and hack up refuses the run until they are gone. Keep this native home unchanged for inspection; hack ps --json shows the stopped containers.";
+
+/** Runtime codes for which the lost-removal repair proved nothing it could remove. */
+const LOST_REMOVAL_REFUSALS: ReadonlySet<string> = new Set([
+  "graph_owner_recovery",
+  "graph_lost_removal",
+]);
+
+/** Shown when `hack down --recover` removed containers a lost VM brought back. */
+export const NATIVE_LOST_REMOVAL_NOTE =
+  "Stopped containers of this run that a lost VM had brought back were removed again; the run's data is kept.";
+
 /** Whether an inspected graph is stopped with its data retained. */
 function stoppedRetained(snapshot: unknown): boolean {
   return (
@@ -917,6 +1068,43 @@ async function downRun(opts: {
     (await loadNativeProjectRun(opts.scope)) ??
     (await orphanNativeProjectLifetime(opts.scope))
   );
+}
+
+/**
+ * The live path's down-hook session (HACK-2715). No live-path `down.before`
+ * runs once the run's pool boot has ended: `bootEnded` when this down already
+ * knows it, or else the owner selection's dead-owner recovery hint, which the
+ * runtime gives only for a run its boot evidence places in an earlier boot, so
+ * it holds however the pool came back, another project's restart included. A
+ * plain down selects the owner here, lock-free, only when hooks are configured,
+ * after the hook journal was read (an unknown completion still refuses first).
+ * Without boot evidence (no hint, the pool not running) the hooks run as
+ * before. A boot-ended session retires the ready run's `owed` record and runs
+ * only a `down.after` an earlier down left owed.
+ */
+async function openLiveDownHookSession(opts: {
+  readonly scope: NativeProjectRunScope;
+  readonly run: NativeProjectRun;
+  readonly configured: boolean;
+  readonly bootEnded: boolean;
+  readonly selection: ForegroundOwnerSelection | undefined;
+  readonly selectOwner: () => Promise<ForegroundOwnerSelection>;
+}): Promise<NativeDownHookSession> {
+  const open = (bootEnded: boolean) =>
+    openNativeDownHookSession({
+      scope: opts.scope,
+      run: opts.run,
+      graphStopped: false,
+      configured: opts.configured,
+      bootEnded,
+    });
+  const session = await open(opts.bootEnded);
+  if (opts.bootEnded || !opts.configured) {
+    return session;
+  }
+  const selection =
+    opts.selection ?? (await opts.selectOwner().catch(() => undefined));
+  return selection?.deadOwnerRecovery == null ? session : await open(true);
 }
 
 async function nativeProjectDownOnce(opts: {
@@ -965,11 +1153,25 @@ async function nativeProjectDownOnce(opts: {
    * under a dead owner's live run may be started once (HACK-2456).
    */
   readonly startStoppedPool?: boolean;
+  /**
+   * Set by {@link nativeProjectDown} once this down found the run's pool boot
+   * ended under it: it started the stopped pool, or recovered a pool whose
+   * provider exited (HACK-2715 review round 6, seen on a real VM at 2d0d6b08).
+   * The run's services stopped with that boot, so the live path runs no down
+   * hook: a `down.before` would act on services that are gone. Phases an
+   * earlier down left owed in the journal still run once.
+   */
+  readonly bootEnded?: boolean;
   /** Test seams of the HACK-2572 wait: the pool record proof and its bound. */
   readonly poolBootEnded?: (home: string) => Promise<boolean>;
   readonly endedBootOwnerWaitMs?: number;
   /** Test seam of the HACK-2097 wait for an owner that left its stop unanswered. */
   readonly ownerExitWaitMs?: number;
+  /**
+   * Test seam: how long the re-inspect before retiring a pending restart waits
+   * out `provider_busy`; {@link INSPECT_BUSY_WAIT_MS} by default.
+   */
+  readonly restartRetireBusyWaitMs?: number;
   /** Where the one-line wait notices go; stderr by default. */
   readonly notice?: (line: string) => void;
 }) {
@@ -1079,6 +1281,14 @@ async function nativeProjectDownOnce(opts: {
           verb,
         })
       : undefined;
+  // Whether the run's pool boot ended under it, so its services stopped with
+  // that boot: this down started the pool or recovered an exited provider, or
+  // it just recovered a dead owner by the selection's dead-owner recovery hint,
+  // which the runtime gives only for a run its boot evidence places in an
+  // earlier boot. Seen on a real VM at efcec5d3: with the frontend gone, both
+  // the forced-stop row and another project's restart reached the stopped path
+  // through that recovery, and ran the `owed` hooks of the ready run.
+  let bootEnded = opts.bootEnded === true;
   if (
     selection &&
     (await resumeSelectedOwner({
@@ -1090,23 +1300,50 @@ async function nativeProjectDownOnce(opts: {
       verb,
     }))
   ) {
+    bootEnded ||= selection.deadOwnerRecovery !== null;
     initial = await inspect();
     verify(initial, run, false);
   }
   const wait = async () => {
     // The lifetime as last captured (it may have gained its HTTPS lease).
-    const token = finalization;
-    if (token === undefined) {
+    const captured = finalization;
+    if (captured === undefined) {
       return;
     }
+    let latest = captured;
     try {
-      await waitNativeProjectFinalization({
-        scope: opts.scope,
-        run,
-        token,
-        timeoutMs: frontendGone ? 1 : opts.finalizationTimeoutMs,
-      });
+      // A started return takes its HTTPS lease at the owner's ready line,
+      // beside this stop (HACK-2707): the same frontend may add the lease to
+      // its lifetime (version 2 to 3, same attempt) while we wait. Follow it
+      // once, then wait on the lifetime that now carries it.
+      for (;;) {
+        try {
+          const token = latest;
+          await withSlowNotice({
+            line: "Waiting for this run's frontend to finish its cleanup: its HTTPS lease release or recovery. Retiring an exited HTTPS owner usually finishes within about 35 s after the services stop; the release is then verified against the stopped graph.",
+            wait: () =>
+              waitNativeProjectFinalization({
+                scope: opts.scope,
+                run,
+                token,
+                timeoutMs: frontendGone ? 1 : opts.finalizationTimeoutMs,
+              }),
+          });
+          break;
+        } catch (error) {
+          const current = await captureFinalization({
+            scope: opts.scope,
+            run,
+          }).catch(() => undefined);
+          if (!(current && nativeFinalizationLeaseAdded(latest, current))) {
+            throw error;
+          }
+          latest = current;
+          finalization = current;
+        }
+      }
     } catch {
+      const token = latest;
       // The wait just saw the frontend gone without completion; one unreadable
       // `ps` row under load must not turn that into "still running" (HACK-2372).
       if (token.version === 1 || !(await nativeFrontendGoneSettled(token))) {
@@ -1143,6 +1380,9 @@ async function nativeProjectDownOnce(opts: {
       return;
     }
   };
+  // Owed phases journaled for this run run once. After the pool boot ended, the
+  // ready run's own `owed` record is retired instead of run (its services went
+  // with the boot); a `down.after` an earlier down left owed still runs.
   const hooks = opts.hooks;
   const owedAfterStop = async () => {
     if (!hooks) {
@@ -1154,12 +1394,48 @@ async function nativeProjectDownOnce(opts: {
       run,
       graphStopped: true,
       configured: hooks.configured,
+      bootEnded,
     });
     await session.before(() =>
       hooks.run({ phase: "before", run, graphStopped: true })
     );
     await session.after(() =>
       hooks.run({ phase: "after", run, graphStopped: true })
+    );
+  };
+  // `hack down --recover` only: see `lostContainerRemovals`.
+  // Verify a stopped run, first removing containers a lost VM brought back.
+  // The note prints only once the re-inspection verifies the stop.
+  const verifyStoppedRepairing = async (snapshot: unknown): Promise<void> => {
+    if (!(opts.recover === true && lostContainerRemovals(snapshot))) {
+      verify(snapshot, run, true);
+      if (stoppedRetained(snapshot) && lostRemovalPending(snapshot)) {
+        throw new ClosedCliError(NATIVE_LOST_REMOVAL_PENDING);
+      }
+      return;
+    }
+    try {
+      await invoke({
+        runtime: opts.runtime,
+        cwd: opts.scope.projectRoot,
+        args: ["graph", "cleanup", "--run-id", run.run, "--json"],
+        timeoutMs: 590_000,
+      });
+    } catch (error) {
+      // Real-VM row 8: the runtime removes them without the owner once the
+      // owner's publication is retired (HACK-2719). When it cannot prove that,
+      // or the containers' identities, say exactly that.
+      if (
+        error instanceof NativeRuntimeRequestError &&
+        LOST_REMOVAL_REFUSALS.has(error.nativeCode ?? "")
+      ) {
+        throw new ClosedCliError(NATIVE_LOST_REMOVAL_UNREPAIRABLE);
+      }
+      throw error;
+    }
+    verify(await inspect(), run, true);
+    (opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+      NATIVE_LOST_REMOVAL_NOTE
     );
   };
   const recovered = await recoverNativeInterruptedStartupCleanup({
@@ -1170,7 +1446,7 @@ async function nativeProjectDownOnce(opts: {
     invoke,
   });
   if (recovered !== null) {
-    verify(recovered, run, true);
+    await verifyStoppedRepairing(recovered);
     await opts.retireHostProcesses?.(run);
     await wait();
     await owedAfterStop();
@@ -1201,7 +1477,9 @@ async function nativeProjectDownOnce(opts: {
   if (stoppedRetained(initial)) {
     // Recovery or a foreground stop already stopped compute. Guest cleanup and
     // completed hooks must not replay; only journaled owed phases run once.
-    verify(initial, run, true);
+    // The one exception is the runtime's own removal of containers the receipt
+    // already records removed but a lost VM brought back; no hook runs for it.
+    await verifyStoppedRepairing(initial);
     await opts.retireHostProcesses?.(run);
     await wait();
     await owedAfterStop();
@@ -1214,11 +1492,20 @@ async function nativeProjectDownOnce(opts: {
     } as const;
   }
   const session = hooks
-    ? await openNativeDownHookSession({
+    ? await openLiveDownHookSession({
         scope: opts.scope,
         run,
-        graphStopped: false,
         configured: hooks.configured,
+        bootEnded,
+        selection,
+        selectOwner: () =>
+          selectForegroundOwner({
+            runtime: opts.runtime,
+            projectRoot: opts.scope.projectRoot,
+            run,
+            invoke,
+            verb,
+          }),
       })
     : undefined;
   await opts.before?.(run);
@@ -1276,6 +1563,64 @@ async function nativeProjectDownOnce(opts: {
  */
 
 /**
+ * After `hack down --recover` stopped `run` with its data kept, retire a
+ * pending restart of it (HACK-2096; see {@link retireCleanedNativeRestart}),
+ * re-inspecting the run under the restart lock, and say what happened in one
+ * line whatever it did with an intent it found: retired, or kept for a held
+ * lock, an unreadable intent, or a run it could not confirm still stopped. A
+ * plain down and the restart coordinator's own down (`deferFinalization`)
+ * never retire.
+ *
+ * The re-inspect waits out `provider_busy` like any mutating command's inspect
+ * ({@link INSPECT_BUSY_WAIT_MS}): a read-only `hack ps` or `hack logs`, or
+ * another project's starting foreground `up`, holds the lease only briefly or
+ * until its ready line, and is no sign that this run was resumed.
+ */
+async function retirePendingRestartAfterRecover(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly scope: NativeProjectRunScope;
+  readonly run: string;
+  readonly recover?: boolean;
+  readonly deferFinalization?: boolean;
+  readonly invoke?: typeof invokeNativeRuntime;
+  readonly restartRetireBusyWaitMs?: number;
+  readonly notice?: (line: string) => void;
+}): Promise<void> {
+  if (opts.recover !== true || opts.deferFinalization === true) {
+    return;
+  }
+  const invoke = withNativeRecoveryGuidance(opts.invoke ?? invokeNativeRuntime);
+  const retirement = await retireCleanedNativeRestart({
+    ...opts.scope,
+    run: opts.run,
+    stillStopped: async () =>
+      stoppedRetained(
+        await inspectNativeProjectGraph({
+          runtime: opts.runtime,
+          projectRoot: opts.scope.projectRoot,
+          run: opts.run,
+          invoke,
+          busyWaitMs: opts.restartRetireBusyWaitMs ?? INSPECT_BUSY_WAIT_MS,
+        })
+      ),
+  });
+  const notice =
+    opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`));
+  if (retirement.status === "retired") {
+    notice(NATIVE_RECOVERED_RESTART_NOTE);
+  } else if (retirement.status === "locked") {
+    notice(nativeRestartLockHeldNote(retirement.lock));
+  } else if (retirement.status === "unreadable") {
+    notice(NATIVE_RESTART_INTENT_UNREADABLE_NOTE);
+  } else if (
+    retirement.status === "running" ||
+    retirement.status === "unconfirmed"
+  ) {
+    notice(NATIVE_RESTART_KEPT_UNCONFIRMED_NOTE);
+  }
+}
+
+/**
  * Stop an instance's native run. See {@link nativeProjectDownOnce}. A down
  * that waited on a start resuming the retained run begins once more, with no
  * further startup wait, so it stops the resumed graph under its new owner.
@@ -1286,7 +1631,10 @@ async function nativeProjectDownOnce(opts: {
  * coordinator (`deferFinalization`) never starts it.
  */
 export async function nativeProjectDown(
-  opts: Omit<Parameters<typeof nativeProjectDownOnce>[0], "startStoppedPool">
+  opts: Omit<
+    Parameters<typeof nativeProjectDownOnce>[0],
+    "startStoppedPool" | "bootEnded"
+  >
 ): Promise<
   Awaited<ReturnType<typeof nativeProjectDownOnce>> & {
     readonly runtimeStarted?: true;
@@ -1301,8 +1649,12 @@ export async function nativeProjectDown(
       const result = await nativeProjectDownOnce({
         ...opts,
         startStoppedPool: opts.deferFinalization !== true && !started,
+        bootEnded: started || recovered,
         startupWaitMs,
       });
+      if (result.status === "stopped") {
+        await retirePendingRestartAfterRecover({ ...opts, run: result.run });
+      }
       return started ? { ...result, runtimeStarted: true } : result;
     } catch (error) {
       if (error instanceof StoppedPoolStarted && !started) {

@@ -14,6 +14,9 @@ struct Committed {
 pub(super) struct Context<'a> {
     admitted: Admitted<'a>,
     committed: RefCell<Committed>,
+    /// Whether the cleanup found the run in the current pool boot; `false` for a run of
+    /// an ended boot (HACK-2715). Reported as `same_boot`.
+    same_boot: std::cell::Cell<bool>,
 }
 impl<'a> Context<'a> {
     fn new(mut admitted: Admitted<'a>) -> Result<Self, CandidateError> {
@@ -40,6 +43,7 @@ impl<'a> Context<'a> {
         Ok(Self {
             admitted,
             committed: RefCell::new(Committed { intent, witness }),
+            same_boot: std::cell::Cell::new(true),
         })
     }
     fn verify(&self, pending: Option<((u64, u64), &[u8])>) -> Result<Receipt, CandidateError> {
@@ -228,7 +232,7 @@ pub struct Outcome {
 pub fn recover(candidate: &Candidate, options: Options<'_>) -> Result<Outcome, CandidateError> {
     recover_using(candidate, options, |context, environment_retired| {
         let inventory = context.committed.borrow().intent.environment.clone();
-        runtime::cleanup_recovery(
+        let (receipt, same_boot) = runtime::cleanup_recovery(
             candidate,
             context.admitted.run,
             &context.admitted.original,
@@ -236,7 +240,9 @@ pub fn recover(candidate: &Candidate, options: Options<'_>) -> Result<Outcome, C
             environment_retired,
             &inventory,
             &|snapshot| context.finish(snapshot),
-        )
+        )?;
+        context.same_boot.set(same_boot);
+        Ok(receipt)
     })
 }
 pub(super) fn recover_using(
@@ -272,7 +278,7 @@ pub(super) fn recover_using(
         version: 1,
         kind: ResultKind::NativeGraphLiveOwnerRecovered,
         run: options.run.into(),
-        same_boot: true,
+        same_boot: context.same_boot.get(),
         publication_retired: true,
         receipt,
     })

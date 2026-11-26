@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setDefaultTimeout, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -13,9 +13,21 @@ import { privateCliEnv } from "./helpers/private-cli-env.ts";
 import { requireTestConfigCompiler } from "./helpers/test-config-compiler.ts";
 
 const roots: string[] = [];
+const invocations = new Map<AbortController, Promise<unknown>>();
 const PRIVATE = "synthetic-private-dispatch-diagnostic";
+const CLI_TIMEOUT_MS = 15_000;
+// The source CLI cases need time for fixture setup, subprocess exit and assertions.
+// The setup inspection and Ctrl-C cases use their own deadlines.
+setDefaultTimeout(CLI_TIMEOUT_MS + 5000);
 const realCompiler = requireTestConfigCompiler();
 afterEach(async () => {
+  // Bun can stop awaiting a test without stopping its async work.
+  for (const controller of invocations.keys()) {
+    controller.abort(
+      new Error("Source CLI test ended before its invocation completed")
+    );
+  }
+  await Promise.allSettled(invocations.values());
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
   );
@@ -77,15 +89,27 @@ test("timed setup inspection leaves the runtime effect marker absent", async () 
   expect(await Bun.file(join(selected.root, "runtime-called")).exists()).toBe(
     false
   );
-});
+}, 5000);
 
-async function invoke(opts: {
+type Invocation = {
   readonly selected: Awaited<ReturnType<typeof fixture>>;
   readonly args: readonly string[];
   readonly backend?: string;
   readonly logger?: "console";
-}) {
+};
+
+function invoke(opts: Invocation) {
+  const controller = new AbortController();
+  const invocation = invokeSourceCli(opts, controller).finally(() => {
+    invocations.delete(controller);
+  });
+  invocations.set(controller, invocation);
+  return invocation;
+}
+
+async function invokeSourceCli(opts: Invocation, controller: AbortController) {
   const { root, native, compiler } = opts.selected;
+  const { signal } = controller;
   const child = Bun.spawn(
     [
       process.execPath,
@@ -118,26 +142,41 @@ async function invoke(opts: {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
+      signal,
+      killSignal: "SIGKILL",
     }
   );
-  const timer = setTimeout(() => child.kill("SIGKILL"), 15_000);
+  const timer = setTimeout(() => {
+    controller.abort(
+      new Error(`Source CLI timed out after ${CLI_TIMEOUT_MS}ms`)
+    );
+  }, CLI_TIMEOUT_MS);
   try {
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
+    const [stdout, stderr, code] = await Promise.race([
+      Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]),
+      new Promise<never>((_, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        });
+      }),
     ]);
+    signal.throwIfAborted();
     expect(stdout.length + stderr.length).toBeLessThan(64 * 1024);
     expect(stdout + stderr).not.toContain(PRIVATE);
     expect(await Bun.file(join(root, "runtime-called")).exists()).toBe(false);
     expect(await readdir(join(root, "candidate"))).toEqual([]);
+    signal.throwIfAborted();
     return { stdout, stderr, code };
   } finally {
     clearTimeout(timer);
     if (child.exitCode === null) {
-      child.kill("SIGKILL");
-      await child.exited;
+      controller.abort();
     }
+    await child.exited;
   }
 }
 

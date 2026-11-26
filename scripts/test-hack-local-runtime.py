@@ -82,7 +82,7 @@ def main():
                     # The candidate serializes operations. If boot still owns the lock,
                     # main's bounded invocation finishes before its finally cleanup runs.
                     try:
-                        invoke("runtime", "down", timeout=90)
+                        invoke("runtime", "down", "--force", timeout=90)
                     except Exception as error:
                         (EVIDENCE / "watchdog-stop-error.txt").write_text(str(error) + "\n")
                     return

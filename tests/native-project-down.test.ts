@@ -6,14 +6,23 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  NATIVE_LOST_REMOVAL_NOTE,
+  NATIVE_LOST_REMOVAL_PENDING,
+  NATIVE_LOST_REMOVAL_UNREPAIRABLE,
   NATIVE_OWNER_EXIT_NOTICE,
+  NATIVE_RECOVERED_RESTART_NOTE,
+  NATIVE_RESTART_INTENT_UNREADABLE_NOTE,
+  NATIVE_RESTART_KEPT_UNCONFIRMED_NOTE,
   nativeDownEnvironment,
   nativeProjectDown,
+  nativeRestartLockHeldNote,
+  withSlowNotice,
 } from "../src/backends/native-project-down.ts";
 import {
   beginNativeProjectFinalization,
@@ -22,11 +31,18 @@ import {
   waitNativeProjectFinalization,
 } from "../src/backends/native-project-finalization.ts";
 import {
+  completeNativeRestartCleanup,
   loadNativeProjectRun,
+  loadNativeRestartIntent,
   type NativeProjectRun,
   type NativeProjectRunScope,
+  type NativeRestartIntent,
+  nativeRestartOperationLock,
   removeNativeProjectRun,
+  retireCleanedNativeRestart,
   saveNativeProjectRun,
+  saveNativeRestartIntent,
+  withNativeRestartLock,
 } from "../src/backends/native-project-run.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import {
@@ -169,6 +185,55 @@ test("down waits for the captured frontend after cleanup and lifecycle retiremen
   expect((await result).status).toBe("stopped");
   expect(stopped).toBe(true);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test("down follows the HTTPS lease a started return adds to its lifetime during the stop (HACK-2707)", async () => {
+  // `hack down` right after `up -d`: the frontend's HTTPS acquisition at the
+  // owner's ready line runs beside this stop, so its lease intent can reach the
+  // lifetime (version 2 to 3, same attempt) after down captured it. Down waits
+  // on the lifetime that now carries the lease instead of refusing.
+  const opts = await fixture();
+  const lifetime = await beginNativeProjectFinalization({
+    scope: opts.scope,
+    run,
+    httpsPort: null,
+  });
+  expect(lifetime.token.version).toBe(2);
+  let leased: Awaited<ReturnType<typeof beginNativeProjectFinalization>>;
+  let cleaned = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    after: async () => {
+      leased = await beginNativeProjectFinalization({
+        scope: opts.scope,
+        run,
+        httpsPort: 18_443,
+        httpsLease: {
+          version: 1,
+          ownerGeneration: "1".repeat(32),
+          leaseId: "2".repeat(32),
+          run: run.run,
+          attempt: lifetime.token.attempt,
+          owner: run.owner,
+          namespace: run.namespace,
+          planId: run.planId,
+        },
+      });
+      expect(leased.token.version).toBe(3);
+      setTimeout(() => void leased.complete(), 50);
+    },
+    invoke: async (request) => {
+      if (request.args[1] === "cleanup") {
+        cleaned = true;
+        return {};
+      }
+      return snapshot(cleaned);
+    },
+  });
+  expect(result.status).toBe("stopped");
+  expect(
+    await captureNativeProjectFinalization({ scope: opts.scope, run })
+  ).toMatchObject({ version: 3, attempt: lifetime.token.attempt });
 });
 
 test("missing frontend identity refuses before hooks or cleanup without leaking paths", async () => {
@@ -2354,6 +2419,341 @@ test("down keeps its refusal at once when the stopped pool's owner is running bu
   expect(calls).not.toContain("up");
 });
 
+// HACK-2715 review round 6 (seen on a real VM at 2d0d6b08, the hook row): after
+// `runtime down --force`, a project with lifecycle hooks ran `down.before` and
+// `down.after` while `hack down` recovered its run on the pool it started. The
+// services had stopped with the ended boot; no down hook runs for such a down.
+test("down that starts a stopped pool to recover a dead owner's run runs no down hook", async () => {
+  const opts = await fixture();
+  const phases: string[] = [];
+  const calls: string[] = [];
+  let pool = false;
+  let cleaned = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    hooks: {
+      configured: true,
+      run: async ({ phase }) => {
+        phases.push(phase);
+      },
+    },
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "up") {
+        pool = true;
+        return { phase: "running" };
+      }
+      if (command === "foreground-owner") {
+        return {
+          ...ownerSelection("exited", "ready-observed"),
+          dead_owner_recovery: pool ? "7".repeat(64) : null,
+        };
+      }
+      if (!pool) {
+        throw poolStoppedError();
+      }
+      if (command === "cleanup") {
+        // The owner exited with the ended boot: the authenticated stop finds no
+        // owner to answer it.
+        throw new NativeRuntimeRequestError({
+          message: "Native runtime request failed (graph_owner_recovery).",
+          nativeCode: "graph_owner_recovery",
+        });
+      }
+      if (command === "recover-cleanup") {
+        cleaned = true;
+        return { run: run.run, recovered: true, data_retained: true };
+      }
+      if (command === "retire-recovered-publisher") {
+        return { run: run.run, publisher_retired: true, data_retained: true };
+      }
+      return snapshot(cleaned);
+    },
+  });
+  expect(result).toMatchObject({ status: "stopped", runtimeStarted: true });
+  expect(calls).toContain("recover-cleanup");
+  expect(phases).toEqual([]);
+});
+
+// HACK-2715 review round 6: another project already started the pool again, so
+// this down never sees it stopped. The owner selection's dead-owner recovery
+// hint (given only for a run its boot evidence places in an earlier boot) still
+// tells it the run's boot ended, and no live-path down hook runs.
+test("down after another project restarted the pool runs no down hook when the selection has a dead-owner recovery hint", async () => {
+  const opts = await fixture();
+  const phases: string[] = [];
+  const calls: string[] = [];
+  let cleaned = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    hooks: {
+      configured: true,
+      run: async ({ phase }) => {
+        phases.push(phase);
+      },
+    },
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "foreground-owner") {
+        return {
+          ...ownerSelection("exited", "ready-observed"),
+          dead_owner_recovery: "7".repeat(64),
+        };
+      }
+      if (command === "cleanup") {
+        throw new NativeRuntimeRequestError({
+          message: "Native runtime request failed (graph_owner_recovery).",
+          nativeCode: "graph_owner_recovery",
+        });
+      }
+      if (command === "recover-cleanup") {
+        cleaned = true;
+        return { run: run.run, recovered: true, data_retained: true };
+      }
+      if (command === "retire-recovered-publisher") {
+        return { run: run.run, publisher_retired: true, data_retained: true };
+      }
+      return snapshot(cleaned);
+    },
+  });
+  expect(result).toMatchObject({ status: "stopped" });
+  expect(result).not.toHaveProperty("runtimeStarted");
+  expect(calls).not.toContain("up");
+  expect(calls).toContain("recover-cleanup");
+  expect(phases).toEqual([]);
+});
+
+// Without a hint (no boot evidence), the same down runs its hooks as before.
+test("down whose owner selection has no dead-owner recovery hint runs its down hooks", async () => {
+  const opts = await fixture();
+  const phases: string[] = [];
+  let cleaned = false;
+  await nativeProjectDown({
+    ...opts,
+    hooks: {
+      configured: true,
+      run: async ({ phase }) => {
+        phases.push(phase);
+      },
+    },
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      if (command === "foreground-owner") {
+        return ownerSelection("running", "ready-observed");
+      }
+      if (command === "cleanup") {
+        cleaned = true;
+        return { run: run.run, stopped: true, data_retained: true };
+      }
+      return snapshot(cleaned);
+    },
+  }).catch(() => undefined);
+  expect(phases[0]).toBe("before");
+});
+
+// Review round 6 (Low): after the pool boot ended, a `down.after` an earlier
+// healthy down left owed in the journal still runs once; only the live-path
+// hooks are skipped.
+test("down after the pool boot ended still runs a down.after an earlier down left owed", async () => {
+  const opts = await fixture();
+  const { replaceNativeDownHookRecord } = await import(
+    "../src/backends/native-project-down-hooks.ts"
+  );
+  expect(
+    await replaceNativeDownHookRecord(opts.scope, null, {
+      run: run.run,
+      generation: "e".repeat(32),
+      state: "after-owed",
+    })
+  ).toBe(true);
+  const phases: string[] = [];
+  let pool = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    hooks: {
+      configured: true,
+      run: async ({ phase }) => {
+        phases.push(phase);
+      },
+    },
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      if (command === "up") {
+        pool = true;
+        return { phase: "running" };
+      }
+      if (command === "foreground-owner") {
+        return ownerSelection("exited", "ready-observed");
+      }
+      if (!pool) {
+        throw poolStoppedError();
+      }
+      // An earlier healthy down already stopped the graph and owes its after.
+      return snapshot(true);
+    },
+  });
+  expect(result).toMatchObject({ status: "stopped", runtimeStarted: true });
+  expect(phases).toEqual(["after"]);
+});
+
+/**
+ * The state a ready detached Compose start leaves when its pool boot ends
+ * under it, as kept in the real-VM homes at efcec5d3 (`p1257-hooks`,
+ * `p1257-hooksb`): the start wrote the ready run's `owed` down-hook record,
+ * and its frontend exited (with the pool watch) without completing its
+ * finalization.
+ */
+async function endedBootReadyRun(scope: NativeProjectRunScope): Promise<void> {
+  const { replaceNativeDownHookRecord } = await import(
+    "../src/backends/native-project-down-hooks.ts"
+  );
+  expect(
+    await replaceNativeDownHookRecord(scope, null, {
+      run: run.run,
+      generation: "f".repeat(32),
+      state: "owed",
+    })
+  ).toBe(true);
+  const module = join(
+    import.meta.dir,
+    "../src/backends/native-project-finalization.ts"
+  );
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      `const { beginNativeProjectFinalization } = await import(${JSON.stringify(module)});
+       await beginNativeProjectFinalization(JSON.parse(process.argv[1]));`,
+      JSON.stringify({ scope, run }),
+    ],
+    { stdout: "ignore", stderr: "pipe" }
+  );
+  expect(await child.exited).toBe(0);
+}
+
+// HACK-2715, real VM at efcec5d3: `runtime down --force` (`p1257-hooks`), or
+// another project's down that started the stopped pool again (`p1257-hooksb`),
+// then this project's plain `hack down`. With the frontend gone the down
+// selects the owner, `graph foreground-owner` gives its dead-owner recovery hint
+// (the homes' `dead-owner-cleanup.json` records it as `original_sha256`, from
+// the ended boot to the new one), `recover-cleanup` stops the run, and the
+// stopped path ran the ready run's `owed` record as `down.before` and
+// `down.after`. The services had stopped with the ended boot: neither runs, and
+// the record is retired so a later down does not run them either.
+for (const poolStopped of [true, false]) {
+  test(`down of a ready run whose pool boot ended runs no owed down hook (${poolStopped ? "after runtime down --force" : "after another project restarted the pool"})`, async () => {
+    const opts = await fixture();
+    await endedBootReadyRun(opts.scope);
+    const { loadNativeDownHookRecord } = await import(
+      "../src/backends/native-project-down-hooks.ts"
+    );
+    const phases: string[] = [];
+    const calls: string[] = [];
+    let pool = !poolStopped;
+    let cleaned = false;
+    const down = () =>
+      nativeProjectDown({
+        ...opts,
+        poolBootEnded: async () => false,
+        hooks: {
+          configured: true,
+          run: async ({ phase }) => {
+            phases.push(phase);
+          },
+        },
+        invoke: async (request) => {
+          const command = request.args[1]!;
+          calls.push(command);
+          if (command === "up") {
+            pool = true;
+            return { phase: "running" };
+          }
+          if (command === "foreground-owner") {
+            return cleaned
+              ? ownerSelection("absent", "stopped-data-retained")
+              : {
+                  ...ownerSelection("exited", "ready-observed"),
+                  dead_owner_recovery: pool ? "3".repeat(64) : null,
+                  dead_owner_recovery_complete: false,
+                };
+          }
+          if (!pool) {
+            throw poolStoppedError();
+          }
+          if (command === "recover-cleanup") {
+            expect(request.args).toContain("3".repeat(64));
+            cleaned = true;
+            return { run: run.run, recovered: true, data_retained: true };
+          }
+          if (command === "retire-recovered-publisher") {
+            return {
+              run: run.run,
+              publisher_retired: true,
+              data_retained: true,
+            };
+          }
+          if (command === "managed-hostname-authority") {
+            return { authority: { present: false } };
+          }
+          expect(command).toBe("inspect");
+          return snapshot(cleaned);
+        },
+      });
+    const result = await down();
+    expect(result.status).toBe("stopped");
+    expect(result.runtimeStarted === true).toBe(poolStopped);
+    expect(calls.filter((call) => call === "recover-cleanup")).toHaveLength(1);
+    expect(phases).toEqual([]);
+    expect(await loadNativeDownHookRecord(opts.scope)).toBeNull();
+    // A later down of the stopped run has nothing owed either.
+    expect((await down()).status).toBe("stopped");
+    expect(phases).toEqual([]);
+  });
+}
+
+// The same boot: a frontend crash on a running pool is recovered by the
+// same-boot recovery, which gives no dead-owner hint. The ready run's owed
+// hooks then run once on the stopped graph, as before.
+test("down of a ready run whose frontend crashed on the same boot still runs its owed down hooks", async () => {
+  const opts = await fixture();
+  await endedBootReadyRun(opts.scope);
+  const phases: string[] = [];
+  let recovered = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    hooks: {
+      configured: true,
+      run: async ({ phase }) => {
+        phases.push(phase);
+      },
+    },
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      if (command === "foreground-owner") {
+        return ownerSelection("exited", "ready-observed");
+      }
+      if (command === "recover-live-owner") {
+        recovered = true;
+        return {
+          run: run.run,
+          recovered: true,
+          data_retained: true,
+          publisher_retired: true,
+        };
+      }
+      if (command === "managed-hostname-authority") {
+        return { authority: { present: false } };
+      }
+      return snapshot(recovered);
+    },
+  });
+  expect(result.status).toBe("stopped");
+  expect(recovered).toBe(true);
+  expect(phases).toEqual(["before", "after"]);
+});
+
 test("plain down on a stopped pool with a dead owner also starts the pool to recover", async () => {
   const opts = await fixture();
   const calls: string[] = [];
@@ -2389,18 +2789,21 @@ test.each([
   { foreground: "exited", phase: "stopped-data-retained" },
   // A retained stop whose frontend finished its finalization needs nothing more.
   { foreground: "absent", phase: "stopped-data-retained" },
-  // A start that was never confirmed has no supported recovery after a boot,
-  // so the pool is not started for it (requireRecoverableOwner).
+  // A restart in progress has no supported recovery after a boot, so the pool
+  // is not started for it (requireRecoverableOwner).
+  { foreground: "exited", phase: "restarting" },
+  // A lost start the runtime would refuse (an unsettled relay startup or a
+  // cleanup marker: no `cross_boot_start`) does not start a pool either.
+  { foreground: "exited", phase: "failed-retained" },
   { foreground: "exited", phase: "preparing" },
   { foreground: "exited", phase: "restoring" },
-  { foreground: "exited", phase: "failed-retained" },
-  // Same-boot recoveries (recover-live-owner) cannot run after the boot this
-  // would start, so the pool is not started for them either.
   {
     foreground: "exited",
     phase: "failed-retained",
-    extra: { failed_start_recoverable: true },
+    extra: { cross_boot_start: false, failed_start_recoverable: true },
   },
+  // A same-boot recovery (recover-live-owner) cannot run after the boot this
+  // would start, so the pool is not started for it either.
   {
     foreground: "exited",
     phase: "ready-observed",
@@ -2435,6 +2838,72 @@ test.each([
     "runtime_not_running"
   );
   expect(calls).toEqual(["inspect", "foreground-owner"]);
+});
+
+// HACK-2714 (real VM, row 2): the provider died after "Project started" and
+// before the owner's ready line, and the owner's unwind left `failed-retained`.
+// `runtime recover` stopped the pool; the down must start it, because the
+// runtime's cross-boot dead-owner recovery now retires that start. Before this
+// fix the down kept `runtime_not_running` here, and `hack up` refused.
+test.each([
+  { phase: "failed-retained" },
+  { phase: "preparing" },
+  // An owner killed mid-restore, without its unwind (reviewer finding).
+  { phase: "restoring" },
+  // The same-boot hint does not matter once the boot has ended.
+  { phase: "failed-retained", extra: { failed_start_recoverable: true } },
+] as {
+  phase: string;
+  extra?: Record<string, unknown>;
+}[])("down --recover starts a stopped pool for a start lost before ready ($phase)", async ({
+  phase,
+  extra,
+}) => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  let pool = false;
+  let cleaned = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    recover: true,
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "up") {
+        pool = true;
+        return { phase: "running" };
+      }
+      if (command === "foreground-owner") {
+        // On the new boot the runtime names the lost start's dead-owner
+        // recovery; while the pool is stopped it cannot.
+        return {
+          ...ownerSelection("exited", phase),
+          ...extra,
+          cross_boot_start: true,
+          dead_owner_recovery: pool ? receiptSha : null,
+        };
+      }
+      if (!pool) {
+        throw poolStoppedError();
+      }
+      if (command === "recover-cleanup") {
+        expect(request.args).toContain(receiptSha);
+        cleaned = true;
+        return { run: run.run, recovered: true, data_retained: true };
+      }
+      if (command === "retire-recovered-publisher") {
+        expect(cleaned).toBe(true);
+        return { run: run.run, publisher_retired: true, data_retained: true };
+      }
+      expect(command).toBe("inspect");
+      return snapshot(cleaned);
+    },
+  });
+  expect(result).toMatchObject({ status: "stopped", runtimeStarted: true });
+  expect(calls.slice(0, 3)).toEqual(["inspect", "foreground-owner", "up"]);
+  expect(calls.filter((call) => call === "up")).toHaveLength(1);
+  expect(calls).toContain("recover-cleanup");
+  expect(calls).not.toContain("recover-live-owner");
 });
 
 /** A frontend that began its finalization and exited without completing it. */
@@ -2947,4 +3416,461 @@ test("the restart coordinator's down never starts a stopped pool", async () => {
   });
   await expect(attempt).rejects.toBeInstanceOf(NativeRuntimeRequestError);
   expect(calls).toEqual(["inspect"]);
+});
+
+test("a down still waiting for its run's frontend says so once, and a quick one says nothing (#1271)", async () => {
+  const lines: string[] = [];
+  const notice = (line: string) => lines.push(line);
+  expect(
+    await withSlowNotice({
+      wait: async () => "quick",
+      line: "slow",
+      afterMs: 50,
+      notice,
+    })
+  ).toBe("quick");
+  await Bun.sleep(80);
+  expect(lines).toEqual([]);
+  await withSlowNotice({
+    wait: () => Bun.sleep(150),
+    line: "slow",
+    afterMs: 50,
+    notice,
+  });
+  expect(lines).toEqual(["slow"]);
+  await expect(
+    withSlowNotice({
+      wait: async () => {
+        throw new Error("refused");
+      },
+      line: "slow",
+      afterMs: 50,
+      notice,
+    })
+  ).rejects.toThrow("refused");
+  await Bun.sleep(80);
+  expect(lines).toEqual(["slow"]);
+});
+
+/**
+ * HACK-2096: a `hack restart` whose replacement was lost (its VM died) after its
+ * old run was stopped leaves a `cleaned` restart intent, and `hack up` refuses
+ * while it is pending. Once `hack down --recover` retires the replacement with
+ * its data kept, the project is an ordinary stopped one: the recovery retires
+ * the intent too, so its one named follow-up, `hack up`, works.
+ */
+async function lostReplacementDown(opts: {
+  readonly recover: boolean;
+  readonly phase: NativeRestartIntent["phase"];
+  readonly intentRun?: string;
+  readonly lockHeld?: boolean;
+  /** An inspect under the restart lock no longer reads the run as stopped. */
+  readonly resumedUnderLock?: boolean;
+  /** The intent on disk cannot be read. */
+  readonly unreadable?: boolean;
+  /** How many inspects under the restart lock answer `provider_busy` first. */
+  readonly busyUnderLock?: number;
+  /** The re-inspect's busy wait (the production default is 15 s). */
+  readonly retireBusyWaitMs?: number;
+}) {
+  const fx = await fixture();
+  const { lock } = await nativeRestartOperationLock(fx.scope);
+  const locked = () =>
+    stat(lock).then(
+      () => true,
+      () => false
+    );
+  const intentRun = { ...run, run: opts.intentRun ?? run.run };
+  const prepared: NativeRestartIntent = {
+    phase: "prepared",
+    run: intentRun,
+    finalization: {
+      ...(await captureNativeProjectFinalization({ scope: fx.scope, run })),
+      run: intentRun.run,
+    },
+  };
+  await saveNativeRestartIntent({ ...fx.scope, intent: prepared });
+  if (opts.phase === "cleaned") {
+    await completeNativeRestartCleanup({ ...fx.scope, expected: prepared });
+  }
+  const intentFile = lock.replace(/\.lock\.operation$/, ".json");
+  if (opts.unreadable) {
+    await writeFile(intentFile, "{}\n", { mode: 0o600 });
+  }
+  await deadFrontend(fx.scope);
+  let inspectsUnderLock = 0;
+  const notices: string[] = [];
+  let recovered = false;
+  const down = () =>
+    nativeProjectDown({
+      ...fx,
+      recover: opts.recover,
+      ...(opts.retireBusyWaitMs === undefined
+        ? {}
+        : { restartRetireBusyWaitMs: opts.retireBusyWaitMs }),
+      notice: (line) => {
+        notices.push(line);
+      },
+      invoke: async (request) => {
+        const command = request.args[1]!;
+        if (command === "foreground-owner") {
+          return ownerSelection("exited");
+        }
+        if (command === "recover-live-owner") {
+          recovered = true;
+          return {
+            run: run.run,
+            phase: "stopped-data-retained",
+            recovered: true,
+            data_retained: true,
+            publisher_retired: true,
+            same_boot: true,
+          };
+        }
+        if (command === "managed-hostname-authority") {
+          return { authority: { present: false } };
+        }
+        expect(command).toBe("inspect");
+        if (!opts.lockHeld && (await locked())) {
+          inspectsUnderLock++;
+          if (inspectsUnderLock <= (opts.busyUnderLock ?? 0)) {
+            // A `hack ps`, `hack logs` or another project's starting `up`
+            // holds the provider lease.
+            throw new NativeRuntimeRequestError({
+              message:
+                "Native runtime request failed (provider_busy); inspect owned state before retrying.",
+              nativeCode: "provider_busy",
+            });
+          }
+          // Another owner resumed the run between the down and the lock.
+          return snapshot(recovered && !opts.resumedUnderLock);
+        }
+        return snapshot(recovered);
+      },
+    });
+  const result = opts.lockHeld
+    ? await withNativeRestartLock(fx.scope, async () => await down())
+    : await down();
+  return {
+    result,
+    notices,
+    lock,
+    inspectsUnderLock,
+    intent: opts.unreadable
+      ? await readFile(intentFile, "utf8")
+      : await loadNativeRestartIntent(fx.scope),
+  };
+}
+
+test("down --recover retires a cleaned restart whose replacement was lost, so hack up can resume", async () => {
+  const { result, notices, intent } = await lostReplacementDown({
+    recover: true,
+    phase: "cleaned",
+  });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(intent).toBeNull();
+  expect(notices).toContain(NATIVE_RECOVERED_RESTART_NOTE);
+});
+
+test.each([
+  { name: "plain down", recover: false, phase: "cleaned" },
+  { name: "a prepared intent", recover: true, phase: "prepared" },
+  {
+    name: "an intent for another run",
+    recover: true,
+    phase: "cleaned",
+    intentRun: "9".repeat(32),
+  },
+  {
+    name: "a restart that holds its lock",
+    recover: true,
+    phase: "cleaned",
+    lockHeld: true,
+  },
+  {
+    // HACK-2096 review L5: the run is re-inspected under the lock.
+    name: "a run resumed before the lock was taken",
+    recover: true,
+    phase: "cleaned",
+    resumedUnderLock: true,
+  },
+] as const)("down keeps the pending restart for $name", async (opts) => {
+  const { result, notices, intent, inspectsUnderLock } =
+    await lostReplacementDown(opts);
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(typeof intent === "string" ? undefined : intent?.phase).toBe(
+    opts.phase
+  );
+  expect(notices).not.toContain(NATIVE_RECOVERED_RESTART_NOTE);
+  if ("resumedUnderLock" in opts) {
+    expect(inspectsUnderLock).toBe(1);
+    // Kept, but not silently (HACK-2096 round-2 review).
+    expect(notices).toContain(NATIVE_RESTART_KEPT_UNCONFIRMED_NOTE);
+  }
+});
+
+test("down --recover waits out a briefly busy provider and retires the pending restart", async () => {
+  // HACK-2096 round-2 review: a read-only `hack ps` or another project's
+  // starting `up` holds the lease for a moment; that is no sign of a resume.
+  const { result, notices, intent, inspectsUnderLock } =
+    await lostReplacementDown({
+      recover: true,
+      phase: "cleaned",
+      busyUnderLock: 3,
+      retireBusyWaitMs: 2000,
+    });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(inspectsUnderLock).toBe(4);
+  expect(intent).toBeNull();
+  expect(notices).toContain(NATIVE_RECOVERED_RESTART_NOTE);
+  expect(notices).not.toContain(NATIVE_RESTART_KEPT_UNCONFIRMED_NOTE);
+});
+
+test("down --recover keeps the pending restart past the busy wait and says to run it again", async () => {
+  // The retry itself is proven by the briefly-busy test; this one only needs
+  // the wait to run out, so it asserts no retry count (no clock dependence).
+  const { result, notices, intent, inspectsUnderLock } =
+    await lostReplacementDown({
+      recover: true,
+      phase: "cleaned",
+      busyUnderLock: Number.POSITIVE_INFINITY,
+      retireBusyWaitMs: 120,
+    });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(inspectsUnderLock).toBeGreaterThanOrEqual(1);
+  expect(typeof intent === "string" ? undefined : intent?.phase).toBe(
+    "cleaned"
+  );
+  expect(notices).not.toContain(NATIVE_RECOVERED_RESTART_NOTE);
+  const kept = notices.filter(
+    (line) => line === NATIVE_RESTART_KEPT_UNCONFIRMED_NOTE
+  );
+  expect(kept).toHaveLength(1);
+  expect(kept[0]).toContain("pending hack restart was kept");
+  expect(kept[0]).toContain(
+    "If the run should not be running, run hack down --recover again"
+  );
+  expect(kept[0]).not.toContain("\n");
+});
+
+test("down --recover names the pending restart and the held lock it kept", async () => {
+  // HACK-2096 review L6: a held lock is no longer skipped silently.
+  const { result, notices, lock } = await lostReplacementDown({
+    recover: true,
+    phase: "cleaned",
+    lockHeld: true,
+  });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(notices).toContain(nativeRestartLockHeldNote(lock));
+  const line = notices.find((notice) => notice.includes(lock));
+  expect(line).toContain("pending hack restart");
+  expect(line).toContain("run hack down --recover again");
+  expect(line).not.toContain("\n");
+});
+
+test("an unreadable restart intent does not fail a down --recover that stopped the run", async () => {
+  // HACK-2096 review L7: the stop stands; the intent is reported, not retired.
+  const { result, notices, intent } = await lostReplacementDown({
+    recover: true,
+    phase: "cleaned",
+    unreadable: true,
+  });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(notices).toContain(NATIVE_RESTART_INTENT_UNREADABLE_NOTE);
+  expect(notices).not.toContain(NATIVE_RECOVERED_RESTART_NOTE);
+  expect(intent).toBe("{}\n");
+});
+
+/**
+ * HACK-2096 real-VM row 8: the provider was killed seconds after a `hack down`
+ * removed the run's containers, during the next `hack up`'s image pull. The
+ * guest engine's removal had not reached its disk, so the next boot listed the
+ * web container again, `exited` (137), while the receipt records it removed.
+ * `hack down --recover` refused ("cleanup is unconfirmed") and `hack up`
+ * refused the mapping: a dead end. `down --recover` now has the runtime remove
+ * exactly those containers again (`graph cleanup`, volumes kept), confirms them
+ * absent, and `hack up` can start the run.
+ */
+function lostRemovalSnapshot(webState: string) {
+  const base = snapshot(true);
+  return {
+    ...base,
+    receipt: {
+      ...base.receipt,
+      resources: {
+        "container:web": {
+          ...base.receipt.resources["container:web"],
+          phase: "absent",
+        },
+      },
+    },
+    observations: {
+      "container:web": { state: webState, health: null },
+    },
+  };
+}
+async function lostRemovalDown(opts: {
+  readonly recover: boolean;
+  readonly webState: "exited" | "running" | "absent";
+  /** An earlier repair ended before its storage barrier confirmed. */
+  readonly pending?: boolean;
+  /** Whether the runtime's cleanup actually removes the container. */
+  readonly cleanupClears?: boolean;
+  /** The runtime refuses the owner-less repair with this code (real-VM row 8). */
+  readonly refusedWith?: "graph_owner_recovery" | "graph_lost_removal";
+}) {
+  const fx = await fixture();
+  const calls: string[] = [];
+  const notices: string[] = [];
+  let cleaned = false;
+  const down = nativeProjectDown({
+    ...fx,
+    recover: opts.recover,
+    notice: (line) => {
+      notices.push(line);
+    },
+    before: async () => {
+      throw new Error("replayed before");
+    },
+    after: async () => {
+      throw new Error("replayed after");
+    },
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "cleanup") {
+        expect(request.args).toEqual([
+          "graph",
+          "cleanup",
+          "--run-id",
+          run.run,
+          "--json",
+        ]);
+        if (opts.refusedWith) {
+          // The repair could not prove the retired owner or the containers.
+          throw new NativeRuntimeRequestError({
+            message: `Native runtime request failed (${opts.refusedWith}); inspect owned state before retrying.`,
+            nativeCode: opts.refusedWith,
+          });
+        }
+        cleaned = true;
+        return {};
+      }
+      if (command === "foreground-owner") {
+        return ownerSelection("exited");
+      }
+      if (command === "managed-hostname-authority") {
+        return { authority: { present: false } };
+      }
+      expect(command).toBe("inspect");
+      return {
+        ...lostRemovalSnapshot(
+          cleaned && opts.cleanupClears !== false ? "absent" : opts.webState
+        ),
+        ...(opts.pending && !cleaned ? { lost_removal_pending: true } : {}),
+      };
+    },
+  });
+  const result = await down.then(
+    (value) => value,
+    (error: unknown) => error
+  );
+  return { result, calls, notices };
+}
+
+// Codex review of #1273: a repair that removed the containers and ended before
+// its storage barrier confirmed leaves its marker. The guest lists nothing, but
+// the stop is not durable yet: down --recover runs the repair again (which
+// flushes the disk and clears the marker), and a plain down refuses.
+test("down --recover finishes a lost-removal repair whose barrier never confirmed", async () => {
+  const { result, calls, notices } = await lostRemovalDown({
+    recover: true,
+    webState: "absent",
+    pending: true,
+  });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(calls.filter((call) => call === "cleanup")).toHaveLength(1);
+  expect(notices).toContain(NATIVE_LOST_REMOVAL_NOTE);
+});
+
+test("a plain down refuses a stop whose lost-removal repair is unfinished", async () => {
+  const { result, calls } = await lostRemovalDown({
+    recover: false,
+    webState: "absent",
+    pending: true,
+  });
+  expect(result).toBeInstanceOf(Error);
+  expect((result as Error).message).toBe(NATIVE_LOST_REMOVAL_PENDING);
+  expect(NATIVE_LOST_REMOVAL_PENDING).toContain("hack down --recover");
+  expect(calls).not.toContain("cleanup");
+});
+
+test("down --recover removes containers a lost VM brought back, so hack up can start", async () => {
+  const { result, calls, notices } = await lostRemovalDown({
+    recover: true,
+    webState: "exited",
+  });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(calls).toEqual(["inspect", "foreground-owner", "cleanup", "inspect"]);
+  expect(notices).toContain(NATIVE_LOST_REMOVAL_NOTE);
+});
+
+test.each([
+  { name: "a plain down", recover: false, webState: "exited" },
+  { name: "a container still running", recover: true, webState: "running" },
+] as const)("down never replays cleanup of a stopped run for $name", async (opts) => {
+  const { result, calls, notices } = await lostRemovalDown(opts);
+  expect(result).toBeInstanceOf(Error);
+  expect(String(result)).toContain("cleanup is unconfirmed");
+  expect(calls).not.toContain("cleanup");
+  expect(notices).not.toContain(NATIVE_LOST_REMOVAL_NOTE);
+});
+
+test("down --recover prints no removal note when the re-inspection still finds the container", async () => {
+  // Round-4 review: the note prints only after the re-inspection verifies.
+  const { result, calls, notices } = await lostRemovalDown({
+    recover: true,
+    webState: "exited",
+    cleanupClears: false,
+  });
+  expect(result).toBeInstanceOf(Error);
+  expect(String(result)).toContain("cleanup is unconfirmed");
+  expect(calls).toContain("cleanup");
+  expect(notices).not.toContain(NATIVE_LOST_REMOVAL_NOTE);
+});
+
+test.each([
+  // No retired publication: the cleanup still goes to an owner that is gone.
+  { code: "graph_owner_recovery" },
+  // The repair found a container it does not admit (HACK-2719).
+  { code: "graph_lost_removal" },
+] as const)("down --recover says plainly when the runtime refuses to remove brought-back containers ($code)", async ({
+  code,
+}) => {
+  // Real-VM row 8: since HACK-2719 the runtime removes them without the owner
+  // under the retired owner's lock; this is the refusal when it cannot prove
+  // that. It names no command that fails and none that discards the data.
+  const { result, calls, notices } = await lostRemovalDown({
+    recover: true,
+    webState: "exited",
+    refusedWith: code,
+  });
+  expect(result).toBeInstanceOf(Error);
+  expect((result as Error).message).toBe(NATIVE_LOST_REMOVAL_UNREPAIRABLE);
+  expect(calls).toContain("cleanup");
+  expect(notices).not.toContain(NATIVE_LOST_REMOVAL_NOTE);
+  expect(NATIVE_LOST_REMOVAL_UNREPAIRABLE).toContain("data kept");
+  expect(NATIVE_LOST_REMOVAL_UNREPAIRABLE).not.toContain("--remove-data");
+  expect(NATIVE_LOST_REMOVAL_UNREPAIRABLE).not.toContain("run hack up");
+});
+
+test("retiring a cleaned restart is a no-op without one", async () => {
+  const fx = await fixture();
+  expect(
+    await retireCleanedNativeRestart({
+      ...fx.scope,
+      run: run.run,
+      stillStopped: async () => true,
+    })
+  ).toEqual({ status: "none" });
 });

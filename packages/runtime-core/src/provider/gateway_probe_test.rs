@@ -17,7 +17,7 @@ use std::{
 struct StopPool<'a>(&'a Candidate);
 impl Drop for StopPool<'_> {
     fn drop(&mut self) {
-        if let Err(error) = super::down(self.0) {
+        if let Err(error) = super::down(self.0, super::LiveRuns::Interrupt) {
             eprintln!("Owned pool cleanup requires inspection: {}", error.code);
         }
     }
@@ -87,7 +87,7 @@ fn owned_gateway_pool_restarts_without_widening_intent() {
             let output = guest.execute("test ! -e /storage/hack-gateway-probe-marker; printf synthetic-gateway-marker > /storage/hack-gateway-probe-marker; wget -q -T 3 -O - http://100.96.0.1:$1/", &[&port], None).unwrap();
             assert_eq!(output, "gateway-probe-ok");
         }
-        let stopped = super::down(&candidate).unwrap();
+        let stopped = super::down(&candidate, super::LiveRuns::Interrupt).unwrap();
         assert_eq!(stopped.process_alive, Some(false));
         let restarted = super::up_with_profile(&candidate, Profile::Development).unwrap();
         assert_eq!(restarted.network, Some(NetworkIntent::HostGateway));
@@ -100,7 +100,7 @@ fn owned_gateway_pool_restarts_without_widening_intent() {
             let output = guest.execute("test \"$(cat /storage/hack-gateway-probe-marker)\" = synthetic-gateway-marker; rm /storage/hack-gateway-probe-marker; wget -q -T 3 -O - http://100.96.0.1:$1/", &[&port], None).unwrap();
             assert_eq!(output, "gateway-probe-ok");
         }
-        let stopped = super::down(&candidate).unwrap();
+        let stopped = super::down(&candidate, super::LiveRuns::Interrupt).unwrap();
         assert_eq!(stopped.process_alive, Some(false));
         println!(
             "gateway lifecycle: fresh boot, conflict refusal, restart, stable disks, marker readback and shutdown passed"

@@ -101,9 +101,9 @@ pub struct RuntimeStatus {
     /// provider (`socket_repairs`); absent when there were none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repaired_sockets: Option<socket_repairs::RepairedSockets>,
-    /// Only from `runtime down` of a running pool: graph runs, Compose and
-    /// native-authored, whose receipts were live when it stopped the pool under them
-    /// (HACK-2456). Their containers
+    /// Only from `runtime down --force` of a running pool (a plain `runtime down`
+    /// refuses instead, HACK-2477): graph runs, Compose and native-authored, whose
+    /// receipts were live when it stopped the pool under them (HACK-2456). Their containers
     /// stopped with the guest; `hack up` in each project starts the pool and recovers
     /// the run with its data kept. An empty list when there were none, absent otherwise
     /// or when the inventory could not be read (`interrupted_runs_unknown`).
@@ -111,6 +111,14 @@ pub struct RuntimeStatus {
     pub interrupted_runs: Option<Vec<String>>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub interrupted_runs_unknown: bool,
+    /// Only from `runtime down --force` (HACK-2715 review round 2): the interrupted
+    /// native-authored runs whose foreground owner was running when the pool stopped,
+    /// by what it did within the wait. Each owner notices that its pool boot ended and
+    /// exits without a cleanup effect (`exited`); one still running after the wait is
+    /// listed in `running`, and `hack down` in its project stops it. Absent when no
+    /// such owner was running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interrupted_owners: Option<InterruptedOwners>,
     /// Graph runs whose receipt is live (`pool_users::live_graph_runs`), sorted, so the
     /// CLI can name the projects that keep a running pool in use (HACK-2535). Absent
     /// for an uninitialized pool or when the receipts cannot be read.
@@ -118,6 +126,59 @@ pub struct RuntimeStatus {
     pub live_runs: Option<Vec<String>>,
     /// Whether this process hashes SHA-256 with the CPU's instructions (`sha256_backend`).
     pub hashing: crate::sha256_backend::Report,
+}
+
+/// What `runtime down --force` saw the interrupted native owners do (HACK-2715 review
+/// round 2). Run ids, sorted.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct InterruptedOwners {
+    pub exited: Vec<String>,
+    pub running: Vec<String>,
+}
+
+/// How long `runtime down --force` waits for interrupted native owners to exit. An
+/// owner reads its pool record about once a second and exits after two readings.
+#[cfg(all(target_os = "macos", feature = "native-config-plan"))]
+const INTERRUPTED_OWNER_WAIT: Duration = Duration::from_secs(10);
+
+/// Wait, bounded, for the foreground owners of the interrupted native runs to exit, and
+/// sort them by what they did (HACK-2715 review round 2, seen on a real VM: an owner
+/// outlived `runtime down --force` and kept its publication). It runs after the pool
+/// stopped and the provider lease was released; it only observes. `running(run)` is
+/// whether that run's owner still runs (`None` when it cannot be told: not listed).
+#[cfg(any(test, all(target_os = "macos", feature = "native-config-plan")))]
+fn settle_interrupted_owners(
+    runs: &[String],
+    running: impl Fn(&str) -> Option<bool>,
+    wait: Duration,
+) -> Option<InterruptedOwners> {
+    let mut waiting: Vec<String> = runs
+        .iter()
+        .filter(|run| running(run) == Some(true))
+        .cloned()
+        .collect();
+    if waiting.is_empty() {
+        return None;
+    }
+    let mut owners = InterruptedOwners::default();
+    let deadline = Instant::now() + wait;
+    loop {
+        waiting.retain(|run| {
+            if running(run) == Some(true) {
+                return true;
+            }
+            owners.exited.push(run.clone());
+            false
+        });
+        if waiting.is_empty() || Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    owners.running = waiting;
+    owners.exited.sort();
+    owners.running.sort();
+    Some(owners)
 }
 
 fn boot_reclamation_policy() -> state::ReclamationPolicy {
@@ -308,6 +369,51 @@ const NOT_RUNNING: &str = "The native runtime is not in its running state, so th
 /// a finite `graph inspect` (presentation `ps` takes no provider lease).
 pub(super) const STARTUP_LEASE_WAIT: Duration = Duration::from_secs(5);
 
+/// How long a start's lease waits that admit nothing wait for a provider lease another
+/// operation holds (HACK-2724): the retained-start preflight, the resume of a running
+/// pool (`runtime up`), the pool boot's admission lease, and the startup reads behind
+/// `connect_cleanup_for_start` (`graph restore-selection`, `graph inspect
+/// --startup-wait`). Another project's `hack down` holds the lease for its whole graph
+/// stop, which is bounded by the per-service stop grace limit (30 s, see
+/// `graph::config` and `graph::shutdown`) plus the stop's own removals. A start that
+/// gave up after [`STARTUP_LEASE_WAIT`] refused `provider_busy` while that stop was
+/// still running, so these waits cover that limit with a 5 s margin. A brief holder
+/// (`hack ps`, a ready owner's tick) still costs only its own hold: acquisition
+/// returns as soon as the lease is free. Waiting admits nothing; every check runs
+/// under the acquired lease. On expiry the refusal still names the holder, which is
+/// what a holder that keeps the lease longer (a stop with dependent services stopped
+/// in turn, another project's cold start) gets. `hack exec`, `ps` and `logs` keep
+/// their own waits ([`COMMAND_LEASE_WAIT`], none).
+pub(super) const START_LEASE_WAIT: Duration = Duration::from_secs(30 + 5);
+
+/// How long a one-shot service command (`hack exec`, and the dependency refresh that
+/// `hack exec` and `hack run` send first) waits for a provider lease another operation
+/// holds. A ready foreground owner takes the lease briefly and often, for example
+/// once a second to supervise restarts of a routed service, so a nonblocking
+/// acquisition refused such a command at random with `provider_busy` (HACK-2669).
+/// Acquisition admits nothing; on expiry the refusal still names the holder. The
+/// authored owner-side commands (`exec`, interactive `exec`, one-off `run`) also
+/// wait, inside their fixed 30 s budget. Every waiter passes its caller's check
+/// (owner signals, client disconnect, frontend liveness), which runs before each
+/// attempt, so an owner loop that waits still sees a shutdown signal.
+pub(super) const COMMAND_LEASE_WAIT: Duration = Duration::from_secs(15);
+
+/// How long the shared HTTPS owner's hostname authority waits for the provider lease
+/// at startup. The authority starts at a run's ready line after `hack up -d` returned,
+/// which is exactly when that run's first commands and a `hack down` arrive. A
+/// `hack down` holds the lease for the whole graph stop (about 12 s for a routed
+/// project), longer than [`STARTUP_LEASE_WAIT`], and an authority that gave up left
+/// the shared owner's startup failure retained: plain `down` then exited 1 and the
+/// next `up` refused `E_RECOVERY_REQUIRED` (HACK-2707). The authority therefore
+/// waits as long as owned cleanup does. Waiting admits nothing: the pool identity is
+/// reloaded after acquisition, and the wait ends early once the authority's owner is
+/// gone (a non-blocking read of its stdin FIFO sees end of file). On expiry the
+/// refusal still names the holder. A stop can hold the lease longer than this (its
+/// stop budget reaches 540 s); that expiry admitted nothing, and the lease's
+/// recovery retires the failed owner generation (`retireUnadmittedNativeHttpsOwner`
+/// in `native-https-owner.ts`), so the outcome does not depend on the stop's length.
+pub(super) const AUTHORITY_STARTUP_LEASE_WAIT: Duration = Duration::from_secs(30);
+
 /// Startup's provider lease. Everything `start_pool` does before taking it is read-only
 /// validation, admission sampling and RAII guards, so waiting for a briefly held lease admits
 /// nothing early, and on expiry it refuses `provider_busy` with nothing admitted.
@@ -326,20 +432,40 @@ pub(super) fn graph_inventory_lease(candidate: &Candidate) -> Result<state::Lock
 /// earlier recorded sample of this home that `earlier` finds usable (`admission::opening`).
 /// The record is read under the lease. On failure RAII drops the lease, without granting
 /// owner/allocation authority.
-fn startup_admission_lease(
+///
+/// First under the lease, before any recheck: `running` reports a pool that a concurrent
+/// start booted while this one waited for the lease (HACK-2724). This start then returns
+/// the lease with it ([`LeasedBoot::Running`]) and resumes that pool, instead of failing
+/// the admission rechecks against the stopped pool it selected
+/// (`admission_owner_changed`, `foreign_state`). Nothing was sampled, recorded or
+/// forgotten under the lease in that case.
+#[allow(clippy::too_many_arguments)]
+fn startup_admission_lease<T>(
     root: &Path,
     wait: Duration,
     profile: super::Profile,
     opened: Option<admission::Opened>,
     clock: &impl process::Clock,
     earlier: &impl admission::Earlier,
+    running: impl FnOnce() -> Option<T>,
     observe: impl FnMut() -> Result<admission::Admission, CandidateError>,
-) -> Result<(state::Lock, admission::Leased), CandidateError> {
+) -> Result<LeasedBoot<T>, CandidateError> {
     let lock = crate::timings::measure(crate::timings::Step::VmStartupLease, None, |_| {
         startup_lease(root, wait)
     })?;
+    if let Some(running) = running() {
+        return Ok(LeasedBoot::Running(lock, running));
+    }
     let leased = admission::recheck_after_lease(profile, opened, clock, earlier, observe)?;
-    Ok((lock, leased))
+    Ok(LeasedBoot::Boot(lock, leased))
+}
+
+/// What a boot found once it held the startup lease.
+enum LeasedBoot<T> {
+    /// The pool is still not running: boot it, with the samples taken under the lease.
+    Boot(state::Lock, admission::Leased),
+    /// A concurrent start booted the pool while this one waited: resume it.
+    Running(state::Lock, T),
 }
 
 /// Read-only observation takes no mutation lease and detects lifecycle changes around each read.
@@ -567,7 +693,7 @@ impl<'a> OwnedGuest<'a> {
     pub(super) fn connect_cleanup_for_start(
         candidate: &'a Candidate,
     ) -> Result<Self, CandidateError> {
-        Self::connect_mode(candidate, false, Some(Instant::now() + STARTUP_LEASE_WAIT))
+        Self::connect_mode(candidate, false, Some(Instant::now() + START_LEASE_WAIT))
     }
 
     #[cfg(target_os = "macos")]
@@ -723,6 +849,31 @@ impl<'a> OwnedGuest<'a> {
         arguments: &[&str],
     ) -> Result<String, CandidateError> {
         self.execute_mode(script, arguments, None, false)
+    }
+
+    /// [`Self::execute_cleanup`] (no allocation admission, so a budgeted engine
+    /// cannot refuse it for memory pressure) under one absolute deadline for the
+    /// connect, the guest process and the reply. A timed-out exec is uncertain.
+    pub(super) fn execute_cleanup_until(
+        &self,
+        script: &str,
+        arguments: &[&str],
+        deadline: Instant,
+    ) -> Result<String, CandidateError> {
+        self.verify()?;
+        #[cfg(all(test, target_os = "macos"))]
+        if super::engine::fixture::active(self.candidate) {
+            return Ok(super::engine::fixture::execute(script, arguments, None));
+        }
+        let script = format!(
+            "set -eu\ntest \"$(cat /proc/sys/kernel/random/boot_id)\" = \"$1\"\ntest \"$(cat /storage/.hack-local-owner)\" = \"$2\"\ntest \"$(findmnt -n -o FSTYPE --mountpoint /storage)\" = ext4\nshift 2\n{script}"
+        );
+        let mut args = vec![self.boot_id(), self.incarnation()];
+        args.extend_from_slice(arguments);
+        let path = socket(self.candidate, &self.owner, "agent.sock")?;
+        let result = agent::exec_until(&path, &script, &args, deadline)?;
+        self.verify()?;
+        Ok(result)
     }
 
     fn execute_mode(
@@ -1055,6 +1206,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             repaired_sockets: None,
             interrupted_runs: None,
             interrupted_runs_unknown: false,
+            interrupted_owners: None,
             live_runs: None,
             hashing: crate::sha256_backend::report(),
         });
@@ -1132,6 +1284,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         repaired_sockets: socket_repairs::report(&root(candidate), owner.process.as_ref()),
         interrupted_runs: None,
         interrupted_runs_unknown: false,
+        interrupted_owners: None,
         live_runs: pool_users::live_graph_runs(&candidate.state_root),
         hashing: crate::sha256_backend::report(),
         guest_boot_id: owner.guest_boot_id,
@@ -1598,15 +1751,30 @@ fn start_pool_observed(
     let pool_root = root(candidate);
     let opening_host = admission::opening::System;
     let opening = admission::opening::Opening::new(&pool_root, &opening_host, admission_reuse);
-    let (lock, leased) = startup_admission_lease(
+    let (lock, leased) = match startup_admission_lease(
         &pool_root,
-        STARTUP_LEASE_WAIT,
+        START_LEASE_WAIT,
         profile,
         opened,
         &admission_clock,
         &opening,
+        // A select that fails is not a running pool: the rechecks below refuse as before.
+        || running_start::select(candidate, profile).ok().flatten(),
         || admission_pool::probe(candidate, profile, &admission_owner),
-    )?;
+    )? {
+        LeasedBoot::Boot(lock, leased) => (lock, leased),
+        LeasedBoot::Running(lock, running) => {
+            return crate::timings::measure(crate::timings::Step::VmReattach, None, |_| {
+                running_start::resume_leased(candidate, running, &request, &lock, || {
+                    #[cfg(target_os = "macos")]
+                    if let Some(guard) = &retained_guard {
+                        guard.verify(candidate)?;
+                    }
+                    Ok(())
+                })
+            });
+        }
+    };
     let admission::Leased {
         samples: fresh_samples,
         reused,
@@ -2765,7 +2933,7 @@ fn engine_ping_once(path: &Path, limit: Duration) -> Result<(), CandidateError> 
 }
 
 /// Pool phases written only before a start or after proven provider absence.
-const STOPPED_PHASES: [&str; 4] = [
+pub(super) const STOPPED_PHASES: [&str; 4] = [
     "stopped",
     "stopped-before-engine",
     "stopped-after-engine-failure",
@@ -2791,10 +2959,72 @@ fn provider_stopped(phase: &str, process_alive: Option<bool>) -> bool {
     STOPPED_PHASES.contains(&phase) && process_alive != Some(true)
 }
 
-pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
-    crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
-        down_observed(candidate, None)
-    })
+/// What `runtime down` does when graph runs are live in the running pool (HACK-2477).
+/// Every caller names it: there is no default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveRuns {
+    /// Stop nothing and refuse, naming the live runs (`runtime down`): stopping the pool
+    /// under a project was the easy way into the stuck state of HACK-2456.
+    Refuse,
+    /// Stop the pool anyway and report the runs in `interrupted_runs` (`runtime down
+    /// --force`, and callers that stop the pool under a run on purpose, such as tests).
+    Interrupt,
+}
+
+/// Whether `runtime down` checks the live runs before it acts (HACK-2477): only a plain
+/// down of a pool that is really running, its owner record `running` and its recorded
+/// provider alive. Nothing of the pool runs otherwise, so there is nothing to stop under
+/// a run: a provider that died under a running pool (`process-exited` in `runtime
+/// status`) gets the same down as before (`process_identity_unavailable`), and a down
+/// that stalled in `quiescing` or `stopping` resumes on the next plain down.
+/// `provider_running` is asked only for a plain down of a `running` pool.
+fn refuses_live_runs(
+    on_live: LiveRuns,
+    phase: &str,
+    provider_running: impl FnOnce() -> Result<bool, CandidateError>,
+) -> Result<bool, CandidateError> {
+    Ok(on_live == LiveRuns::Refuse && phase == "running" && provider_running()?)
+}
+
+/// Whether the owner's recorded provider process is still running, by its identity
+/// (a reaped, zombie or reused pid is gone, HACK-2579). No recorded provider is not
+/// running.
+fn provider_running(owner: &Owner) -> Result<bool, CandidateError> {
+    match &owner.process {
+        Some(process) => Ok(!identity::provider_gone(process)?),
+        None => Ok(false),
+    }
+}
+
+pub use pool_users::AfterForcedStop;
+
+/// What brings `run` back after `runtime down --force` (or a crash) stopped the pool
+/// under it, so a refusal or the forced stop's report names only a command that works
+/// for that run (HACK-2715). Read-only and lock-free, from the run's receipt.
+pub fn after_forced_stop(candidate: &Candidate, run: &str) -> AfterForcedStop {
+    pool_users::after_forced_stop(&candidate.state_root, run)
+}
+
+pub fn down(candidate: &Candidate, on_live: LiveRuns) -> Result<RuntimeStatus, CandidateError> {
+    #[allow(unused_mut)]
+    let mut result = crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
+        down_observed(candidate, None, on_live)
+    });
+    // HACK-2715 review round 2: `--force` waits, after the stop and outside the lease,
+    // for each interrupted native run's owner to notice that its boot ended and exit,
+    // and reports per run what it did.
+    #[cfg(all(target_os = "macos", feature = "native-config-plan"))]
+    if on_live == LiveRuns::Interrupt
+        && let Ok(status) = &mut result
+        && let Some(runs) = &status.interrupted_runs
+    {
+        status.interrupted_owners = settle_interrupted_owners(
+            runs,
+            |run| super::graph::native::foreground::owner_running(candidate, run),
+            INTERRUPTED_OWNER_WAIT,
+        );
+    }
+    result
 }
 
 /// Stop a running pool that nothing uses, so a stopped-pool share update can follow
@@ -2806,11 +3036,28 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
 /// without the lease; it costs one read of the receipts.
 pub(super) fn stop_idle_pool(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
+        // `require_idle` refuses any live run itself, at both of its checks.
         down_observed(
             candidate,
             Some(&|| pool_users::require_idle(&candidate.state_root)),
+            LiveRuns::Interrupt,
         )
     })
+}
+
+/// How long `runtime down` waits for a provider lease that another operation holds,
+/// such as a graph start writing its receipt (HACK-2715 review round 2, seen on a real
+/// VM: `--force` during a start was refused `provider_busy` and worked 0.5 s later).
+const DOWN_LEASE_WAIT: Duration = STARTUP_LEASE_WAIT;
+
+/// The provider lease of `runtime down`. It waits up to `wait` for a briefly held lease;
+/// acquisition admits nothing, and every check still runs under the held lease. On
+/// expiry it tries once more, so the refusal names the holder when the lock records one.
+fn down_lease(root: &Path, wait: Duration) -> Result<state::Lock, CandidateError> {
+    match state::Lock::acquire_until(root, Instant::now() + wait) {
+        Err(error) if error.code == "provider_busy" => state::Lock::acquire(root),
+        acquired => acquired,
+    }
 }
 
 /// `runtime down`. With `idle` (HACK-2535) the check runs under the lease before any
@@ -2818,16 +3065,23 @@ pub(super) fn stop_idle_pool(candidate: &Candidate) -> Result<RuntimeStatus, Can
 /// hostname authority and every publisher) then follow that second check, so a refusal
 /// at either check has changed nothing. Plain `down` releases them before it verifies
 /// the live guest, as before.
+///
+/// With [`LiveRuns::Refuse`] a running pool with a live graph run (or receipts that
+/// cannot be read) is refused under the lease, after the build check and before any
+/// effect: no sample, no release, no stop (HACK-2477). Only a pool that really runs is
+/// refused ([`refuses_live_runs`]): a stopped pool's down only releases the host side,
+/// and a dead provider or a stalled stop is handled as before.
 fn down_observed(
     candidate: &Candidate,
     idle: Option<&dyn Fn() -> Result<(), CandidateError>>,
+    on_live: LiveRuns,
 ) -> Result<RuntimeStatus, CandidateError> {
     // Status is read-only and idempotent down on an uninitialized pool creates nothing.
     let initial = status(candidate)?;
     if initial.phase == "uninitialized" {
         return Ok(initial);
     }
-    let lock = state::Lock::acquire(&root(candidate))?;
+    let lock = down_lease(&root(candidate), DOWN_LEASE_WAIT)?;
     // The provider lease prevents a build from being admitted after this check.
     super::image_build::require_no_active_build(candidate)?;
     if let Some(idle) = idle {
@@ -2835,6 +3089,11 @@ fn down_observed(
     }
     let mut owner = Owner::load(candidate)?;
     let stopped = provider_stopped(&owner.phase, initial.process_alive);
+    // Liveness is observed again under the lease: a start that booted the pool after
+    // the lease-free `status` above has finished by now and may have left a live run.
+    if refuses_live_runs(on_live, &owner.phase, || provider_running(&owner))? {
+        pool_users::refuse_live_runs(&candidate.state_root)?;
+    }
     // When there is a pool to stop, one host sample is taken beside the stop, on its own
     // thread, so a start that follows soon need not wait out its admission window
     // (`admission::opening`). It is taken on the unowned basis, which claims nothing about
@@ -2868,9 +3127,13 @@ fn down_observed(
         release(&owner)?;
     }
     verify_live(candidate, &owner)?;
-    // Stopping a running pool stops every graph's containers with the guest. This is
-    // reported, not refused: a crash or host reboot ends the same way, and `hack up`
-    // recovers each run (HACK-2456).
+    // Stopping a running pool stops every graph's containers with the guest. Only a
+    // forced down gets here with live runs (HACK-2477); it reports them, as a crash or
+    // host reboot ends the same way. Each run's project recovers it from the ended
+    // boot: `hack up` for Compose (HACK-2456), `hack down --recover` then `hack up` for
+    // a native-authored graph2 run (HACK-2715); nothing records per run here, since the
+    // receipt's own boot and the engine's persisted stopped containers are the evidence
+    // that recovery re-proves. `after_forced_stop` names what applies to each run.
     let live = pool_users::live_graph_runs(&candidate.state_root);
     let peak = read_memory_peak(&candidate.state_root, &owner, |script, args, deadline| {
         agent::exec_until(
@@ -3580,6 +3843,95 @@ mod log_follow_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HACK-2715 review round 2 (seen on a real VM): after `runtime down --force`, each
+    /// interrupted native owner that was running is waited for, bounded, and reported as
+    /// exited or still running. Owners that were not running, or cannot be told, are
+    /// not listed, and nothing is reported when none was running.
+    #[test]
+    fn a_forced_stop_waits_for_interrupted_owners_and_names_each() {
+        use std::cell::Cell;
+        let (exits, stays, gone, unknown) = (
+            "b".repeat(32),
+            "a".repeat(32),
+            "c".repeat(32),
+            "d".repeat(32),
+        );
+        let runs = vec![exits.clone(), stays.clone(), gone.clone(), unknown.clone()];
+        let polls = Cell::new(0);
+        let running = |run: &str| {
+            if run == exits {
+                polls.set(polls.get() + 1);
+                return Some(polls.get() < 3);
+            }
+            if run == stays {
+                return Some(true);
+            }
+            if run == gone { Some(false) } else { None }
+        };
+        let started = Instant::now();
+        let owners = settle_interrupted_owners(&runs, running, Duration::from_millis(400)).unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(400));
+        assert_eq!(
+            owners,
+            InterruptedOwners {
+                exited: vec![exits.clone()],
+                running: vec![stays.clone()],
+            }
+        );
+        assert_eq!(
+            settle_interrupted_owners(&runs, |_| Some(false), Duration::from_secs(5)),
+            None
+        );
+        // All owners gone ends the wait early.
+        let started = Instant::now();
+        let polls = Cell::new(0);
+        let owners = settle_interrupted_owners(
+            std::slice::from_ref(&exits),
+            |_| {
+                polls.set(polls.get() + 1);
+                Some(polls.get() < 2)
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(owners.exited, vec![exits]);
+        assert!(owners.running.is_empty());
+    }
+
+    /// HACK-2715 review round 2 (seen on a real VM): `runtime down` waits briefly for a
+    /// lease another operation holds, and refuses `provider_busy` only once the wait ends.
+    #[test]
+    fn runtime_down_waits_briefly_for_a_held_lease() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "hack-down-lease-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let held = state::Lock::acquire(&root).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(held);
+        });
+        let started = Instant::now();
+        let acquired = down_lease(&root, Duration::from_secs(5)).unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        release.join().unwrap();
+        drop(acquired);
+        let held = state::Lock::acquire(&root).unwrap();
+        let started = Instant::now();
+        let Err(refused) = down_lease(&root, Duration::from_millis(100)) else {
+            panic!("a held lease is refused once the wait ends");
+        };
+        assert_eq!(refused.code, "provider_busy");
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        drop(held);
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     /// A failed boot's record names the failure by code and by message, so a code shared by
     /// many causes (`provider_state` is any I/O error) can be told apart afterwards.
@@ -4613,7 +4965,10 @@ printf 'status=%s%s\n' "$status" "$left"
         assert_eq!(owner.token, after.token);
         assert_eq!(owner.storage, after.storage);
         assert_eq!(owner.overlay, after.overlay);
-        assert_eq!(down(&candidate).unwrap().phase, "stopped");
+        assert_eq!(
+            down(&candidate, LiveRuns::Interrupt).unwrap().phase,
+            "stopped"
+        );
         println!(
             "{}",
             json!({"provider_exit_recovered": true, "live_recovery_rejected": true,

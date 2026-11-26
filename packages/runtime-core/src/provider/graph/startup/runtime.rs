@@ -803,6 +803,8 @@ impl HostRelayRuntime {
         if self.candidate != candidate.checkout {
             return Err(refused());
         }
+        // Another project's start waiting on this stop names it (HACK-2724).
+        let _stop = crate::provider::state::RecordProjectStop::begin();
         let run = self.run.clone().ok_or_else(refused)?;
         if crate::provider::graph::directory(candidate, &run)?
             .join("one-off.json")

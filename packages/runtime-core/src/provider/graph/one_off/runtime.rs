@@ -13,6 +13,13 @@ pub struct ActiveJob {
     pub original: Receipt,
     pub leases: BTreeMap<String, EnvironmentLease>,
 }
+/// The caller's bounded wait for the provider lease: its deadline, and its check
+/// (owner signals, client disconnect) that runs before every attempt.
+pub struct LeaseWait<'a> {
+    pub deadline: std::time::Instant,
+    pub check: &'a dyn Fn() -> Result<(), CandidateError>,
+}
+
 pub fn begin(
     candidate: &Candidate,
     runtime: &mut HostRelayRuntime,
@@ -20,8 +27,13 @@ pub fn begin(
     argv: &[String],
     workdir: Option<&str>,
     managed: &Managed,
+    lease: LeaseWait<'_>,
 ) -> Result<ActiveJob, CandidateError> {
-    let engine = Engine::connect(candidate)?;
+    // Waits out a brief holder of the provider lease until the caller's shared
+    // bound; `check` (owner signals, client disconnect) runs before every attempt
+    // and once more after acquisition. Waiting admits nothing: the job is
+    // reserved only after acquisition (HACK-2669).
+    let engine = Engine::connect_command(candidate, lease.deadline, lease.check)?;
     let (original, root) = load(candidate, &engine, &selection.run)?;
     if selection.boot != engine.guest().boot_id() || original.phase != "ready-observed" {
         return Err(refused());

@@ -1,5 +1,15 @@
 import { expect, test } from "bun:test";
-import { watchNativeStartPool } from "../src/backends/native-start-pool-watch.ts";
+import { NativeImageBatchError } from "../src/backends/native-image-policy.ts";
+import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
+import {
+  classifyNativeLostProvider,
+  type NativeStartPoolEnd,
+  nativeForegroundPoolEndMessage,
+  nativeLostProviderCode,
+  nativeLostVmCauseLine,
+  nativePoolBootEnd,
+  watchNativeStartPool,
+} from "../src/backends/native-start-pool-watch.ts";
 
 const owner = "a".repeat(32);
 const boot = "12345678-1234-1234-1234-123456789abc";
@@ -134,6 +144,36 @@ test("a start whose provider process vanished while the record still says runnin
   // never this one: no pid of it is asked about.
 });
 
+test("a provider that died mid-stop ends the start; a live one in a transitional phase never does", async () => {
+  // Round-5 review: the runtime keeps the boot id through `quiescing` and
+  // `stopping`, and a provider that dies part way through a stop (another
+  // terminal's `runtime down`, another project's idle stop) leaves the record
+  // there. Before, only a `running` record's pid was checked, so the watch
+  // never ended such a start.
+  for (const phase of ["quiescing", "stopping", "starting"]) {
+    for (const [gone, expected] of [
+      [true, 1],
+      [false, 0],
+    ] as const) {
+      let ended = 0;
+      const stop = watchNativeStartPool({
+        home: "/fixture",
+        bootId: boot,
+        checkMs: 5,
+        graceMs: 10,
+        read: () => Promise.resolve(record({ phase, process: { pid: 4242 } })),
+        gone: (pid) => pid === 4242 && gone,
+        onEnded: () => {
+          ended += 1;
+        },
+      });
+      await Bun.sleep(80);
+      stop();
+      expect({ phase, gone, ended }).toEqual({ phase, gone, ended: expected });
+    }
+  }
+});
+
 test("a successor boot retires the attempt without probing the successor's PID", async () => {
   const pids: number[] = [];
   const retired = Promise.withResolvers<void>();
@@ -150,7 +190,7 @@ test("a successor boot retires the attempt without probing the successor's PID",
       pids.push(pid);
       return true;
     },
-    onEnded: retired.resolve,
+    onEnded: () => retired.resolve(),
   });
   try {
     expect(
@@ -199,4 +239,371 @@ test("a ready start ends at the first check that sees its boot ended; one still 
     // The grace is chosen when the ended boot is seen, not when the watch starts.
     expect(readAt).toBeGreaterThan(1);
   }
+});
+
+test("the end carries its evidence: the gone provider pid, or none for an ended boot", async () => {
+  // HACK-2096: a foreground start names the lost VM from this evidence.
+  for (const [records, gone, expected] of [
+    [
+      [record({ process: { pid: 4242 } })],
+      true,
+      { bootId: boot, providerPid: 4242 },
+    ],
+    [[record({}), record({ phase: "stopped" })], false, { bootId: boot }],
+  ] as const) {
+    const ends: NativeStartPoolEnd[] = [];
+    let index = 0;
+    const stop = watchNativeStartPool({
+      home: "/fixture",
+      bootId: boot,
+      checkMs: 5,
+      graceMs: 0,
+      read: () => {
+        const value = records[Math.min(index, records.length - 1)];
+        index += 1;
+        return Promise.resolve(value);
+      },
+      gone: () => gone,
+      onEnded: (end) => {
+        ends.push(end);
+      },
+    });
+    await Bun.sleep(60);
+    stop();
+    expect(ends).toEqual([expected]);
+  }
+});
+
+test("a stopped record that still names its provider reads as a stopped boot, not a vanished process", async () => {
+  // Round-6 review: a stopped record keeps `process` and `guest_boot_id` until
+  // the next boot, so after an ordinary `runtime down` the dead pid must not
+  // turn the message into "its provider process (pid N) is gone".
+  const stopped = record({ phase: "stopped", process: { pid: 4242 } });
+  const reading = nativePoolBootEnd(stopped, {
+    bootId: boot,
+    gone: (pid) => pid === 4242,
+  });
+  expect(reading.end).toEqual({ bootId: boot });
+  const message = nativeForegroundPoolEndMessage(reading.end!, {
+    stage: "ready",
+  });
+  expect(message).toContain(
+    `The native runtime VM under this start stopped: guest boot ${boot} ended (the pool was stopped or booted again).`
+  );
+  expect(message).not.toContain("pid 4242");
+  // The watch and the classifier report the same end.
+  const ends: NativeStartPoolEnd[] = [];
+  const stop = watchNativeStartPool({
+    home: "/fixture",
+    bootId: boot,
+    checkMs: 5,
+    graceMs: 0,
+    read: () => Promise.resolve(stopped),
+    gone: (pid) => pid === 4242,
+    onEnded: (end) => {
+      ends.push(end);
+    },
+  });
+  await Bun.sleep(40);
+  stop();
+  expect(ends).toEqual([{ bootId: boot }]);
+  expect(
+    await classifyNativeLostProvider({
+      error: new Error("synthetic failure"),
+      home: "/unused",
+      bootId: boot,
+      read: async () => stopped,
+      gone: (pid) => pid === 4242,
+    })
+  ).toEqual({ bootId: boot });
+});
+
+test("a run lost after its graph was ready names down --recover, then hack up", () => {
+  const exited = nativeForegroundPoolEndMessage(
+    { bootId: boot, providerPid: 4242 },
+    { stage: "ready" }
+  );
+  expect(exited).toContain("pid 4242");
+  expect(exited).toContain(boot);
+  expect(exited).toContain("exit code 1");
+  const stopped = nativeForegroundPoolEndMessage(
+    { bootId: boot },
+    { stage: "ready" }
+  );
+  expect(stopped).toContain(boot);
+  expect(stopped).not.toContain("pid");
+  for (const message of [exited, stopped]) {
+    // One retire command, named once; no fresh-home detour. A restart's
+    // replacement gets the same sequence: down --recover also retires its
+    // pending restart (HACK-2096), and `hack restart` would then refuse a
+    // stopped run with no restart pending.
+    expect(message.match(/hack down --recover/g)).toHaveLength(1);
+    expect(message).not.toContain("fresh");
+    expect(message).toContain("then hack up to start it again");
+    expect(message).not.toContain("hack restart");
+  }
+});
+
+test("a recorded run lost after its services were requested and before ready names down --recover, then up", () => {
+  // HACK-2714: the start's owner leaves `failed-retained` (or `preparing`), and
+  // `hack down --recover` now starts the pool and retires it across the boot
+  // with its data kept, so `hack up` then starts it again.
+  const message = nativeForegroundPoolEndMessage(
+    { bootId: boot, providerPid: 4242 },
+    { stage: "requested", recorded: true, retirable: true }
+  );
+  expect(message).toContain("pid 4242");
+  expect(message).toContain("exit code 1");
+  expect(message).toContain("lost before its services were ready");
+  expect(message.match(/hack down --recover/g)).toHaveLength(1);
+  expect(message).toContain(
+    "Run hack down --recover to retire the interrupted start with the run's data kept, then hack up to start it again."
+  );
+  expect(message).not.toContain("hack restart");
+  expect(message).not.toContain("Keep this native home unchanged");
+});
+
+test("a recorded run lost before its host dependency startup settled names no command", () => {
+  // #1273 review: a resumed run whose dependency services were still `Prepared`
+  // is refused by the runtime's recovery (`cross_boot_start` false), so the
+  // message must not promise down --recover; unknown counts as not retirable.
+  for (const retirable of [false, undefined]) {
+    const message = nativeForegroundPoolEndMessage(
+      { bootId: boot, providerPid: 4242 },
+      { stage: "requested", recorded: true, retirable }
+    );
+    expect(message).not.toContain("hack down");
+    expect(message).not.toContain("hack up");
+    expect(message).toContain("Keep this native home unchanged");
+  }
+});
+
+test("a fresh run lost after its services were requested and before ready names no command", () => {
+  // No run record exists for `hack down --recover` to find before the mapping
+  // is saved, so the message sends the user to no command that refuses.
+  const message = nativeForegroundPoolEndMessage(
+    { bootId: boot, providerPid: 4242 },
+    { stage: "requested", recorded: false }
+  );
+  expect(message).toContain("exit code 1");
+  expect(message).not.toContain("hack down");
+  expect(message).not.toContain("hack up");
+  expect(message).toContain("Keep this native home unchanged");
+  expect(message).toContain("hack ps --json");
+});
+
+test("a run lost before any service was requested names the commands that work", () => {
+  // Resolve, review, image builds and pulls, restore selection: nothing of
+  // this attempt was requested yet. A resumed retained run (or a restart's old
+  // run) is still the stopped retained run, which down --recover retires with
+  // any pending restart, so hack up works after it.
+  const recorded = nativeForegroundPoolEndMessage(
+    { bootId: boot, providerPid: 4242 },
+    { stage: "preparing", recorded: true }
+  );
+  expect(recorded).toContain("pid 4242");
+  expect(recorded).toContain("exit code 1");
+  expect(recorded).toContain("the run's data is kept");
+  expect(recorded.match(/hack down --recover/g)).toHaveLength(1);
+  expect(recorded).toContain("then hack up to start it again");
+  expect(recorded.indexOf("hack down --recover")).toBeLessThan(
+    recorded.indexOf("hack up")
+  );
+  expect(recorded).not.toContain("hack restart");
+  expect(recorded).not.toContain("Keep this native home unchanged");
+  // A fresh up has no run record: down --recover would only say not_started,
+  // so the message names hack up alone.
+  const fresh = nativeForegroundPoolEndMessage(
+    { bootId: boot },
+    { stage: "preparing", recorded: false }
+  );
+  expect(fresh).toContain(boot);
+  expect(fresh).toContain("exit code 1");
+  expect(fresh).not.toContain("hack down");
+  expect(fresh).not.toContain("data is kept");
+  expect(fresh).not.toContain("hack restart");
+  expect(fresh.split("\n").at(-1)).toBe("Run hack up to start it again.");
+});
+
+test("a lost-provider code is found wherever a native client puts one", () => {
+  const request = (nativeCode: string) =>
+    new NativeRuntimeRequestError({
+      message: `Native runtime request failed (${nativeCode}); inspect owned state before retrying.`,
+      nativeCode,
+    });
+  expect(nativeLostProviderCode(request("process_identity_unavailable"))).toBe(
+    true
+  );
+  expect(nativeLostProviderCode(request("pool_process_exited"))).toBe(true);
+  expect(
+    nativeLostProviderCode(
+      new NativeImageBatchError([
+        {
+          reference: "docker.io/library/python:3.10-alpine",
+          code: "process_identity_unavailable",
+          reason: "Cannot establish native provider process identity",
+          recovery: "Inspect hack doctor, then retry hack up.",
+          services: ["web"],
+        },
+      ])
+    )
+  ).toBe(true);
+  // The foreground unwind quotes the code in its closed diagnostic text.
+  expect(
+    nativeLostProviderCode(
+      new Error(
+        "Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Startup diagnostic: Native graph startup failed (process_identity_unavailable)."
+      )
+    )
+  ).toBe(true);
+  expect(
+    nativeLostProviderCode(
+      new Error("wrapped", { cause: request("process_identity_unavailable") })
+    )
+  ).toBe(true);
+  for (const other of [
+    request("provider_busy"),
+    request("runtime_changed"),
+    new Error("synthetic failure"),
+    undefined,
+  ]) {
+    expect(nativeLostProviderCode(other)).toBe(false);
+  }
+});
+
+test("a failed start is classified as lost from the same pool reading as the watch", async () => {
+  const read = async () => record({ process: { pid: 4242 } });
+  // The watched boot's provider pid is gone: lost, whatever the error says.
+  expect(
+    await classifyNativeLostProvider({
+      error: new Error("synthetic failure"),
+      home: "/unused",
+      bootId: boot,
+      read,
+      gone: (pid) => pid === 4242,
+    })
+  ).toEqual({ bootId: boot, providerPid: 4242 });
+  // The boot was replaced.
+  expect(
+    await classifyNativeLostProvider({
+      error: new Error("synthetic failure"),
+      home: "/unused",
+      bootId: boot,
+      read: async () =>
+        record({ guest_boot_id: "87654321-4321-4321-4321-cba987654321" }),
+      gone: () => false,
+    })
+  ).toEqual({ bootId: boot });
+  // An unreadable record, but a lost-provider code in the error.
+  expect(
+    await classifyNativeLostProvider({
+      error: new NativeRuntimeRequestError({
+        message:
+          "Native runtime request failed (process_identity_unavailable).",
+        nativeCode: "process_identity_unavailable",
+      }),
+      home: "/unused",
+      bootId: boot,
+      read: () => Promise.reject(new Error("unreadable")),
+      gone: () => false,
+    })
+  ).toEqual({ bootId: boot });
+  // A live provider and an ordinary error: not a lost VM.
+  expect(
+    await classifyNativeLostProvider({
+      error: new Error("synthetic failure"),
+      home: "/unused",
+      bootId: boot,
+      read,
+      gone: () => false,
+    })
+  ).toBeUndefined();
+});
+
+test("a live provider on the watched boot vetoes a lost-provider code", async () => {
+  // Round-4 review: the runtime reports `process_identity_unavailable` for
+  // failures on a healthy VM too (an image build's context snapshot, an
+  // incarnation read, a helper scan, engine verification).
+  const coded = new NativeRuntimeRequestError({
+    message: "Native runtime request failed (process_identity_unavailable).",
+    nativeCode: "process_identity_unavailable",
+  });
+  const classify = (record: unknown) =>
+    classifyNativeLostProvider({
+      error: coded,
+      home: "/unused",
+      bootId: boot,
+      read: async () => record,
+      gone: () => false,
+    });
+  expect(await classify(record({ process: { pid: 4242 } }))).toBeUndefined();
+  // A record naming no boot at all leaves the code to decide.
+  expect(await classify({ token: owner, phase: "running" })).toEqual({
+    bootId: boot,
+  });
+});
+
+test("only a running record with a live provider vetoes; a dead pid is lost in any phase", async () => {
+  // Round-5 review: a provider that died mid-stop leaves the record in
+  // `quiescing` or `stopping` with the boot id set. Before, any record naming
+  // the boot vetoed, so such a start failed with generic text.
+  const coded = new NativeRuntimeRequestError({
+    message: "Native runtime request failed (process_identity_unavailable).",
+    nativeCode: "process_identity_unavailable",
+  });
+  const classify = (fields: Record<string, unknown>, dead: boolean) =>
+    classifyNativeLostProvider({
+      error: coded,
+      home: "/unused",
+      bootId: boot,
+      read: async () => record({ process: { pid: 4242 }, ...fields }),
+      gone: (pid) => pid === 4242 && dead,
+    });
+  for (const phase of ["stopping", "quiescing", "starting"]) {
+    // A dead pid proves the loss, whatever the phase.
+    expect(await classify({ phase }, true)).toEqual({
+      bootId: boot,
+      providerPid: 4242,
+    });
+    // A live pid mid-transition proves nothing: the code decides.
+    expect(await classify({ phase }, false)).toEqual({ bootId: boot });
+  }
+  // A live pid on a running record vetoes the code.
+  expect(await classify({ phase: "running" }, false)).toBeUndefined();
+  // A transitional record with no pid and no code: not lost.
+  expect(
+    await classifyNativeLostProvider({
+      error: new Error("synthetic failure"),
+      home: "/unused",
+      bootId: boot,
+      read: async () => record({ phase: "stopping" }),
+      gone: () => false,
+    })
+  ).toBeUndefined();
+});
+
+test("a cause line for the requested stage drops the cause's own down --recover advice", () => {
+  // Real-VM row 2 (HACK-2714): the cause quoted its own "Run hack down
+  // --recover …"; the stage advice names that step once, in order with up.
+  const cause = new Error(
+    "Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Run hack down --recover to resume this run's confirmed cleanup with data retained. Startup diagnostic: Native graph startup failed (process_identity_unavailable)."
+  );
+  const dropped = nativeLostVmCauseLine(cause, { dropRecoverAdvice: true });
+  expect(dropped).toBe(
+    "(cause: Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Startup diagnostic: Native graph startup failed (process_identity_unavailable).)"
+  );
+  expect(dropped).not.toContain("hack down");
+  // Other stages keep the whole message.
+  expect(nativeLostVmCauseLine(cause)).toContain("Run hack down --recover");
+});
+
+test("the cause line keeps the start's own message, bounded to one line", () => {
+  expect(
+    nativeLostVmCauseLine(new Error("Image preparation failed.\n- web (x): y"))
+  ).toBe("(cause: Image preparation failed. - web (x): y)");
+  expect(nativeLostVmCauseLine(" \n ")).toBeUndefined();
+  expect(nativeLostVmCauseLine(undefined)).toBeUndefined();
+  const long = nativeLostVmCauseLine(new Error("x".repeat(1000)));
+  expect(long?.length).toBeLessThan(420);
+  expect(long?.endsWith("…)")).toBe(true);
 });

@@ -131,6 +131,42 @@ fn quiescent_https_recovery_requires_exact_selectors_without_initializing_state(
     }
 }
 
+/// HACK-2477: the binary accepts every `runtime down` form, plain or `--force` in either
+/// flag order, and refuses a repeated flag. On a home with no pool each form reports
+/// `uninitialized` and creates nothing.
+#[test]
+fn runtime_down_forms_reach_down_and_change_nothing_without_a_pool() {
+    let fixture = Fixture::new();
+    let home = fixture.directory("home");
+    let cwd = fixture.directory("cwd");
+    let binary = Path::new(env!("CARGO_BIN_EXE_hack-native"));
+    for args in [
+        &["runtime", "down", "--json"][..],
+        &["runtime", "down", "--force"][..],
+        &["runtime", "down", "--force", "--json"][..],
+        &["runtime", "down", "--json", "--force"][..],
+    ] {
+        let output = invoke(binary, &home, &cwd, args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(status["phase"], "uninitialized", "{args:?}");
+        assert!(status.get("interrupted_runs").is_none(), "{args:?}");
+        assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
+        assert_eq!(fs::read_dir(&home).unwrap().count(), 0, "{args:?}");
+    }
+    for args in [
+        &["runtime", "down", "--force", "--force"][..],
+        &["runtime", "down", "--json", "--json"][..],
+    ] {
+        let output = invoke(binary, &home, &cwd, args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        let failure: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(failure["code"], "unsupported_command", "{args:?}");
+        assert_eq!(fs::read_dir(&home).unwrap().count(), 0, "{args:?}");
+    }
+}
+
 #[test]
 fn installed_entrypoint_refuses_public_missing_relative_and_aliased_homes() {
     let fixture = Fixture::new();

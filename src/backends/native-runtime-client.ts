@@ -800,6 +800,12 @@ export async function invokeNativeRuntime(opts: {
     reference?: string,
     working?: boolean
   ) => void;
+  /**
+   * A start's lease wait that lasted about 3 s (HACK-2724): called once per
+   * wait with the runtime's closed holder token (`hack.lease-wait:begin`).
+   * Only a request that sets this asks the runtime to report.
+   */
+  readonly onLeaseWait?: (holder: string) => void;
   readonly privateInput?: Uint8Array;
   /** Graph exec and run-service return command exit status alongside JSON. */
   readonly serviceExecResponse?: boolean;
@@ -895,6 +901,9 @@ export async function invokeNativeRuntime(opts: {
   if (opts.onImageWait) {
     env.HACK_INTERNAL_REPORT_IMAGE_WAIT = imageBatch ? "batch" : "1";
   }
+  if (opts.onLeaseWait) {
+    env.HACK_INTERNAL_REPORT_LEASE_WAIT = "1";
+  }
   const child = startupTimingSpawn(
     [
       opts.runtime.binary,
@@ -933,7 +942,8 @@ export async function invokeNativeRuntime(opts: {
     drain?.signal,
     undefined,
     false,
-    opts.onImageWait
+    opts.onImageWait,
+    opts.onLeaseWait
   );
   let timedOut = false;
   let canceled = false;
@@ -1417,7 +1427,8 @@ async function readNativeFailure(
     waiting: boolean,
     reference?: string,
     working?: boolean
-  ) => void
+  ) => void,
+  onLeaseWait?: (holder: string) => void
 ): Promise<NativeFailure | undefined> {
   const reader = stream.getReader();
   const cancel = () => {
@@ -1440,7 +1451,16 @@ async function readNativeFailure(
       bytes += result.value.byteLength;
       if (bytes <= limit) {
         text += decoder.decode(result.value, { stream: true });
-        if (onImageWait) {
+        // Image and lease lines may interleave; consume both until neither leads.
+        let scanned: string | undefined;
+        while (scanned !== text) {
+          scanned = text;
+          if (onLeaseWait) {
+            text = takeLeaseWaitLines(text, onLeaseWait);
+          }
+          if (!onImageWait) {
+            continue;
+          }
           while (text.startsWith("hack.image-wait:")) {
             const newline = text.indexOf("\n");
             if (newline === -1) {
@@ -1490,6 +1510,36 @@ async function readNativeFailure(
     signal?.removeEventListener("abort", cancel);
     reader.releaseLock();
   }
+}
+
+const LEASE_WAIT_LINE = /^hack\.lease-wait:(?:begin ([a-z-]{1,32})|end)$/;
+
+/**
+ * Consume the runtime's leading lease-wait lines (`hack.lease-wait:begin
+ * <holder>`, `hack.lease-wait:end`) and report each begin. A partial line waits
+ * for more output; any other leading text ends the scan, so the JSON failure
+ * after them still parses.
+ */
+export function takeLeaseWaitLines(
+  text: string,
+  onLeaseWait: (holder: string) => void
+): string {
+  let rest = text;
+  while (rest.startsWith("hack.lease-wait:")) {
+    const newline = rest.indexOf("\n");
+    if (newline === -1) {
+      break;
+    }
+    const line = LEASE_WAIT_LINE.exec(rest.slice(0, newline));
+    if (!line) {
+      break;
+    }
+    if (line[1] !== undefined) {
+      onLeaseWait(line[1]);
+    }
+    rest = rest.slice(newline + 1);
+  }
+  return rest;
 }
 
 export async function readNativeFailureCode(

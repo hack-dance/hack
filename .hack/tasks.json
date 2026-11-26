@@ -38,7 +38,11 @@
           },
           {
             "path": ".hack/toolchain/Dockerfile",
-            "sha256": "26743556cde8930e2105e860a9b6bd3f5d6d4e2a4f5b567df01d4dd3e8e0c745"
+            "sha256": "ba38416ba4b7acaa1674030406969f5dc81cd99d594e2c1b79933225348b6780"
+          },
+          {
+            "path": "scripts/mise-install-retry.sh",
+            "sha256": "44b9fd0ec8070cf1e5a0c65c5ca0240268d7931cdf37830e1e4462c68de33466"
           },
           {
             "path": "mise.toml",
@@ -51,7 +55,7 @@
           },
           {
             "path": "scripts/check-tla-models.ts",
-            "sha256": "886bef91724c7aca3006b35872c2ebf06ba5b463583dd83a551f73410cfbb61f"
+            "sha256": "10f78371e78a54e9c327396225bfe187b6a660eb11ba336c6463d6ae36fbc18c"
           }
         ],
         "review": "HACK-1157"
@@ -101,7 +105,11 @@
           },
           {
             "path": ".hack/toolchain/Dockerfile",
-            "sha256": "26743556cde8930e2105e860a9b6bd3f5d6d4e2a4f5b567df01d4dd3e8e0c745"
+            "sha256": "ba38416ba4b7acaa1674030406969f5dc81cd99d594e2c1b79933225348b6780"
+          },
+          {
+            "path": "scripts/mise-install-retry.sh",
+            "sha256": "44b9fd0ec8070cf1e5a0c65c5ca0240268d7931cdf37830e1e4462c68de33466"
           },
           {
             "path": "mise.toml",
@@ -158,7 +166,11 @@
           },
           {
             "path": ".hack/toolchain/Dockerfile",
-            "sha256": "26743556cde8930e2105e860a9b6bd3f5d6d4e2a4f5b567df01d4dd3e8e0c745"
+            "sha256": "ba38416ba4b7acaa1674030406969f5dc81cd99d594e2c1b79933225348b6780"
+          },
+          {
+            "path": "scripts/mise-install-retry.sh",
+            "sha256": "44b9fd0ec8070cf1e5a0c65c5ca0240268d7931cdf37830e1e4462c68de33466"
           },
           {
             "path": "mise.toml",

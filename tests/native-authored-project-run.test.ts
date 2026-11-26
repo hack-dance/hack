@@ -33,7 +33,10 @@ import {
   saveNativeAuthoredProjectRun as save,
   stopNativeAuthoredProject,
 } from "../src/backends/native-authored-project-run.ts";
-import { NativeAuthoredStopUnavailableError } from "../src/backends/native-authored-stop-errors.ts";
+import {
+  NativeAuthoredStopOwnerExitedError,
+  NativeAuthoredStopUnavailableError,
+} from "../src/backends/native-authored-stop-errors.ts";
 import {
   loadNativeProjectRun as loadCompose,
   saveNativeProjectRun as saveCompose,
@@ -157,11 +160,24 @@ test("missing Ready reaches the stop caller as an unavailable owner through real
   expect(failure).toBeInstanceOf(NativeAuthoredStopUnavailableError);
 });
 
+// HACK-2715 (Codex P2): the live stop raises the owner-exited hint inside the
+// recovery storage, so it must cross the redaction boundary for `hack down` to
+// recover the ended-boot run in the same command.
+test("the owner-exited stop hint crosses real storage as its own closed error", async () => {
+  const scope = await fixture();
+  const original = new NativeAuthoredStopOwnerExitedError();
+  const failure = await admit(scope, async () => {
+    throw original;
+  }).catch((error: unknown) => error);
+  expect(failure).toBe(original);
+});
+
 test("storage still redacts arbitrary errors and lookalike routing errors", async () => {
   const scope = await fixture();
   for (const name of [
     "Error",
     "NativeAuthoredStopUnavailableError",
+    "NativeAuthoredStopOwnerExitedError",
     "NativeAuthoredReservedStartError",
   ]) {
     const original = new Error("private fixture detail");

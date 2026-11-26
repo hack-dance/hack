@@ -377,7 +377,8 @@ trap - EXIT
             drop(engine);
             if generation == 0 {
                 phase = "vm-restart";
-                if super::down(&candidate)?.process_alive != Some(false) {
+                if super::down(&candidate, super::LiveRuns::Interrupt)?.process_alive != Some(false)
+                {
                     return Err(error("VM did not stop."));
                 }
                 super::up_with_profile(&candidate, super::Profile::Development)?;

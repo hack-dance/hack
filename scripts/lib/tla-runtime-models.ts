@@ -16,12 +16,22 @@ type ModelContract = {
   readonly alternativeWitnesses?: readonly WitnessFields[];
   readonly additionalControls?: readonly {
     readonly name: string;
-    readonly module?: "TerminalReuse" | "MetadataAliasing" | "PreReady";
+    readonly module?:
+      | "TerminalReuse"
+      | "MetadataAliasing"
+      | "PreReady"
+      | "ServingExit";
     readonly negative: boolean;
     readonly states?: number;
     readonly invariant?: string;
     readonly fields?: WitnessFields;
     readonly alternativeWitnesses?: readonly WitnessFields[];
+    /**
+     * TLC workers for this control (default 2). One worker makes breadth-first
+     * search report the shortest violation, for a control whose invariant other
+     * longer traces also break.
+     */
+    readonly workers?: 1;
   }[];
 };
 
@@ -45,6 +55,23 @@ function runtimeServiceEither(first: ClientFields, ...others: ClientFields[]) {
       first("c2"),
       ...others.flatMap((fields) => [fields("c1"), fields("c2")]),
     ],
+  };
+}
+
+// foreground-loss-recovery: a lost restart told `hack down --recover`, then
+// `hack up`, whose `hack up` refuses the intent the down could not retire
+// (kept, or the lock still held). Shortest while preparing; also once ready.
+function pendingRestartRefused(lock: "TRUE" | "FALSE") {
+  const at = (lostAt: string) => [
+    'outcome = "refused"',
+    `lostAt = "${lostAt}"`,
+    'kind = "restart"',
+    'intent = "cleaned"',
+    `lock = ${lock}`,
+  ];
+  return {
+    fields: at("Preparing"),
+    alternativeWitnesses: [at("GraphReady")],
   };
 }
 
@@ -1232,7 +1259,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-foreground-down-hooks",
     module: "DownHooks",
-    states: 1246,
+    states: 1288,
     invariant: "Safe",
     fields: [
       "unsafeBefore = TRUE",
@@ -1283,6 +1310,30 @@ const contracts: readonly ModelContract[] = [
           'jState = "complete"',
           'jGen = "D"',
           "unsafeBefore = FALSE",
+          "unsafeAfter = FALSE",
+        ],
+      },
+      {
+        // HACK-2715, real VM at efcec5d3: without the boot-ended forfeit, a
+        // down claims the ready run's owed record after the boot ended.
+        name: "owed-after-boot-end",
+        negative: true,
+        fields: [
+          "unsafeBoot = TRUE",
+          "ended = TRUE",
+          'jState = "beforeStarted"',
+          'jGen = "D"',
+        ],
+      },
+      {
+        name: "after-owed-post-boot-reachable",
+        negative: true,
+        invariant: "NeverAfterPostBoot",
+        fields: [
+          "ended = TRUE",
+          'jState = "complete"',
+          'jGen = "D"',
+          "unsafeBoot = FALSE",
           "unsafeAfter = FALSE",
         ],
       },
@@ -1971,7 +2022,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-start-lock-wait",
     module: "LeaseWait",
-    states: 19,
+    states: 31,
     invariant: "NoEffectWhileHeld",
     fields: ['holder = "second"', 'waiter = "acquired"', "earlyEffect = TRUE"],
     additionalControls: [
@@ -1990,6 +2041,256 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NeverExpired",
         fields: ['waiter = "expired"', "elapsed = 5", "earlyEffect = FALSE"],
+      },
+      {
+        // HACK-2724: a start's 35 s wait outlasts another project's stop,
+        // which holds the lease for about 31 s (one tick is one second).
+        name: "stop-outlasted",
+        negative: false,
+        states: 160,
+      },
+      {
+        // The old 5 s start wait refused while that stop still held the lease.
+        name: "old-start-bound",
+        negative: true,
+        invariant: "StopNeverRefuses",
+        fields: ['waiter = "expired"', "elapsed = 5"],
+      },
+      {
+        // The wait stays bounded: a holder past it is refused, still named.
+        name: "stop-past-bound",
+        negative: true,
+        invariant: "StopNeverRefuses",
+        fields: ['waiter = "expired"', "elapsed = 35"],
+      },
+      {
+        // Review finding: a boot that waited while a peer booted the pool
+        // refused its rechecks under the lease (admission_owner_changed).
+        name: "peer-boot-refused",
+        negative: true,
+        invariant: "StopNeverRefuses",
+        fields: ['waiter = "refused"', 'pool = "running"'],
+      },
+      {
+        // The fix is reachable: that boot resumes the running pool instead.
+        name: "peer-boot-resumed",
+        negative: true,
+        invariant: "NeverResumed",
+        fields: ['waiter = "resumed"', 'pool = "running"', 'holder = "second"'],
+      },
+    ],
+  },
+  {
+    // HACK-2669: a service command (exec, and the dependency refresh before
+    // exec and run) waits out the ready owner's brief lease holds instead of
+    // refusing provider_busy. The negative control is the old nonblocking
+    // acquisition.
+    name: "native-command-lease",
+    module: "CommandLease",
+    states: 74,
+    invariant: "BriefHolderNeverRefuses",
+    fields: ['cmd = "refused"', 'lease = "owner"', "elapsed = 0"],
+    additionalControls: [
+      {
+        // Review finding: a waiter on an owner's loop thread that passed no
+        // check held a pending signal across the wait.
+        name: "unchecked-signal",
+        negative: true,
+        invariant: "SignalNotHeld",
+        fields: [
+          'cmd = "waiting"',
+          "signal = TRUE",
+          "sigAt = 0",
+          "elapsed = 1",
+        ],
+      },
+      {
+        // Without the check, a signal that arrived during the wait could
+        // still be followed by admission.
+        name: "unchecked-admission",
+        negative: true,
+        invariant: "NoAdmissionAfterSignal",
+        fields: ['cmd = "admitted"', "signal = TRUE", 'lease = "command"'],
+      },
+      {
+        // The wait stays bounded: a holder that keeps the lease past it is
+        // still refused, with the holder named.
+        name: "long-holder",
+        negative: true,
+        fields: ['cmd = "refused"', 'lease = "owner"', "elapsed = 4"],
+      },
+      {
+        name: "admitted-after-wait",
+        negative: true,
+        invariant: "NeverAdmittedAfterWait",
+        fields: ['cmd = "admitted"', 'lease = "command"', "elapsed = 1"],
+      },
+    ],
+  },
+  {
+    // HACK-2669 rows 1, 3, 4, HACK-2707, HACK-2708, HACK-2709: the warm-up
+    // window after `up -d`. The shared HTTPS owner's startup, acquire and
+    // release contend for the provider lease with commands and a stop. The
+    // negative control is the old single nonblocking graph read at the ready
+    // line: a brief holder made the acquire refuse and the run was torn down.
+    name: "native-warmup-window",
+    module: "WarmupWindow",
+    states: 272,
+    invariant: "NoTeardownByBriefHolder",
+    fields: ["torn = TRUE", 'https = "refused"', 'lease = "cmd"'],
+    additionalControls: [
+      {
+        // HACK-2708: the release after Ctrl-C read once while an exec that
+        // waited for the lease held it.
+        name: "nonblocking-release",
+        negative: true,
+        invariant: "NoRecoveryRequired",
+        fields: ['fin = "unconfirmed"', 'https = "retained"', 'lease = "cmd"'],
+      },
+      {
+        // HACK-2707: the authority gave up on the lease a `hack down` held
+        // for its stop, leaving the shared owner's startup failure retained.
+        name: "short-authority-wait",
+        negative: true,
+        invariant: "NoRecoveryRequired",
+        fields: ['fin = "unconfirmed"', 'https = "startupFailed"'],
+      },
+      {
+        // #1260 review, M3: a stop that holds the lease longer than the
+        // authority's wait (StopHold > AuthorityWait) still ends confirmed:
+        // recovery retires the owner generation that admitted nothing.
+        name: "long-stop",
+        negative: false,
+        states: 510,
+      },
+      {
+        // #1260 review, M3: the same long stop with the startup failure
+        // retained (the head before this fix) needs recovery.
+        name: "long-stop-retained",
+        negative: true,
+        invariant: "NoRecoveryRequired",
+        fields: [
+          'run = "stopped"',
+          "torn = FALSE",
+          'fin = "unconfirmed"',
+          'https = "startupFailed"',
+        ],
+      },
+      {
+        // HACK-2707: cleanup did not wait for the in-flight acquisition.
+        name: "cleanup-before-settled",
+        negative: true,
+        invariant: "NoRecoveryRequired",
+        fields: ['fin = "unconfirmed"', 'https = "authority"'],
+        alternativeWitnesses: [['fin = "unconfirmed"', 'https = "verify"']],
+      },
+      {
+        // The same omission could acknowledge a lifetime whose acquisition
+        // had not even started its intent.
+        name: "acquire-after-cleanup",
+        negative: true,
+        invariant: "NoAcquisitionAfterCleanup",
+        fields: ['fin = "confirmed"', 'https = "pending"'],
+        alternativeWitnesses: [
+          ['fin = "confirmed"', 'https = "authority"'],
+          ['fin = "confirmed"', 'https = "verify"'],
+        ],
+        // With two workers a loaded runner may report a longer violation first:
+        // a cleanup that starts once the acquisition moved on leaves
+        // `fin = "unconfirmed"`, the bug cleanup-before-settled isolates (hosted
+        // CI, PR #1273). One worker reports this control's own shortest trace.
+        workers: 1,
+      },
+      {
+        // The waits stay bounded: a holder that outlasts the read's wait
+        // still makes the acquire refuse.
+        name: "long-holder",
+        negative: true,
+        invariant: "NoTeardownByBriefHolder",
+        fields: ["torn = TRUE", 'https = "refused"', 'lease = "cmd"'],
+      },
+      {
+        // Reachability: a stop during warm-up ends with a refused acquire,
+        // a verified release and confirmed cleanup.
+        name: "released-after-refusal",
+        negative: true,
+        invariant: "NeverReleasedAfterRefusal",
+        fields: [
+          'fin = "confirmed"',
+          'https = "released"',
+          "refusedSeen = TRUE",
+        ],
+      },
+      {
+        // HACK-2720: the shared owner killed while its run is ready. The
+        // authority notices its closed owner pipe within the deadline and stops
+        // its Caddy; `down` retires the exited owner and the next `up` starts.
+        name: "serving-exit",
+        module: "ServingExit",
+        negative: false,
+        states: 9,
+      },
+      {
+        // The old serving loop: `poll` never reports the closed named FIFO on
+        // macOS and waited with no timeout, so the authority served forever.
+        name: "serving-exit-old",
+        module: "ServingExit",
+        negative: true,
+        invariant: "NoticedInTime",
+        fields: ['authority = "serving"', 'owner = "killed"', "since = 3"],
+      },
+      {
+        // An authority that exits without stopping its Caddy leaves the port
+        // held, so `down` cannot prove the children gone.
+        name: "serving-exit-caddy-left",
+        module: "ServingExit",
+        negative: true,
+        invariant: "DownConfirms",
+        fields: ['caddy = "running"', 'down = "refused"'],
+      },
+      {
+        // Recovery that can release a lease only through a live owner: `down`
+        // fails and the next `up` refuses E_RECOVERY_REQUIRED.
+        name: "serving-exit-retained",
+        module: "ServingExit",
+        negative: true,
+        invariant: "NoRecoveryRequired",
+        fields: [
+          'up = "recoveryRequired"',
+          'records = "held"',
+          'down = "refused"',
+        ],
+      },
+      {
+        // A pipe check that reports end of file while the owner still holds
+        // its writer stops a healthy owner's children: NoFalseExit can fail.
+        name: "serving-exit-spurious-eof",
+        module: "ServingExit",
+        negative: true,
+        invariant: "NoFalseExit",
+        fields: ['owner = "ready"', 'authority = "exited"'],
+      },
+      {
+        // Recovery without its owner-process proof retires a live owner's
+        // records: NoLiveRetire can fail.
+        name: "serving-exit-unproven",
+        module: "ServingExit",
+        negative: true,
+        invariant: "NoLiveRetire",
+        fields: ['owner = "ready"', 'records = "retired"'],
+      },
+      {
+        // Reachability: a killed owner is recovered and the next `up` starts.
+        name: "serving-exit-recovered",
+        module: "ServingExit",
+        negative: true,
+        invariant: "NeverStartedAfterKill",
+        fields: [
+          'up = "started"',
+          'records = "retired"',
+          'caddy = "stopped"',
+          'authority = "exited"',
+        ],
       },
     ],
   },
@@ -3203,6 +3504,146 @@ const contracts: readonly ModelContract[] = [
         invariant: "NoRestartOverLiveRun",
         fields: ["stoppedLive = TRUE", 'pool = "stopped"', 'run = "ready"'],
       },
+      // HACK-2477: a plain `runtime down` refuses while a run is live; only
+      // `--force` stops the pool under it. Without the refusal the plain down
+      // stops the pool under a ready run.
+      {
+        name: "down-no-refusal",
+        negative: true,
+        invariant: "NoDownOverLiveRun",
+        fields: ["downOverLive = TRUE", 'pool = "stopped"', 'run = "ready"'],
+      },
+      // HACK-2715 (seen on a real VM): a native-authored project shares the pool.
+      // After `runtime down --force` (or a crash) each project comes back by its
+      // own commands (`CanComeUp`, `NativeCanComeUp`). Each control is `next`
+      // before the fix for one part: admission refused the native run of the
+      // ended boot, so the Compose start was refused for good; the native
+      // recovery accepted only its own boot; its down --recover did not start a
+      // stopped pool. The review of HACK-2715 adds a native start in progress
+      // (`preparing`), a run with boot-bound state that is refused by name
+      // (`NativeStranded`), and an owner that outlives the pool (seen on a real
+      // VM). Its controls: a start caught mid-way refused by admission and
+      // recovery; the live owner's stop same-boot only; `hack down` starting a
+      // stopped pool without checking the receipt first.
+      { name: "two-projects", negative: false, states: 12_290 },
+      {
+        name: "admission-ended-boot",
+        negative: true,
+        invariant: "CanComeUp",
+        fields: ['nrun = "preparing"', "nrunBoot = 1"],
+        alternativeWitnesses: [
+          ['nrun = "ready"', "nrunBoot = 1"],
+          ['nrun = "preparing"', "nrunBoot = 2"],
+          ['nrun = "ready"', "nrunBoot = 2"],
+        ],
+      },
+      {
+        name: "native-same-boot",
+        negative: true,
+        invariant: "NativeCanComeUp",
+        fields: ['pool = "running"', 'nrun = "preparing"', 'nowner = "dead"'],
+        alternativeWitnesses: [
+          ['pool = "running"', 'nrun = "ready"', 'nowner = "dead"'],
+        ],
+      },
+      {
+        name: "native-stopped-pool",
+        negative: true,
+        invariant: "NativeCanComeUp",
+        fields: ['pool = "stopped"', 'nrun = "preparing"', 'nowner = "dead"'],
+        alternativeWitnesses: [
+          ['pool = "stopped"', 'nrun = "ready"', 'nowner = "dead"'],
+          ['pool = "stopped"', 'nrun = "ready"', 'nowner = "live"'],
+        ],
+      },
+      {
+        name: "native-mid-start",
+        negative: true,
+        invariant: "CanComeUp",
+        fields: ['nrun = "preparing"', 'nowner = "dead"', "nbound = FALSE"],
+        alternativeWitnesses: [
+          ['nrun = "preparing"', 'nowner = "dead"', "nbound = TRUE"],
+        ],
+      },
+      {
+        name: "native-live-owner",
+        negative: true,
+        invariant: "NativeCanComeUp",
+        fields: ['pool = "running"', 'nrun = "ready"', 'nowner = "live"'],
+      },
+      {
+        name: "native-start-unchecked",
+        negative: true,
+        invariant: "NoWastedPoolStart",
+        fields: ["nwasted = TRUE", "nbound = TRUE", 'pool = "running"'],
+      },
+      // HACK-2715 review round 2: a boot-bound run of an ended boot is refused
+      // by name, but its live owner must still be asked to stop (that needs no
+      // pool). The old ordering refused before the stop on a stopped pool, so
+      // the owner and its publication stayed up: `NativeStranded` no longer
+      // accepts a live owner.
+      {
+        name: "native-bound-owner",
+        negative: true,
+        invariant: "NativeCanComeUp",
+        fields: [
+          'pool = "stopped"',
+          'nrun = "ready"',
+          'nowner = "live"',
+          "nbound = TRUE",
+        ],
+      },
+      // HACK-2715 review round 2 (real VM at c1dfac73): `hack down` started a
+      // stopped pool, then the live owner's stop did not confirm, and the run
+      // was left. The fix asks the owner to stop first, on the stopped pool,
+      // and settles the run by the dead-owner recovery in the same command.
+      {
+        name: "native-stop-after-start",
+        negative: true,
+        invariant: "DownConfirms",
+        fields: [
+          "nunconfirmed = TRUE",
+          'nowner = "dead"',
+          'nrun = "ready"',
+          'pool = "running"',
+        ],
+      },
+      // The same VM run: a native owner outlived `runtime down --force`. The fix
+      // makes the owner notice that its boot ended and exit, and `--force` waits.
+      {
+        name: "force-leaves-owner",
+        negative: true,
+        invariant: "NoOwnerLeftByForce",
+        fields: ["forcedOwner = TRUE", 'pool = "stopped"', 'nowner = "live"'],
+      },
+      // Codex P2 on #1257: a provider that died under the pool leaves its record
+      // `running`; only `hack native recover` moved such a pool on. The native
+      // `hack down` now runs `runtime recover` first, and owners count a provider
+      // proven gone as the end of their boot.
+      {
+        name: "native-down-on-crash",
+        negative: true,
+        invariant: "NativeDownActs",
+        fields: ['pool = "crashed"', 'nrun = "preparing"'],
+        alternativeWitnesses: [['pool = "crashed"', 'nrun = "ready"']],
+      },
+      // The real-VM regression at 3c88966f: an owner whose pool boot ended
+      // returned normally and released its admission lock, which the dead-owner
+      // recovery needs. It now ends as a crash would.
+      {
+        name: "owner-exits-released",
+        negative: true,
+        invariant: "NativeCanComeUp",
+        fields: ['nowner = "gone"', 'nrun = "ready"'],
+      },
+      // Review round 4 (High): a project with lifecycle hooks took the hook path
+      // once its pool boot ended and released the admission lock the same way.
+      {
+        name: "hook-owner-exits-released",
+        negative: true,
+        invariant: "NativeCanComeUp",
+        fields: ['nowner = "gone"', 'nrun = "ready"', "nhooks = TRUE"],
+      },
     ],
   },
   {
@@ -3247,6 +3688,196 @@ const contracts: readonly ModelContract[] = [
           "grace = 2",
           "graph = 3",
           "stopped = 3",
+        ],
+      },
+    ],
+  },
+  {
+    // HACK-2096: a foreground start outlives its lost VM by at most the check
+    // and the grace, and never ends as a lost VM once its graph has stopped.
+    // The negative control is the old unwatched foreground; armed-finishing
+    // keeps the watch armed while the start finishes after its graph stopped.
+    name: "foreground-pool-watch",
+    module: "ForegroundPoolWatch",
+    states: 117,
+    invariant: "BoundedExit",
+    fields: ['phase = "Serving"', "live = FALSE", "watching = FALSE", "t = 4"],
+    alternativeWitnesses: [
+      ['phase = "Starting"', "live = FALSE", "watching = FALSE", "t = 4"],
+      ['phase = "Stopping"', "live = FALSE", "watching = FALSE", "t = 4"],
+    ],
+    additionalControls: [
+      {
+        name: "armed-finishing",
+        negative: true,
+        invariant: "NoExitAfterGraphStopped",
+        fields: ['phase = "Exited"', "graphStopped = TRUE", "watching = TRUE"],
+      },
+    ],
+  },
+  {
+    // HACK-2096: after a foreground up or restart loses its VM, every command
+    // its message names is accepted in order, and it withholds a command only
+    // where none works, whether the pool watch or the start's own error ends
+    // the start. The negative control is PR #1253 at cd0ebff10 (restart named
+    // by intent everywhere, lock left held, intent kept, generic error text,
+    // brought-back containers unrepaired); keep-intent, leak-lock,
+    // intent-message, generic-error and keep-leftover each restore one old
+    // rule, and withhold-preparing is a6c4cba (no command before ready).
+    // pinned-relay (HACK-2711), no-cross-boot (HACK-2714), failed-only
+    // (01ab67fa: only a `failed-retained` lost start) and withhold-requested
+    // (#1253's message on the fixed runtime) restore one rule of the runtime or
+    // message before the VM-loss recovery fix.
+    // restart-recovers is the reachability witness of a recovered restart.
+    name: "foreground-loss-recovery",
+    module: "ForegroundLossRecovery",
+    states: 416,
+    invariant: "NoRefusedAdvice",
+    fields: ['outcome = "refused"', 'lostAt = "Preparing"'],
+    alternativeWitnesses: [['outcome = "refused"', 'lostAt = "Requested"']],
+    additionalControls: [
+      {
+        // a8705a39 on a real VM: the start's error wins the race with its
+        // own text, and `hack up` (image preparation's advice) refuses.
+        name: "generic-error",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          'endedBy = "error"',
+          'msg = "genericUp"',
+          'lostAt = "Preparing"',
+        ],
+      },
+      {
+        // 38347515 (round-4 review): a lost-provider code alone counts as a
+        // lost VM, so an ordinary failure on a healthy VM gets lost-VM advice.
+        name: "code-without-veto",
+        negative: true,
+        invariant: "NoFalseLoss",
+        fields: ['endedBy = "ordinary"', 'lostAt = "Preparing"'],
+      },
+      {
+        // c624229e (round-5 review): only a running record's pid was read and
+        // any record naming the boot vetoed, so a provider that died with the
+        // record stuck mid-stop got the start error's own text.
+        name: "transitional-veto",
+        negative: true,
+        invariant: "NoMissedLoss",
+        fields: ['endedBy = "error"', "stale = TRUE", 'lostAt = "Preparing"'],
+      },
+      {
+        // Real-VM row 8: containers a lost VM brought back are not removed,
+        // so `hack down --recover` cannot confirm the cleanup.
+        name: "keep-leftover",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          "leftover = TRUE",
+          'msg = "downUp"',
+          'lostAt = "Preparing"',
+        ],
+      },
+      {
+        name: "keep-intent",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        ...pendingRestartRefused("FALSE"),
+      },
+      {
+        name: "leak-lock",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        ...pendingRestartRefused("TRUE"),
+      },
+      {
+        // Only the intent rule differs, and only once ready: the restart lost
+        // at GraphReady is told `hack restart`, which refuses after down
+        // --recover retired its intent.
+        name: "intent-message",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          'kind = "restart"',
+          'msg = "downRestart"',
+          'lostAt = "GraphReady"',
+          'intent = "none"',
+        ],
+      },
+      {
+        name: "withhold-preparing",
+        negative: true,
+        invariant: "NoNeedlessWithholding",
+        fields: ['msg = "inspect"', 'lostAt = "Preparing"'],
+      },
+      {
+        // HACK-2711 (real VM): a run with no published port proves its dead
+        // owner's relay only by a still-published endpoint, which the owner's
+        // unwind removed, so `hack down --recover` refuses
+        // (`relay_owner_refused`) once the run was requested.
+        name: "pinned-relay",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          "ports = FALSE",
+          'msg = "downUp"',
+          'lostAt = "Requested"',
+        ],
+        alternativeWitnesses: [
+          [
+            'outcome = "refused"',
+            "ports = FALSE",
+            'msg = "downUp"',
+            'lostAt = "GraphReady"',
+          ],
+        ],
+      },
+      {
+        // HACK-2714 (real VM, row 2): no cross-boot retirement of a start lost
+        // before ready, so the down keeps `runtime_not_running`.
+        name: "no-cross-boot",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          "recorded = TRUE",
+          'msg = "downUp"',
+          'lostAt = "Requested"',
+        ],
+      },
+      {
+        // 01ab67fa (review of #1273): an owner killed mid-restore without its
+        // unwind leaves `restoring`, which that runtime did not admit, so the
+        // down --recover the message names is refused.
+        name: "failed-only",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          'left = "restoring"',
+          'msg = "downUp"',
+          'lostAt = "Requested"',
+        ],
+      },
+      {
+        // PR #1253's Requested message once the runtime retires that run: a
+        // recorded run is told no command though down --recover works.
+        name: "withhold-requested",
+        negative: true,
+        invariant: "NoNeedlessWithholding",
+        fields: ['msg = "inspect"', 'lostAt = "Requested"', "recorded = TRUE"],
+      },
+      {
+        name: "restart-recovers",
+        negative: true,
+        invariant: "NoRestartRecovery",
+        fields: ['kind = "restart"', 'outcome = "ok"', 'lostAt = "Preparing"'],
+        alternativeWitnesses: [
+          ['kind = "restart"', 'outcome = "ok"', 'lostAt = "GraphReady"'],
+          ['kind = "restart"', 'outcome = "ok"', 'lostAt = "Serving"'],
         ],
       },
     ],

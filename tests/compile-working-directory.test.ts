@@ -1,58 +1,37 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import ts from "typescript";
 import { runFixtureGitSync } from "./helpers/fixture-git.ts";
 
 /**
- * `bun build --compile` stages its executable as a transient
- * `.<hash>-00000000.bun-build` file in its working directory before renaming
- * it to `--outfile`. A test that compiles with the checkout as its working
- * directory, named or inherited, puts that file in the checkout for the
- * length of the compile. When test files run in parallel, every other file's
- * checkout write guard (HACK-1343) that reads `git status` in that window
- * sees an untracked file and fails a run whose cases all passed (HACK-2727).
- * Each compile must run in a directory the test owns.
+ * Every Bun compile in `tests/` and `scripts/` runs in a working directory
+ * its test owns (HACK-2727).
+ *
+ * `bun build --compile` and `Bun.build({ compile })` stage the executable as
+ * a transient `.<hash>-<n>.bun-build` file in the compiling process's working
+ * directory before renaming it to the outfile. A compile that runs with the
+ * checkout as that directory, named or inherited, puts the file in the
+ * checkout for the length of the compile. When test files run in parallel,
+ * every other file's checkout write guard (HACK-1343) that reads `git status`
+ * in that window sees an untracked file and fails a run whose cases all
+ * passed.
+ *
+ * The check parses each file and finds:
+ * - an argv array with a `"--compile"` element, or a single command string
+ *   such as `"bun build x --compile"` passed to a spawn: the spawn call that
+ *   receives it must name `cwd` in its own options, and that `cwd` must not
+ *   name the checkout;
+ * - a Bun shell `` $`bun build ... --compile` ``: it must chain `.cwd(...)`
+ *   to a directory that is not the checkout;
+ * - `Bun.build({ compile })`: it compiles in its own process. A test file or
+ *   helper runs in the test runner's process, whose working directory is the
+ *   checkout, so it must spawn the compile instead; a fixture or script run
+ *   as its own process must `process.chdir` to an owned directory first.
  */
 
 const REPO = resolve(import.meta.dir, "..");
-
-/** How far after its `"--compile"` a spawn's own options may name `cwd`. */
-const OPTIONS_WINDOW = 30;
-
-/** A `"--compile"` argv element, not a mention in a string or a call. */
-const COMPILE_ELEMENT = /(?:^|[[,])\s*"--compile"\s*[,\]]/;
-
-/** A `cwd:` option key. */
-const CWD_OPTION = /\bcwd:\s*/;
-
-/**
- * The value expression of the `cwd:` option on `line`, up to its top-level
- * `,` or `}` or the line's end; null when the line names no `cwd`.
- */
-function cwdValue(line: string): string | null {
-  const match = CWD_OPTION.exec(line);
-  if (!match) {
-    return null;
-  }
-  let depth = 0;
-  let value = "";
-  for (const char of line.slice(match.index + match[0].length)) {
-    if (depth === 0 && (char === "," || char === "}")) {
-      break;
-    }
-    if (char === "(" || char === "[") {
-      depth += 1;
-    } else if (char === ")" || char === "]") {
-      depth -= 1;
-    }
-    value += char;
-  }
-  return value.trim();
-}
-
-/** Working-directory expressions that name the checkout itself. */
-const CHECKOUT_CWD =
-  /^(?:REPO|REPO_ROOT|ROOT|repository|repoRoot|process\.cwd\(\)|import\.meta\.dir|resolve\(import\.meta\.dir, "\.\."\)|join\(import\.meta\.dir, "\.\."\))$/;
+const SELF = "tests/compile-working-directory.test.ts";
 
 /**
  * Compile sites that may use the checkout. The release build compiles from
@@ -60,55 +39,253 @@ const CHECKOUT_CWD =
  */
 const RELEASE_ONLY = new Set(["scripts/build-release.ts"]);
 
-function isComment(line: string): boolean {
-  const trimmed = line.trim();
-  return (
-    trimmed.startsWith("//") ||
-    trimmed.startsWith("*") ||
-    trimmed.startsWith("/*")
+/** Calls that run a command string as a child process. */
+const SPAWNERS =
+  /^(?:spawn|spawnSync|spawnSyncBounded|exec|execSync|execFile|execFileSync|run|runCommand)$/;
+
+/** Identifiers that conventionally hold the checkout root. */
+const CHECKOUT_NAMES =
+  /^(?:ROOT|REPO|REPO_ROOT|REPOSITORY|repo|repository|repoRoot|checkout|CHECKOUT|checkoutRoot|CHECKOUT_ROOT)$/;
+
+/** Expressions that resolve inside the checkout or to the runner's cwd. */
+const CHECKOUT_REFERENCE =
+  /import\.meta\.(?:dir|dirname|path|url)|process\.cwd\(\)|__dirname/;
+
+/** A command string that compiles with Bun. */
+const COMMAND_COMPILE = /\bbuild\b[\s\S]*--compile\b/;
+
+function stringText(node: ts.Node): string | null {
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+    return node.text;
+  }
+  if (ts.isTemplateExpression(node)) {
+    return node.getText();
+  }
+  return null;
+}
+
+/** Whether `expression` names the checkout or a directory inside it. */
+function namesCheckout(expression: ts.Node): boolean {
+  if (CHECKOUT_REFERENCE.test(expression.getText())) {
+    return true;
+  }
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && CHECKOUT_NAMES.test(node.text)) {
+      found = true;
+    }
+    if (!found) {
+      ts.forEachChild(node, visit);
+    }
+  };
+  visit(expression);
+  return found;
+}
+
+/** The last name of a call's callee: `spawn` for `Bun.spawn` or `cp.spawn`. */
+function calleeName(call: ts.CallExpression): string {
+  const callee = call.expression;
+  if (ts.isIdentifier(callee)) {
+    return callee.text;
+  }
+  if (ts.isPropertyAccessExpression(callee)) {
+    return callee.name.text;
+  }
+  return "";
+}
+
+/**
+ * The call that receives `node` as an argument, directly, as a property of
+ * an object literal argument (`{ cmd: [...] }`), or as an element of an array
+ * argument (`["sh", "-c", "bun build ..."]`); null when `node` is not passed
+ * straight to a call.
+ */
+function receivingCall(node: ts.Node): ts.CallExpression | null {
+  let current = node;
+  for (let depth = 0; depth < 4; depth += 1) {
+    const parent = current.parent;
+    if (!parent) {
+      return null;
+    }
+    if (
+      ts.isCallExpression(parent) &&
+      parent.arguments.some((argument) => argument === current)
+    ) {
+      return parent;
+    }
+    if (
+      ts.isParenthesizedExpression(parent) ||
+      ts.isAsExpression(parent) ||
+      ts.isSpreadElement(parent) ||
+      ts.isArrayLiteralExpression(parent)
+    ) {
+      current = parent;
+      continue;
+    }
+    if (
+      ts.isPropertyAssignment(parent) &&
+      ts.isObjectLiteralExpression(parent.parent)
+    ) {
+      current = parent.parent;
+      continue;
+    }
+    return null;
+  }
+  return null;
+}
+
+/** The `cwd` option a call names in its own object literal arguments. */
+function cwdOption(call: ts.CallExpression): ts.Node | null {
+  for (const argument of call.arguments) {
+    if (!ts.isObjectLiteralExpression(argument)) {
+      continue;
+    }
+    for (const property of argument.properties) {
+      if (
+        ts.isPropertyAssignment(property) &&
+        property.name.getText() === "cwd"
+      ) {
+        return property.initializer;
+      }
+      if (
+        ts.isShorthandPropertyAssignment(property) &&
+        property.name.text === "cwd"
+      ) {
+        return property.name;
+      }
+    }
+  }
+  return null;
+}
+
+/** The directory a Bun shell command chains with `.cwd(...)`, if any. */
+function shellCwd(node: ts.TaggedTemplateExpression): ts.Node | null {
+  let current: ts.Node = node;
+  for (;;) {
+    const parent = current.parent;
+    if (
+      parent &&
+      ts.isPropertyAccessExpression(parent) &&
+      parent.expression === current
+    ) {
+      const call = parent.parent;
+      if (!(call && ts.isCallExpression(call) && call.expression === parent)) {
+        return null;
+      }
+      if (parent.name.text === "cwd") {
+        return call.arguments[0] ?? null;
+      }
+      current = call;
+      continue;
+    }
+    return null;
+  }
+}
+
+function hasCompileProperty(call: ts.CallExpression): boolean {
+  return call.arguments.some(
+    (argument) =>
+      ts.isObjectLiteralExpression(argument) &&
+      argument.properties.some(
+        (property) =>
+          (ts.isPropertyAssignment(property) ||
+            ts.isShorthandPropertyAssignment(property)) &&
+          property.name.getText() === "compile" &&
+          !(
+            ts.isPropertyAssignment(property) &&
+            property.initializer.kind === ts.SyntaxKind.FalseKeyword
+          )
+      )
   );
 }
 
 /**
- * `path:line` and reason of each compile in `text` whose spawn names no
- * working directory or names the checkout.
+ * `path:line` and reason of each compile in `text` that runs, or may run,
+ * with the checkout as its working directory.
  */
 function checkoutCompiles(opts: {
   readonly path: string;
   readonly text: string;
 }): { readonly checked: number; readonly found: readonly string[] } {
-  const lines = opts.text.split("\n");
+  const source = ts.createSourceFile(
+    opts.path,
+    opts.text,
+    ts.ScriptTarget.Latest,
+    true
+  );
+  const ownProcess = !(
+    opts.path.endsWith(".test.ts") || opts.path.startsWith("tests/helpers/")
+  );
   const found: string[] = [];
   let checked = 0;
-  for (const [index, line] of lines.entries()) {
-    if (isComment(line) || !COMPILE_ELEMENT.test(line)) {
-      continue;
-    }
-    checked += 1;
-    let cwd: string | null = null;
-    for (
-      let at = index;
-      at < Math.min(lines.length, index + OPTIONS_WINDOW);
-      at += 1
-    ) {
-      const candidate = lines[at] ?? "";
-      if (at > index && COMPILE_ELEMENT.test(candidate)) {
-        break;
-      }
-      if (isComment(candidate)) {
-        continue;
-      }
-      cwd = cwdValue(candidate);
-      if (cwd !== null) {
-        break;
-      }
-    }
+  const at = (node: ts.Node, reason: string): void => {
+    const line =
+      source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
+    found.push(`${opts.path}:${line} ${reason}`);
+  };
+  const judgeCall = (node: ts.Node, call: ts.CallExpression): void => {
+    const cwd = cwdOption(call);
     if (cwd === null) {
-      found.push(`${opts.path}:${index + 1} inherits the runner's directory`);
-    } else if (CHECKOUT_CWD.test(cwd)) {
-      found.push(`${opts.path}:${index + 1} runs in the checkout (${cwd})`);
+      at(node, "names no cwd, so it inherits the runner's directory");
+    } else if (namesCheckout(cwd)) {
+      at(node, `runs in the checkout (${cwd.getText()})`);
     }
-  }
+  };
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isArrayLiteralExpression(node) &&
+      node.elements.some((element) => stringText(element) === "--compile")
+    ) {
+      checked += 1;
+      const call = receivingCall(node);
+      if (call === null) {
+        at(
+          node,
+          "is not passed straight to its spawn, so its cwd cannot be checked"
+        );
+      } else {
+        judgeCall(node, call);
+      }
+    } else if (ts.isTaggedTemplateExpression(node)) {
+      if (COMMAND_COMPILE.test(node.template.getText())) {
+        checked += 1;
+        const cwd = shellCwd(node);
+        if (cwd === null) {
+          at(node, "is a Bun shell compile without .cwd(...)");
+        } else if (namesCheckout(cwd)) {
+          at(node, `runs in the checkout (${cwd.getText()})`);
+        }
+      }
+      return;
+    } else if (
+      ts.isCallExpression(node) &&
+      node.expression.getText() === "Bun.build" &&
+      hasCompileProperty(node)
+    ) {
+      checked += 1;
+      if (!ownProcess) {
+        at(
+          node,
+          "compiles in the test runner's process, whose cwd is the checkout"
+        );
+      } else if (
+        !opts.text.slice(0, node.getStart(source)).includes("process.chdir(")
+      ) {
+        at(node, "compiles in its process's cwd without process.chdir first");
+      }
+    } else {
+      const text = stringText(node);
+      if (text !== null && text !== "--compile" && COMMAND_COMPILE.test(text)) {
+        const call = receivingCall(node);
+        if (call !== null && SPAWNERS.test(calleeName(call))) {
+          checked += 1;
+          judgeCall(node, call);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
   return { checked, found };
 }
 
@@ -121,7 +298,7 @@ test("no test or script compiles with the checkout as its working directory", as
   const found: string[] = [];
   let checked = 0;
   for (const path of listed.stdout.split("\0")) {
-    if (path.length === 0 || RELEASE_ONLY.has(path)) {
+    if (path.length === 0 || path === SELF || RELEASE_ONLY.has(path)) {
       continue;
     }
     const text = await readFile(resolve(REPO, path), "utf8");
@@ -131,58 +308,144 @@ test("no test or script compiles with the checkout as its working directory", as
   }
   expect(
     found,
-    "Run bun build --compile in a directory the test owns: its transient .bun-build lands in the working directory (HACK-2727)."
+    "Compile in a directory the test owns: Bun stages a transient .bun-build in the compiling process's working directory (HACK-2727)."
   ).toEqual([]);
-  // The scan reached the known compile sites in tests and scripts.
-  expect(checked).toBeGreaterThanOrEqual(9);
+  // The scan reached the known compile sites in tests, fixtures and scripts.
+  expect(checked).toBeGreaterThanOrEqual(11);
 });
 
-test("the scan tells an owned working directory from the checkout", () => {
-  const owned = [
-    "const build = Bun.spawn(",
-    '  [process.execPath, "build", entry, "--compile", "--outfile", out],',
-    '  { cwd: root, stdout: "pipe" }',
-    ");",
-  ].join("\n");
-  expect(checkoutCompiles({ path: "a.ts", text: owned })).toEqual({
-    checked: 1,
-    found: [],
-  });
-  const inherited = [
-    "Bun.spawn(",
-    "  [",
-    "    process.execPath,",
-    '    "build",',
-    '    "index.ts",',
-    '    "--compile",',
-    "  ],",
-    '  { stdout: "pipe" }',
-    ");",
-  ].join("\n");
-  expect(checkoutCompiles({ path: "b.ts", text: inherited }).found).toEqual([
-    "b.ts:6 inherits the runner's directory",
+test("the scan binds cwd to the spawn that runs the compile", () => {
+  const scan = (text: string) =>
+    checkoutCompiles({ path: "tests/a.test.ts", text }).found;
+  expect(
+    scan(
+      'Bun.spawn([process.execPath, "build", e, "--compile"], { cwd: root });'
+    )
+  ).toEqual([]);
+  expect(
+    scan(
+      'children.run({ cmd: [process.execPath, "build", e, "--compile"], cwd: opts.fixture });'
+    )
+  ).toEqual([]);
+  expect(scan('Bun.spawn(["bun", "build", "index.ts", "--compile"]);')).toEqual(
+    ["tests/a.test.ts:1 names no cwd, so it inherits the runner's directory"]
+  );
+  // A later spawn's cwd does not stand in for this one's.
+  expect(
+    scan(
+      [
+        'Bun.spawn(["bun", "build", a, "--compile"], { stdout: "pipe" });',
+        'Bun.spawn(["true"], { cwd: root });',
+      ].join("\n")
+    )
+  ).toEqual([
+    "tests/a.test.ts:1 names no cwd, so it inherits the runner's directory",
   ]);
-  const checkout = [
-    'Bun.spawn([process.execPath, "build", "--compile", entry], {',
-    '  cwd: resolve(import.meta.dir, ".."),',
-    "});",
-  ].join("\n");
-  expect(checkoutCompiles({ path: "c.ts", text: checkout }).found).toEqual([
-    'c.ts:1 runs in the checkout (resolve(import.meta.dir, ".."))',
+  // Options passed as a variable are not followed.
+  expect(
+    scan('Bun.spawn(["bun", "build", a, "--compile"], options);')
+  ).toHaveLength(1);
+  // An argv held in a variable cannot be tied to its spawn.
+  expect(scan('const commands = [["bun", "build", a, "--compile"]];')).toEqual([
+    "tests/a.test.ts:1 is not passed straight to its spawn, so its cwd cannot be checked",
   ]);
-  // A neighbouring compile's cwd does not stand in for a missing one.
-  const neighbours = [
-    'run(["build", "--compile", a]);',
-    'run(["build", "--compile", b], { cwd: root });',
-  ].join("\n");
-  expect(checkoutCompiles({ path: "d.ts", text: neighbours }).found).toEqual([
-    "d.ts:1 inherits the runner's directory",
+});
+
+test("the scan recognizes every name of the checkout", () => {
+  const scan = (cwd: string) =>
+    checkoutCompiles({
+      path: "tests/a.test.ts",
+      text: `Bun.spawn(["bun", "build", a, "--compile"], { cwd: ${cwd} });`,
+    }).found;
+  for (const cwd of [
+    "REPO",
+    "REPO_ROOT",
+    "ROOT",
+    "repository",
+    "repoRoot",
+    "checkout",
+    "process.cwd()",
+    "import.meta.dir",
+    "dirname(import.meta.dir)",
+    'resolve(import.meta.dir, "..")',
+    'resolve(import.meta.dir, "../..")',
+    'join(import.meta.dir, "fixtures")',
+    'join(REPO, "tests")',
+    'new URL("..", import.meta.url).pathname',
+  ]) {
+    expect(scan(cwd)).toEqual([
+      `tests/a.test.ts:1 runs in the checkout (${cwd})`,
+    ]);
+  }
+  for (const cwd of [
+    "root",
+    "f.root",
+    "dirname(target)",
+    "buildRoot",
+    "directory",
+  ]) {
+    expect(scan(cwd)).toEqual([]);
+  }
+});
+
+test("the scan covers command strings, Bun shell and Bun.build", () => {
+  const scan = (path: string, text: string) =>
+    checkoutCompiles({ path, text }).found;
+  expect(
+    scan(
+      "tests/a.test.ts",
+      'execSync("bun build index.ts --compile --outfile x");'
+    )
+  ).toHaveLength(1);
+  expect(
+    scan(
+      "tests/a.test.ts",
+      'spawnSyncBounded(["sh", "-c", "bun build index.ts --compile"], { cwd: REPO, timeout: 1 });'
+    )
+  ).toEqual(["tests/a.test.ts:1 runs in the checkout (REPO)"]);
+  expect(
+    scan(
+      "tests/a.test.ts",
+      "await $`bun build index.ts --compile --outfile ${out}`;"
+    )
+  ).toEqual(["tests/a.test.ts:1 is a Bun shell compile without .cwd(...)"]);
+  expect(
+    scan(
+      "tests/a.test.ts",
+      "await $`bun build index.ts --compile`.quiet().cwd(root);"
+    )
+  ).toEqual([]);
+  expect(
+    scan(
+      "tests/a.test.ts",
+      "await $`bun build index.ts --compile`.cwd(import.meta.dir);"
+    )
+  ).toEqual(["tests/a.test.ts:1 runs in the checkout (import.meta.dir)"]);
+  const inProcess =
+    "await Bun.build({ entrypoints: [e], compile: { outfile: o } });";
+  expect(scan("tests/a.test.ts", inProcess)).toEqual([
+    "tests/a.test.ts:1 compiles in the test runner's process, whose cwd is the checkout",
   ]);
-  // Mentions in strings, calls and comments are not compiles.
-  const mentions = [
-    'if (line.includes("--compile")) {}',
-    "const text = '  \"--compile\",';",
-    '// ["build", "--compile"]',
-  ].join("\n");
-  expect(checkoutCompiles({ path: "e.ts", text: mentions }).checked).toBe(0);
+  expect(scan("tests/fixtures/b.ts", inProcess)).toEqual([
+    "tests/fixtures/b.ts:1 compiles in its process's cwd without process.chdir first",
+  ]);
+  expect(
+    scan("tests/fixtures/b.ts", `process.chdir(dirname(o));\n${inProcess}`)
+  ).toEqual([]);
+  // A bundle without compile writes no .bun-build.
+  expect(
+    scan("tests/a.test.ts", "await Bun.build({ entrypoints: [e] });")
+  ).toEqual([]);
+  // Mentions in prose, assertions and comments are not compiles.
+  expect(
+    checkoutCompiles({
+      path: "tests/a.test.ts",
+      text: [
+        'const reason = "bun build --compile of index.ts";',
+        'expect(text).toContain("bun build index.ts --compile");',
+        'if (line.includes("--compile")) {}',
+        '// Bun.spawn(["bun", "build", "--compile"])',
+      ].join("\n"),
+    }).checked
+  ).toBe(0);
 });

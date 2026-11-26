@@ -56,6 +56,7 @@ import { parseNativeHttpsSelection } from "../backends/native-project-start.ts";
 import {
   isNativeRuntimeNotRunning,
   NATIVE_RUNTIME_NOT_RUNNING,
+  NativeRuntimeRequestError,
   nativeCodesReportRuntimeNotRunning,
   resolveNativeRuntimeSelection,
 } from "../backends/native-runtime-client.ts";
@@ -1251,11 +1252,23 @@ export function nativeAuthoredCommandFailure(input: {
       detail: { status: pending ? "pending" : "not_started" },
     });
   }
-  if (isNativeCommandNotRun(input.error) && input.error instanceof Error) {
+  if (
+    isNativeCommandNotRun(input.error) &&
+    input.error instanceof NativeRuntimeRequestError
+  ) {
+    // The wire code and cause as they arrived: the requester's raw
+    // `provider_busy`, or `native_graph_foreground` caused by the owner's
+    // `graph_authored_exec_lease_busy`.
     return new HackCliError({
       code: "E_LIFECYCLE_FAILED",
       message: input.error.message,
-      detail: { status: "not_run", nativeCode: "provider_busy" },
+      detail: {
+        status: "not_run",
+        nativeCode: input.error.nativeCode,
+        ...(input.error.nativeCauseCode
+          ? { nativeCauseCode: input.error.nativeCauseCode }
+          : {}),
+      },
     });
   }
   return new HackCliError({

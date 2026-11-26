@@ -170,9 +170,12 @@ releases the lease and sends. It does not use `Engine::connect_command_request`:
 that opens an engine connection and runs the pool audit and a version request
 after acquisition, which the owner repeats at once, so it would add a full
 engine connection to every authored exec. The bare lock attempt costs one
-`flock` when the lease is free, and any failure other than an expired
-`provider_busy` (no pool, a pool not running) goes on to the owner, which
-answers as before. On expiry the requester returns the raw `provider_busy`
+`flock` when the lease is free, and any other failure to take the lock (no
+provider state, no lock file) goes on to the owner, which answers as before.
+The wait does not read the pool record: while a `runtime down` or a cold start
+holds the lock, the requester waits up to 35 s and may refuse `provider_busy`
+naming that holder, instead of the owner's quick `runtime_not_running`. That
+refusal is pre-effect and bounded, so it is kept. On expiry the requester returns the raw `provider_busy`
 naming the holder: nothing was sent. The owner keeps its 15 s; if another
 holder took the lease in between and that wait expires, `execute` answers
 `graph_authored_exec_lease_busy` before it reads the journal or touches a
@@ -190,11 +193,18 @@ state counts are unchanged (352 and 393).
 | Config | Constants | Result | Shows |
 | --- | --- | --- | --- |
 | `authored-outlasts-stop` | `Bound = 35`, `SecondBound = 15`, `StopHold = 31`, `Holders = 1` | 192 distinct states, no error; `StopNeverRefuses`, `NoSendWhileHeld`, `UnconfirmedOnlyAfterSend`, `NotRunMeansNotSent` and `Settles` hold | The authored exec outlasts the 31 s stop with the owner's wait kept at 15 s |
-| `authored-peer-race` | `StopHold = 40`, `Holders = 2` | 293 distinct states, no error; the report invariants, `NoSendWhileHeld` and `Settles` hold | A second holder between the waits, or a stop past 35 s, is refused as not run; "unconfirmed" only after a send |
+| `authored-peer-race` | `StopHold = 40`, `Holders = 2` | 293 distinct states, no error; the report invariants, `NoSendWhileHeld` and `Settles` hold | A second holder that takes the lease after the requester's wait and before the owner's, or a stop past 35 s, is refused as not run; "unconfirmed" only after a send |
 | `authored-peer-refused` | `Holders = 2` | `NeverRefusedAtSecondWait` violated: `phase = "refused"`, `report = "not-run"`, `sent = FALSE`, `elapsed = 15`, `holds = 2` | The race is reachable, and the owner's refusal says nothing ran |
 | `authored-old` | `Probe = FALSE`, old report | `UnconfirmedOnlyAfterSend` violated: `report = "unconfirmed"`, `sent = FALSE`, `elapsed = 15` | The failure seen on the VM |
 | `authored-honest-no-wait` | `Probe = FALSE` | `StopNeverRefuses` violated: `report = "not-run"` at `elapsed = 15` | An honest message without the requester's wait still refuses during the stop |
 | `authored-ran-after-stop` | `Holders = 1` | `NeverRanAfterStop` violated: `report = "ran"`, `sent = TRUE`, `held = 31` | The exec runs after the full stop |
+
+`PeerTake` is enabled only between the two waits (`phase = "exec"`), so the
+model does not cover a second holder that takes the lease while the
+requester's own wait is still running. Such a holder only lengthens a wait
+that sends nothing. Its expiry is the requester's not-run refusal, which
+`authored-peer-race` already reaches with a stop past the bound
+(`StopHold = 40`), so the reports are the same.
 
 [State chart](authored-exec-stop-wait.svg) ([source](authored-exec-stop-wait.mmd),
 Pele 1.9.0, label check PASS). It names the model's phases by their authored

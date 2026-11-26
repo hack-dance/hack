@@ -397,6 +397,7 @@ test.each([
       "Holder: project stop.",
       "Retry hack exec once that project stop finishes.",
     ],
+    detail: { status: "not_run", nativeCode: "provider_busy" },
   },
   {
     name: "the owner's own expired wait",
@@ -410,11 +411,18 @@ test.each([
       "Holder: unavailable.",
       "Retry hack exec once the holder finishes.",
     ],
+    // The wire code and cause as they arrived, not a synthesized provider_busy.
+    detail: {
+      status: "not_run",
+      nativeCode: "native_graph_foreground",
+      nativeCauseCode: NATIVE_OWNER_AUTHORED_EXEC_LEASE_BUSY,
+    },
   },
 ])("HACK-2739: $name is an honest refusal that nothing ran, not unconfirmed, and releases the slot", async ({
   name,
   error,
   holder,
+  detail,
 }) =>
   owned(`authored exec lease refusal ${name}`, async () => {
     const f = await fixture();
@@ -442,10 +450,7 @@ test.each([
       ]);
       expect(failure.message).not.toContain("unconfirmed");
       expect(failure.message).not.toContain("may have occurred");
-      expect(failure.detail).toEqual({
-        status: "not_run",
-        nativeCode: "provider_busy",
-      });
+      expect(failure.detail).toEqual(detail);
       // No guest process exists, so a background command's slot is released.
       expect(await Bun.file(confirmed).exists()).toBe(true);
     } finally {

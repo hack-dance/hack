@@ -26,6 +26,12 @@
 (* the requester reads for 40 s). Probe = FALSE is the authored path before  *)
 (* the fix: no requester wait, only the owner's 15 s. The Compose configs    *)
 (* set SecondBound = Bound and Probe = TRUE.                                 *)
+(*                                                                           *)
+(* PeerTake is enabled only in phase "exec": a second holder takes the lease *)
+(* between the two waits, never during the first. The model does not cover   *)
+(* a second holder that arrives while the first wait is still running; that  *)
+(* holder only lengthens a wait that sends nothing, and its expiry is the    *)
+(* same not-run refusal that a StopHold past Bound already reaches.          *)
 EXTENDS Naturals
 CONSTANTS Bound, SecondBound, Probe, StopHold, ExpiryUnconfirmed, Holders,
           EnforceLease
@@ -46,7 +52,9 @@ PhaseBound == IF phase = "refresh" THEN Bound ELSE SecondBound
 Release == /\ holder \in {"stop", "peer"} /\ holder' = "free"
            /\ UNCHANGED <<holds, phase, elapsed, held, sent, sentHeld, report>>
 
-\* A second holder takes the free lease after the refresh, before the exec.
+\* A second holder takes the free lease after the refresh, before the exec
+\* (for the authored path: after the requester's wait, before the owner's).
+\* It is not enabled during the first wait.
 PeerTake == /\ phase = "exec" /\ holder = "free" /\ holds < Holders
             /\ holder' = "peer" /\ holds' = holds + 1 /\ held' = 0
             /\ UNCHANGED <<phase, elapsed, sent, sentHeld, report>>

@@ -437,10 +437,18 @@ pub(super) const COMMAND_REQUEST_LEASE_WAIT: Duration = START_LEASE_WAIT;
 /// so an uncontended call costs one lock attempt and the normal path keeps its
 /// latency. Every pool, owner and identity check stays with the owner, after its
 /// own acquisition. Only a `provider_busy` on expiry (the last refusal, so the
-/// holder is named) is returned; nothing was sent and no command ran. Anything
-/// else (no pool, a pool not running, a lock that cannot be opened) returns
-/// `Ok`, and the request goes on to the owner, whose answer is the same as
-/// before this wait existed.
+/// holder is named) is returned; nothing was sent and no command ran. Any other
+/// failure to take the lock (no provider state directory, no lock file, a lock
+/// that cannot be opened) returns `Ok` at once, and the request goes on to the
+/// owner, whose answer is the same as before this wait existed.
+///
+/// It does not read the pool record, so it does not tell a running pool from a
+/// stopped one. While anything holds the lock it waits, whatever the pool's
+/// phase: during a `runtime down` or a cold start (the pool not running, the
+/// lock held) the requester waits up to 35 s and may refuse `provider_busy`
+/// naming that holder, instead of reaching the owner's quick
+/// `runtime_not_running`. That refusal is still pre-effect and bounded. Once the
+/// lock is free, the owner reports the pool's phase as before.
 ///
 /// The lease can be taken again between this wait and the owner's acquisition.
 /// The owner then waits its own 15 s, and on expiry answers with a pre-effect

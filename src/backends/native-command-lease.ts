@@ -157,12 +157,20 @@ export function nativeCommandLeaseRefusal(opts: {
   readonly nativeMessage: string | undefined;
   readonly command: NativeLeaseCommand;
   readonly stage: NativeLeaseStage;
+  /**
+   * The wire code and cause this refusal came from, when it is not the
+   * requester's own raw `provider_busy` (an owner's pre-effect code, carried as
+   * the cause of the requester's code). Defaults to `provider_busy`, no cause.
+   */
+  readonly nativeCode?: string;
+  readonly nativeCauseCode?: string;
 }): NativeRuntimeRequestError {
   const holder = nativeStartLeaseHolder(opts.nativeMessage);
   const outcome =
     opts.stage === "exec" ? "the command did not run" : "nothing ran";
   const error = new NativeRuntimeRequestError({
-    nativeCode: "provider_busy",
+    nativeCode: opts.nativeCode ?? "provider_busy",
+    nativeCauseCode: opts.nativeCauseCode,
     nativeMessage: opts.nativeMessage,
     message: [
       `${opts.command} could not acquire the native runtime lock (provider_busy); ${outcome}.`,

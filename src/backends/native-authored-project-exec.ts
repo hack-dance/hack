@@ -72,6 +72,10 @@ async function authoredExecLeaseRefusal(
       : undefined,
     command: "hack exec",
     stage: "authored",
+    // The wire codes as they arrived: the requester's raw `provider_busy`, or
+    // the owner's code as the cause of `native_graph_foreground`.
+    nativeCode: error.nativeCode,
+    nativeCauseCode: error.nativeCauseCode,
   });
   await noteNativeExitConfirmed();
   return refusal;

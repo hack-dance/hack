@@ -83,6 +83,7 @@ import {
 } from "../src/backends/native-runtime-client.ts";
 import { NATIVE_EXITED_RUNTIME_NOTICE } from "../src/backends/native-runtime-preflight.ts";
 import { selectNativeServices } from "../src/backends/native-service-selection.ts";
+import { isNativeStartLeaseRefusal } from "../src/backends/native-start-lease.ts";
 import {
   classifyNativeLostProvider,
   NATIVE_START_POOL_CHECK_MS,
@@ -564,6 +565,51 @@ test("foreground saves after readiness and retains mapping after confirmed stop"
     "graph inspect",
     "cleanup",
   ]);
+});
+
+test("HACK-2724: the final inspection after serve settles keeps the short wait and no progress line", async () => {
+  const { opts } = await fixture();
+  const invoke = opts.dependencies.invoke;
+  if (!invoke) {
+    throw new Error("the fixture supplies an invoke");
+  }
+  const inspections: { startupWait: boolean; reports: boolean }[] = [];
+  const runtimeUp: boolean[] = [];
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[0] === "graph" && request.args[1] === "inspect") {
+      inspections.push({
+        startupWait: request.args.includes("--startup-wait"),
+        reports: request.onLeaseWait !== undefined,
+      });
+    }
+    if (request.args[0] === "runtime" && request.args[1] === "up") {
+      runtimeUp.push(request.onLeaseWait !== undefined);
+    }
+    return await invoke(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  // The start's own runtime up reports a long lease wait...
+  expect(runtimeUp).toEqual([true]);
+  // ...but the inspection after serve settled (Ctrl-C or a stop) neither
+  // waits 35 s in the runtime nor prints "This start continues".
+  expect(inspections.at(-1)).toEqual({ startupWait: false, reports: false });
+});
+
+test("HACK-2724: only a start's own raw lease refusal is marked for the detached report", async () => {
+  const { opts } = await fixture();
+  opts.dependencies.invoke = async () => {
+    throw new NativeRuntimeRequestError({
+      message: "Native runtime request failed (provider_busy).",
+      nativeCode: "provider_busy",
+      nativeMessage:
+        "Provider lease acquisition refused; recorded holder: project stop; no operation was admitted.",
+    });
+  };
+  const error = await startNativeProject(opts).catch(
+    (caught: unknown) => caught
+  );
+  expect(isNativeStartLeaseRefusal(error)).toBe(true);
+  expect(isNativeStartLeaseRefusal(new Error("provider_busy"))).toBe(false);
 });
 
 test("a pool bridge boot failure reaches foreground up with recovery guidance before any project mapping", async () => {
@@ -8960,6 +9006,10 @@ test.each([
     "Provider lease acquisition refused; recorded holder: retained startup check; no operation was admitted.",
     "retained startup check",
   ],
+  [
+    "Provider lease acquisition refused; recorded holder: project stop; no operation was admitted.",
+    "project stop",
+  ],
   [undefined, "unavailable"],
 ])("a bounded startup lock refusal reports holder %s and tells the user how to retry", async (nativeMessage, holder) => {
   const { opts, events } = await fixture();
@@ -8973,9 +9023,11 @@ test.each([
   };
   await expect(startNativeProject(opts)).rejects.toThrow(
     [
-      "Native startup could not acquire a runtime lock (provider_busy).",
+      "Native startup could not acquire the native runtime lock (provider_busy); nothing was started.",
       `Holder: ${holder}.`,
-      "Run hack up again after the holder finishes.",
+      holder === "unavailable"
+        ? "Retry hack up once the holder finishes."
+        : `Retry hack up once that ${holder} finishes.`,
     ].join("\n")
   );
   expect(events).toEqual([]);

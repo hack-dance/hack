@@ -2016,7 +2016,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-start-lock-wait",
     module: "LeaseWait",
-    states: 19,
+    states: 31,
     invariant: "NoEffectWhileHeld",
     fields: ['holder = "second"', 'waiter = "acquired"', "earlyEffect = TRUE"],
     additionalControls: [
@@ -2035,6 +2035,42 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NeverExpired",
         fields: ['waiter = "expired"', "elapsed = 5", "earlyEffect = FALSE"],
+      },
+      {
+        // HACK-2724: a start's 35 s wait outlasts another project's stop,
+        // which holds the lease for about 31 s (one tick is one second).
+        name: "stop-outlasted",
+        negative: false,
+        states: 160,
+      },
+      {
+        // The old 5 s start wait refused while that stop still held the lease.
+        name: "old-start-bound",
+        negative: true,
+        invariant: "StopNeverRefuses",
+        fields: ['waiter = "expired"', "elapsed = 5"],
+      },
+      {
+        // The wait stays bounded: a holder past it is refused, still named.
+        name: "stop-past-bound",
+        negative: true,
+        invariant: "StopNeverRefuses",
+        fields: ['waiter = "expired"', "elapsed = 35"],
+      },
+      {
+        // Review finding: a boot that waited while a peer booted the pool
+        // refused its rechecks under the lease (admission_owner_changed).
+        name: "peer-boot-refused",
+        negative: true,
+        invariant: "StopNeverRefuses",
+        fields: ['waiter = "refused"', 'pool = "running"'],
+      },
+      {
+        // The fix is reachable: that boot resumes the running pool instead.
+        name: "peer-boot-resumed",
+        negative: true,
+        invariant: "NeverResumed",
+        fields: ['waiter = "resumed"', 'pool = "running"', 'holder = "second"'],
       },
     ],
   },

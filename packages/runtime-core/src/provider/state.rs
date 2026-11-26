@@ -201,7 +201,76 @@ pub(super) fn acquisition_expired() -> CandidateError {
 /// Retry confirmed contention with a monotonic deadline and capped backoff.
 /// Each attempt opens and validates the current lock. The caller supplies only
 /// acquisition; an admitted effect, or any other refusal, returns immediately.
+///
+/// A process whose caller asked for it (`HACK_INTERNAL_REPORT_LEASE_WAIT=1`, which
+/// the CLI sets on its start requests) reports a wait that has seen contention for
+/// [`LEASE_WAIT_REPORT_AFTER`] once on stderr, as `hack.lease-wait:begin <holder>`
+/// with the recorded holder as one closed token, then `hack.lease-wait:end` when
+/// the wait ends either way (HACK-2724). The report is advisory: it changes
+/// nothing about acquisition.
 pub(super) fn wait_for_acquisition<T>(
+    deadline: Instant,
+    before_attempt: impl FnMut() -> Result<(), CandidateError>,
+    acquire: impl FnMut() -> Result<T, CandidateError>,
+    expired: impl FnOnce() -> CandidateError,
+) -> Result<T, CandidateError> {
+    if std::env::var("HACK_INTERNAL_REPORT_LEASE_WAIT").as_deref() == Ok("1") {
+        wait_reporting(
+            deadline,
+            before_attempt,
+            acquire,
+            expired,
+            LEASE_WAIT_REPORT_AFTER,
+            &mut |line| eprintln!("{line}"),
+        )
+    } else {
+        wait_quietly(deadline, before_attempt, acquire, expired)
+    }
+}
+
+/// How long a reporting waiter waits out contention before it says so: longer
+/// than the brief holds of `hack ps` or a ready owner's tick, which need no line.
+pub(super) const LEASE_WAIT_REPORT_AFTER: Duration = Duration::from_secs(3);
+
+/// [`wait_for_acquisition`] with its report written through `emit`.
+pub(super) fn wait_reporting<T>(
+    deadline: Instant,
+    before_attempt: impl FnMut() -> Result<(), CandidateError>,
+    mut acquire: impl FnMut() -> Result<T, CandidateError>,
+    expired: impl FnOnce() -> CandidateError,
+    after: Duration,
+    emit: &mut dyn FnMut(&str),
+) -> Result<T, CandidateError> {
+    let mut contended: Option<Instant> = None;
+    let mut reported = false;
+    let result = wait_quietly(
+        deadline,
+        before_attempt,
+        || {
+            let result = acquire();
+            if let Err(error) = &result
+                && error.code == "provider_busy"
+            {
+                let since = *contended.get_or_insert_with(Instant::now);
+                if !reported && since.elapsed() >= after {
+                    emit(&format!(
+                        "hack.lease-wait:begin {}",
+                        holder_token(&error.message)
+                    ));
+                    reported = true;
+                }
+            }
+            result
+        },
+        expired,
+    );
+    if reported {
+        emit("hack.lease-wait:end");
+    }
+    result
+}
+
+fn wait_quietly<T>(
     deadline: Instant,
     mut before_attempt: impl FnMut() -> Result<(), CandidateError>,
     mut acquire: impl FnMut() -> Result<T, CandidateError>,
@@ -237,7 +306,7 @@ pub(super) fn wait_for_image_lock<T>(
 ) -> Result<T, CandidateError> {
     let started = Instant::now();
     let mut reported = false;
-    let result = wait_for_acquisition(
+    let result = wait_quietly(
         started + wait,
         || {
             if !reported
@@ -286,13 +355,52 @@ fn labelled_lock(root: &Path) -> bool {
     root.ends_with("run/smolvm") || root.ends_with("artifacts/images")
 }
 
+thread_local! {
+    static PROJECT_STOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While held, provider lease acquisitions on this thread record their holder as a
+/// project stop instead of a kind derived from the process arguments (HACK-2724).
+/// A foreground graph owner holds it across its own run's stop or cleanup. Its
+/// arguments name a start (`serve`) or a native owner (`frontend-serve`), so another
+/// project's start waiting on that stop saw "start" or "native operation". The
+/// record stays advisory and value-free: it never names the project. A lease
+/// acquired before this was taken keeps the kind it recorded.
+#[cfg(any(test, target_os = "macos", feature = "native-config-plan"))]
+#[must_use]
+pub(crate) struct RecordProjectStop(bool);
+#[cfg(any(test, target_os = "macos", feature = "native-config-plan"))]
+impl RecordProjectStop {
+    pub(crate) fn begin() -> Self {
+        Self(PROJECT_STOP.with(|stop| stop.replace(true)))
+    }
+}
+#[cfg(any(test, target_os = "macos", feature = "native-config-plan"))]
+impl Drop for RecordProjectStop {
+    fn drop(&mut self) {
+        PROJECT_STOP.with(|stop| stop.set(self.0));
+    }
+}
+
+/// The holder kind this thread would record in the provider lock now, for tests of the
+/// callers that set it.
+#[cfg(all(test, feature = "native-config-plan"))]
+pub(crate) fn recorded_operation() -> &'static str {
+    operation_label()
+}
+
 fn operation_label() -> &'static str {
+    if PROJECT_STOP.with(std::cell::Cell::get) {
+        return "project_stop";
+    }
     // Only closed command words enter diagnostics, never user arguments or paths.
     for argument in std::env::args_os().skip(1) {
         match argument.to_str() {
             Some("cleanup" | "down" | "stop") => return "cleanup",
             Some("recover" | "recover-live-owner" | "recover-cleanup") => return "recovery",
-            Some("up" | "run" | "serve" | "start" | "restore" | "restart") => return "start",
+            Some("up" | "run" | "serve" | "frontend-serve" | "start" | "restore" | "restart") => {
+                return "start";
+            }
             Some("inspect" | "status") => return "inspection",
             Some("retained-preflight") => return "retained_startup",
             Some("ensure-image") => return "image_acquisition",
@@ -302,6 +410,59 @@ fn operation_label() -> &'static str {
     }
     "operation"
 }
+
+/// Recorded holder kinds, their closed refusal messages, and the token a start's
+/// progress report names them by. Closed literal messages survive the frontend's
+/// value-free diagnostic boundary. The record is advisory; no process identity is
+/// inferred from it.
+const HOLDERS: [(&str, &str, &str); 9] = [
+    (
+        "cleanup",
+        "Provider lease acquisition refused; recorded holder: cleanup; no operation was admitted.",
+        "cleanup",
+    ),
+    (
+        "project_stop",
+        "Provider lease acquisition refused; recorded holder: project stop; no operation was admitted.",
+        "project-stop",
+    ),
+    (
+        "recovery",
+        "Provider lease acquisition refused; recorded holder: recovery; no operation was admitted.",
+        "recovery",
+    ),
+    (
+        "start",
+        "Provider lease acquisition refused; recorded holder: start; no operation was admitted.",
+        "start",
+    ),
+    (
+        "inspection",
+        "Provider lease acquisition refused; recorded holder: inspection; no operation was admitted.",
+        "inspection",
+    ),
+    (
+        "retained_startup",
+        "Provider lease acquisition refused; recorded holder: retained startup check; no operation was admitted.",
+        "retained-startup-check",
+    ),
+    (
+        "image_acquisition",
+        "Provider lease acquisition refused; recorded holder: image acquisition; no operation was admitted.",
+        "image-acquisition",
+    ),
+    (
+        "project_share_update",
+        "Provider lease acquisition refused; recorded holder: project share update; no operation was admitted.",
+        "project-share-update",
+    ),
+    (
+        "operation",
+        "Provider lease acquisition refused; recorded holder: native operation; no operation was admitted.",
+        "native-operation",
+    ),
+];
+const UNKNOWN_HOLDER: &str = "Another candidate operation holds the provider lock; holder identity is unavailable; no operation was admitted.";
 
 fn holder_message(file: &File) -> &'static str {
     let mut bytes = [0; 64];
@@ -318,37 +479,16 @@ fn holder_message(file: &File) -> &'static str {
         }
         Some(kind)
     });
-    // Closed literal messages survive the frontend's value-free diagnostic
-    // boundary. The record is advisory; no process identity is inferred from it.
-    match kind {
-        Some("cleanup") => {
-            "Provider lease acquisition refused; recorded holder: cleanup; no operation was admitted."
-        }
-        Some("recovery") => {
-            "Provider lease acquisition refused; recorded holder: recovery; no operation was admitted."
-        }
-        Some("start") => {
-            "Provider lease acquisition refused; recorded holder: start; no operation was admitted."
-        }
-        Some("inspection") => {
-            "Provider lease acquisition refused; recorded holder: inspection; no operation was admitted."
-        }
-        Some("retained_startup") => {
-            "Provider lease acquisition refused; recorded holder: retained startup check; no operation was admitted."
-        }
-        Some("image_acquisition") => {
-            "Provider lease acquisition refused; recorded holder: image acquisition; no operation was admitted."
-        }
-        Some("project_share_update") => {
-            "Provider lease acquisition refused; recorded holder: project share update; no operation was admitted."
-        }
-        Some("operation") => {
-            "Provider lease acquisition refused; recorded holder: native operation; no operation was admitted."
-        }
-        _ => {
-            "Another candidate operation holds the provider lock; holder identity is unavailable; no operation was admitted."
-        }
-    }
+    kind.and_then(|kind| HOLDERS.iter().find(|(known, _, _)| *known == kind))
+        .map_or(UNKNOWN_HOLDER, |(_, message, _)| message)
+}
+
+/// The closed token for the holder a refusal names, or `unknown`.
+fn holder_token(message: &str) -> &'static str {
+    HOLDERS
+        .iter()
+        .find(|(_, known, _)| *known == message)
+        .map_or("unknown", |(_, _, token)| token)
 }
 
 pub fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, CandidateError> {
@@ -1134,6 +1274,158 @@ mod tests {
         assert!(contended.get());
         assert!(matches!(refused, Err(error) if error.code == "provider_acquisition_cancelled"));
         drop(holder);
+        std::fs::remove_dir_all(fixture).unwrap();
+    }
+
+    /// HACK-2724: another project's `hack down` holds the provider lease for its whole
+    /// stop (about 31 s with a 30 s stop grace). A start that waited only
+    /// `STARTUP_LEASE_WAIT` (5 s) refused `provider_busy` naming "native operation".
+    /// Scaled down 50 times: the stop holds 600 ms, past the old bound (100 ms for 5 s) and
+    /// inside the start's bound; the start's wait admits it, and its one progress line
+    /// (after 60 ms for 3 s) names the project stop.
+    #[test]
+    fn a_start_waits_out_a_project_stop_past_the_old_bound_and_reports_it_once() {
+        use super::super::lifecycle::{START_LEASE_WAIT, STARTUP_LEASE_WAIT, startup_lease};
+        use std::time::{Duration, Instant};
+        const OLD_BOUND: Duration = Duration::from_millis(100);
+        const HOLD: Duration = Duration::from_millis(600);
+        const BOUND: Duration = Duration::from_secs(3);
+        const REPORT_AFTER: Duration = Duration::from_millis(60);
+        // The real bounds the scaled ones stand for.
+        assert!(START_LEASE_WAIT >= Duration::from_secs(30) + Duration::from_secs(5));
+        assert!(STARTUP_LEASE_WAIT < Duration::from_secs(31));
+        assert!(super::LEASE_WAIT_REPORT_AFTER < STARTUP_LEASE_WAIT);
+        let fixture = fixture();
+        let root = fixture.join("run/smolvm");
+        drop(super::Lock::acquire(&root).unwrap());
+        let (held, holding) = std::sync::mpsc::sync_channel(1);
+        let mut lines = Vec::new();
+        std::thread::scope(|scope| {
+            let stop = scope.spawn(|| {
+                let lease = {
+                    let _stop = super::RecordProjectStop::begin();
+                    super::Lock::acquire(&root).unwrap()
+                };
+                held.send(()).unwrap();
+                std::thread::sleep(HOLD);
+                drop(lease);
+            });
+            holding.recv().unwrap();
+            // The bound the old start used refuses, naming the stop.
+            let refused = startup_lease(&root, OLD_BOUND).map(drop);
+            assert!(
+                matches!(&refused, Err(error) if error.code == "provider_busy"
+                    && error.message.contains("recorded holder: project stop;")),
+                "{refused:?}"
+            );
+            let started = Instant::now();
+            let lease = super::wait_reporting(
+                started + BOUND,
+                || Ok(()),
+                || super::Lock::acquire(&root),
+                super::acquisition_expired,
+                REPORT_AFTER,
+                &mut |line| lines.push(line.to_owned()),
+            )
+            .unwrap();
+            let waited = started.elapsed();
+            assert!(waited > OLD_BOUND && waited < BOUND, "{waited:?}");
+            drop(lease);
+            stop.join().unwrap();
+        });
+        assert_eq!(
+            lines,
+            ["hack.lease-wait:begin project-stop", "hack.lease-wait:end"]
+        );
+        // Once its stop ends (a nested one included), the thread records its
+        // argument-derived kind again.
+        assert_ne!(super::operation_label(), "project_stop");
+        {
+            let _stop = super::RecordProjectStop::begin();
+            drop(super::RecordProjectStop::begin());
+            assert_eq!(super::operation_label(), "project_stop");
+        }
+        assert_ne!(super::operation_label(), "project_stop");
+        std::fs::remove_dir_all(fixture).unwrap();
+    }
+
+    /// Wiring guard (HACK-2724) for the compose owner's own stop, which needs an owned VM
+    /// and a live host relay runtime: this fails if that stop no longer records itself as
+    /// a project stop before it takes the provider lease. The native owner's stop is tested
+    /// by behaviour (`the_receipt_bound_native_cleanup_records_a_project_stop`).
+    #[test]
+    fn the_compose_owner_records_its_own_stop_before_taking_the_lease() {
+        let source = include_str!("graph/startup/runtime.rs");
+        let from = source.find("    pub fn cleanup(").expect("function start");
+        let cleanup = &source[from..];
+        let cleanup = &cleanup[..cleanup
+            .find("    fn release_dependency_reservation(")
+            .expect("function end")];
+        let recorded = cleanup
+            .find("RecordProjectStop::begin()")
+            .expect("the owner's stop records itself");
+        let lease = cleanup
+            .find("Engine::connect_cleanup_wait(")
+            .expect("the stop's lease");
+        assert!(recorded < lease);
+    }
+
+    /// A stop that keeps the lease past the start's bound is refused, naming the
+    /// holder, with the wait's progress line closed; a brief holder prints nothing.
+    #[test]
+    fn a_start_wait_past_its_bound_refuses_naming_the_stop_and_a_brief_one_is_silent() {
+        use std::time::{Duration, Instant};
+        let fixture = fixture();
+        let root = fixture.join("run/smolvm");
+        let stop = {
+            let _stop = super::RecordProjectStop::begin();
+            super::Lock::acquire(&root).unwrap()
+        };
+        let mut lines = Vec::new();
+        let refused = super::wait_reporting(
+            Instant::now() + Duration::from_millis(400),
+            || Ok(()),
+            || super::Lock::acquire(&root),
+            super::acquisition_expired,
+            Duration::from_millis(100),
+            &mut |line| lines.push(line.to_owned()),
+        )
+        .map(drop);
+        assert!(
+            matches!(&refused, Err(error) if error.code == "provider_busy" && error.message
+                == "Provider lease acquisition refused; recorded holder: project stop; no operation was admitted."),
+            "{refused:?}"
+        );
+        assert_eq!(
+            lines,
+            ["hack.lease-wait:begin project-stop", "hack.lease-wait:end"]
+        );
+        // A brief holder, such as the inspection behind `hack ps`, is waited out
+        // before the report threshold: no line at all.
+        let mut lines = Vec::new();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                drop(stop);
+            });
+            drop(
+                super::wait_reporting(
+                    Instant::now() + Duration::from_secs(5),
+                    || Ok(()),
+                    || super::Lock::acquire(&root),
+                    super::acquisition_expired,
+                    Duration::from_secs(2),
+                    &mut |line| lines.push(line.to_owned()),
+                )
+                .unwrap(),
+            );
+        });
+        assert!(lines.is_empty(), "{lines:?}");
+        // Every closed holder message has its own token; anything else is unknown.
+        for (_, message, token) in super::HOLDERS {
+            assert_eq!(super::holder_token(message), token);
+        }
+        assert_eq!(super::holder_token(super::UNKNOWN_HOLDER), "unknown");
         std::fs::remove_dir_all(fixture).unwrap();
     }
 

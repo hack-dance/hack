@@ -16,7 +16,11 @@ type ModelContract = {
   readonly alternativeWitnesses?: readonly WitnessFields[];
   readonly additionalControls?: readonly {
     readonly name: string;
-    readonly module?: "TerminalReuse" | "MetadataAliasing" | "PreReady";
+    readonly module?:
+      | "TerminalReuse"
+      | "MetadataAliasing"
+      | "PreReady"
+      | "ServingExit";
     readonly negative: boolean;
     readonly states?: number;
     readonly invariant?: string;
@@ -2012,7 +2016,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-start-lock-wait",
     module: "LeaseWait",
-    states: 19,
+    states: 31,
     invariant: "NoEffectWhileHeld",
     fields: ['holder = "second"', 'waiter = "acquired"', "earlyEffect = TRUE"],
     additionalControls: [
@@ -2031,6 +2035,42 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NeverExpired",
         fields: ['waiter = "expired"', "elapsed = 5", "earlyEffect = FALSE"],
+      },
+      {
+        // HACK-2724: a start's 35 s wait outlasts another project's stop,
+        // which holds the lease for about 31 s (one tick is one second).
+        name: "stop-outlasted",
+        negative: false,
+        states: 160,
+      },
+      {
+        // The old 5 s start wait refused while that stop still held the lease.
+        name: "old-start-bound",
+        negative: true,
+        invariant: "StopNeverRefuses",
+        fields: ['waiter = "expired"', "elapsed = 5"],
+      },
+      {
+        // The wait stays bounded: a holder past it is refused, still named.
+        name: "stop-past-bound",
+        negative: true,
+        invariant: "StopNeverRefuses",
+        fields: ['waiter = "expired"', "elapsed = 35"],
+      },
+      {
+        // Review finding: a boot that waited while a peer booted the pool
+        // refused its rechecks under the lease (admission_owner_changed).
+        name: "peer-boot-refused",
+        negative: true,
+        invariant: "StopNeverRefuses",
+        fields: ['waiter = "refused"', 'pool = "running"'],
+      },
+      {
+        // The fix is reachable: that boot resumes the running pool instead.
+        name: "peer-boot-resumed",
+        negative: true,
+        invariant: "NeverResumed",
+        fields: ['waiter = "resumed"', 'pool = "running"', 'holder = "second"'],
       },
     ],
   },
@@ -2168,6 +2208,77 @@ const contracts: readonly ModelContract[] = [
           'fin = "confirmed"',
           'https = "released"',
           "refusedSeen = TRUE",
+        ],
+      },
+      {
+        // HACK-2720: the shared owner killed while its run is ready. The
+        // authority notices its closed owner pipe within the deadline and stops
+        // its Caddy; `down` retires the exited owner and the next `up` starts.
+        name: "serving-exit",
+        module: "ServingExit",
+        negative: false,
+        states: 9,
+      },
+      {
+        // The old serving loop: `poll` never reports the closed named FIFO on
+        // macOS and waited with no timeout, so the authority served forever.
+        name: "serving-exit-old",
+        module: "ServingExit",
+        negative: true,
+        invariant: "NoticedInTime",
+        fields: ['authority = "serving"', 'owner = "killed"', "since = 3"],
+      },
+      {
+        // An authority that exits without stopping its Caddy leaves the port
+        // held, so `down` cannot prove the children gone.
+        name: "serving-exit-caddy-left",
+        module: "ServingExit",
+        negative: true,
+        invariant: "DownConfirms",
+        fields: ['caddy = "running"', 'down = "refused"'],
+      },
+      {
+        // Recovery that can release a lease only through a live owner: `down`
+        // fails and the next `up` refuses E_RECOVERY_REQUIRED.
+        name: "serving-exit-retained",
+        module: "ServingExit",
+        negative: true,
+        invariant: "NoRecoveryRequired",
+        fields: [
+          'up = "recoveryRequired"',
+          'records = "held"',
+          'down = "refused"',
+        ],
+      },
+      {
+        // A pipe check that reports end of file while the owner still holds
+        // its writer stops a healthy owner's children: NoFalseExit can fail.
+        name: "serving-exit-spurious-eof",
+        module: "ServingExit",
+        negative: true,
+        invariant: "NoFalseExit",
+        fields: ['owner = "ready"', 'authority = "exited"'],
+      },
+      {
+        // Recovery without its owner-process proof retires a live owner's
+        // records: NoLiveRetire can fail.
+        name: "serving-exit-unproven",
+        module: "ServingExit",
+        negative: true,
+        invariant: "NoLiveRetire",
+        fields: ['owner = "ready"', 'records = "retired"'],
+      },
+      {
+        // Reachability: a killed owner is recovered and the next `up` starts.
+        name: "serving-exit-recovered",
+        module: "ServingExit",
+        negative: true,
+        invariant: "NeverStartedAfterKill",
+        fields: [
+          'up = "started"',
+          'records = "retired"',
+          'caddy = "stopped"',
+          'authority = "exited"',
         ],
       },
     ],

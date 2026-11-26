@@ -23,6 +23,12 @@ import {
   NATIVE_IDLE_POOL_NOTE,
   NATIVE_PROVIDER_PIN_MESSAGE,
 } from "../backends/native-runtime-client.ts";
+import {
+  isNativeStartLeaseRefusal,
+  NATIVE_START_LEASE_BUSY,
+  nativeStartLeaseRefusal,
+  nativeStartLeaseWaitLine,
+} from "../backends/native-start-lease.ts";
 import { CliUsageError } from "../cli/command.ts";
 import { writeLifecycleStarted } from "../ui/lifecycle-closing.ts";
 import { formatDuration } from "../ui/text-output.ts";
@@ -487,6 +493,11 @@ export async function nativeDetachedUpFailure(error: unknown): Promise<void> {
     "../backends/native-runtime-client.ts"
   );
   const failure = nativeRuntimeFailure(runtimeError);
+  const leaseFailure = startLeaseFailure(runtimeError, failure?.message);
+  if (leaseFailure) {
+    await publishFailure(leaseFailure);
+    return;
+  }
   if (isStartupFailure(failure)) {
     await publishFailure(
       failedStartupServices.length > 0 && failure.service === undefined
@@ -501,6 +512,24 @@ export async function nativeDetachedUpFailure(error: unknown): Promise<void> {
   if (refusal && isPrestartRefusal(refusal)) {
     await publishPrestartRefusal?.(refusal);
   }
+}
+
+/**
+ * Only the start's own lease refusal crosses IPC as {@link NATIVE_START_LEASE_BUSY},
+ * with the runtime's closed holder sentence (HACK-2724).
+ */
+function startLeaseFailure(
+  error: unknown,
+  message: string | undefined
+): StartupFailure | undefined {
+  if (!isNativeStartLeaseRefusal(error)) {
+    return;
+  }
+  const failure = {
+    code: NATIVE_START_LEASE_BUSY,
+    ...(message ? { message } : {}),
+  };
+  return isStartupFailure(failure) ? failure : undefined;
 }
 
 function isStartupFailure(value: unknown): value is StartupFailure {
@@ -616,6 +645,18 @@ function startupFailureError(failure: StartupFailure): HackCliError {
     return new HackCliError({
       code: "E_STARTUP_INCOMPLETE",
       message: `${nativeBuilderMissingDetachedRefusal()} ${NATIVE_IDLE_POOL_NOTE}`,
+    });
+  }
+  if (failure.code === NATIVE_START_LEASE_BUSY) {
+    // The start's own lease wait expired: nothing was admitted, and the pool
+    // belongs to whoever holds the lock. Name the holder and a plain retry, not
+    // hack ps or a pool stop (HACK-2724).
+    return new HackCliError({
+      code: "E_STARTUP_INCOMPLETE",
+      message: nativeStartLeaseRefusal({
+        nativeMessage: failure.message,
+        command: "hack up -d",
+      }),
     });
   }
   let detail = "";
@@ -772,6 +813,26 @@ export function reportNativeImageDownloadWait(reference: string | null): void {
     if (!reportNativeImageNotice(line)) {
       process.stderr.write(`${line}\n`);
     }
+  }
+}
+
+let startLeaseWaitReported = false;
+
+/**
+ * The one progress line of a start waiting on the native runtime lock
+ * (HACK-2724), with the runtime's closed holder token. A detached owner hands
+ * it to its launcher, which prints it; a foreground start prints it itself.
+ */
+export function reportNativeStartLeaseWait(holder: string): void {
+  // One `hack up` makes several start requests that may each wait: say it once
+  // per command (each command runs in its own process).
+  if (startLeaseWaitReported) {
+    return;
+  }
+  startLeaseWaitReported = true;
+  const line = nativeStartLeaseWaitLine(holder);
+  if (!reportNativeImageNotice(line)) {
+    process.stderr.write(`${line}\n`);
   }
 }
 

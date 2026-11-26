@@ -1,8 +1,10 @@
+import { reportNativeStartLeaseWait } from "../lib/native-detached-up.ts";
 import {
   invokeNativeRuntime,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
+import { NATIVE_START_LEASE_REQUEST_TIMEOUT_MS } from "./native-start-lease.ts";
 
 const BUSY =
   "Native runtime request failed (provider_busy); inspect owned state before retrying.";
@@ -86,7 +88,14 @@ export async function inspectNativeProjectGraph(opts: {
           "--json",
           ...(opts.startupWait ? ["--startup-wait"] : []),
         ],
-        timeoutMs: 30_000,
+        // A startup inspect waits up to 35 s for a lock another project's stop
+        // holds, and reports that wait (HACK-2724).
+        ...(opts.startupWait
+          ? {
+              timeoutMs: NATIVE_START_LEASE_REQUEST_TIMEOUT_MS,
+              onLeaseWait: reportNativeStartLeaseWait,
+            }
+          : { timeoutMs: 30_000 }),
         signal: opts.signal,
       }),
   });

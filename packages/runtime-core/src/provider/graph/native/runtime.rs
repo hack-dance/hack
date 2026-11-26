@@ -1496,6 +1496,9 @@ pub(super) fn cleanup_guarded(
     expected: Option<&Receipt>,
     guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
 ) -> Result<Receipt, CandidateError> {
+    // Bound to its receipt, this is the run's own owner stopping it: another
+    // project's start waiting on the lease names that stop (HACK-2724).
+    let _stop = expected.map(|_| crate::provider::state::RecordProjectStop::begin());
     cleanup_inner(candidate, run, expected, guard, false, None, None).map(|(receipt, _)| receipt)
 }
 /// The explicit dead-owner recovery's cleanup. It also accepts a run of an ended boot

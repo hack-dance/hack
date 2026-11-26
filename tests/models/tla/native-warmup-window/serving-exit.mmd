@@ -1,0 +1,25 @@
+---
+title: ServingExit · killed owner
+---
+stateDiagram-v2
+  direction TB
+  [*] --> serving
+  serving --> killed : Kill [kill -9]
+  killed --> killed : Tick [under 1 s]
+  killed --> exited : Notice [pipe EOF]
+  killed --> retired : Down [stop by id]
+  exited --> retired : Down [children gone]
+  killed --> recoveryRequired : Down [old code]
+  retired --> started : Up [new owner]
+  started --> [*]
+  recoveryRequired --> [*]
+  note right of exited
+    INV NoticedInTime: 2 s bound
+    Caddy stops with authority
+  end note
+  class serving live
+  class killed wait
+  class exited idle
+  class retired ok
+  class started ok
+  class recoveryRequired fail

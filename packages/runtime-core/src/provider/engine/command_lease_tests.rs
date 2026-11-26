@@ -507,13 +507,12 @@ fn a_refused_requester_check_ends_the_wait_with_its_own_error() {
     assert!(started.elapsed() >= Duration::from_millis(200));
     assert!(started.elapsed() < Duration::from_secs(2));
     // A check that passes leaves the bounded wait and its holder-named refusal.
-    let busy = await_free_command_lease_checked(
-        &candidate,
-        Instant::now() + Duration::from_millis(300),
-        &|| Ok(()),
-    )
-    .err()
-    .unwrap();
+    let deadline = Instant::now() + Duration::from_millis(300);
+    let busy = await_free_command_lease_checked(&candidate, deadline, &|| Ok(()))
+        .err()
+        .unwrap();
+    // The exact refusal is asserted only once the deadline has passed (HACK-2741).
+    assert!(Instant::now() >= deadline);
     assert_eq!(busy.message, PROJECT_STOP_REFUSAL);
     // The interactive refusal report names that holder as its closed token.
     assert_eq!(

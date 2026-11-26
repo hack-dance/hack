@@ -241,14 +241,12 @@ fn the_owners_lease_wait_expires_with_each_commands_pre_effect_code() {
         (exec::OwnerCommand::Exec, exec::OWNER_EXEC_LEASE_BUSY),
         (exec::OwnerCommand::Run, exec::OWNER_RUN_LEASE_BUSY),
     ] {
-        let refused = exec::owner_command_engine(
-            &candidate,
-            Instant::now() + Duration::from_millis(300),
-            &|| Ok(()),
-            command,
-        )
-        .err()
-        .unwrap();
+        let deadline = Instant::now() + Duration::from_millis(300);
+        let refused = exec::owner_command_engine(&candidate, deadline, &|| Ok(()), command)
+            .err()
+            .unwrap();
+        // The exact refusal is asserted only once the deadline has passed (HACK-2741).
+        assert!(Instant::now() >= deadline);
         assert_eq!(refused.code, code);
     }
     release.send(()).unwrap();

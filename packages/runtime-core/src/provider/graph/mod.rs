@@ -2121,6 +2121,16 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
         // receipt alone: a caller also requires the owner exited (`foreground`).
         // Selection only, like the fields around it.
         "cross_boot_start": dead_owner_cleanup::unconfirmed_start(&receipt),
+        // Whether that recovery can prove the dead owner's relay (HACK-2731): the
+        // run holds a bridge slot, or its relay startup settled. A run with no
+        // published port and an unsettled relay startup is refused
+        // (`relay_owner_refused`), so a caller names `hack down --recover` for
+        // a live phase only with this. Selection only, like the fields around it.
+        "cross_boot_relay": bridges::cleanup::relay_owner_provable(candidate, &receipt),
+        // A lost-removal repair whose storage barrier has not confirmed (HACK-2719),
+        // read from its host marker: only `hack down --recover` on a running pool
+        // finishes it, so a down finding the pool stopped starts it (HACK-2731).
+        "lost_removal_pending": fs::symlink_metadata(root.join(LOST_REMOVAL_REPAIR)).is_ok(),
         "dead_owner_recovery": predecessor,
         "dead_owner_recovery_complete": predecessor_complete,
         "dead_owner_recovery_error": predecessor_error,
@@ -2777,12 +2787,31 @@ const STORAGE_BARRIER_TIMEOUT: Duration = Duration::from_secs(10);
 /// which a repeated `hack down` (and every recovery) resumes by reinspection.
 pub(super) fn storage_barrier(engine: &Engine<'_>) -> Result<(), CandidateError> {
     let deadline = std::time::Instant::now() + STORAGE_BARRIER_TIMEOUT;
-    let output = engine
-        .guest()
-        .execute_cleanup_until(STORAGE_BARRIER, &[], deadline)
-        .map_err(|_| storage_barrier_refused())?;
-    storage_barrier_confirmed(&output)
+    storage_barrier_outcome(
+        engine
+            .guest()
+            .execute_cleanup_until(STORAGE_BARRIER, &[], deadline),
+    )
 }
+
+/// Only a barrier that did not confirm is reported as one: the exec's deadline
+/// or a lost reply (`agent_protocol_uncertain`), or a guest command that did not
+/// complete with exit 0 (`guest_command_failed`). Every other error keeps its
+/// own code and message, so a replaced VM (`guest_identity_mismatch`) or a
+/// changed runtime (`runtime_changed`) is not reported as a slow flush
+/// (HACK-2731).
+fn storage_barrier_outcome(result: Result<String, CandidateError>) -> Result<(), CandidateError> {
+    match result {
+        Ok(output) => storage_barrier_confirmed(&output),
+        Err(error) if STORAGE_BARRIER_UNCONFIRMED.contains(&error.code) => {
+            Err(storage_barrier_refused())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The exec errors of a barrier that did not confirm ([`storage_barrier_outcome`]).
+const STORAGE_BARRIER_UNCONFIRMED: [&str; 2] = ["agent_protocol_uncertain", "guest_command_failed"];
 
 fn storage_barrier_refused() -> CandidateError {
     error(
@@ -2818,6 +2847,31 @@ mod storage_barrier_tests {
             assert_eq!(refused.code, "graph_cleanup_uncertain");
             assert!(refused.message.contains("Run hack down again."));
         }
+    }
+
+    #[test]
+    fn only_an_unconfirmed_barrier_reports_the_barrier_refusal() {
+        // A deadline or lost reply, and a guest command that did not exit 0, did
+        // not confirm the flush: they report the barrier's own refusal.
+        for code in STORAGE_BARRIER_UNCONFIRMED {
+            let refused =
+                storage_barrier_outcome(Err(CandidateError::new(code, "failed"))).unwrap_err();
+            assert_eq!(refused.code, "graph_cleanup_uncertain");
+        }
+        // A replaced VM or a changed runtime keeps its own code and message.
+        let kept_codes = [
+            "guest_identity_mismatch",
+            "runtime_changed",
+            "provider_busy",
+        ];
+        for code in kept_codes {
+            let kept = storage_barrier_outcome(Err(CandidateError::new(code, "kept"))).unwrap_err();
+            assert_eq!(kept.code, code);
+            assert_eq!(kept.message, "kept");
+        }
+        storage_barrier_outcome(Ok(STORAGE_BARRIER_DONE.into())).unwrap();
+        let unconfirmed = storage_barrier_outcome(Ok(String::new())).unwrap_err();
+        assert_eq!(unconfirmed.code, "graph_cleanup_uncertain");
     }
 }
 

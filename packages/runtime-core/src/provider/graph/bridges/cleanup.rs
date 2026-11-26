@@ -406,6 +406,22 @@ fn pinned_predecessor_eligible(receipt: &Receipt) -> bool {
     })
 }
 
+/// Whether a cross-boot dead-owner recovery of `receipt` can prove its dead relay
+/// owner, as far as host files show (HACK-2731): the host bridge registry records
+/// a slot for the run, so its routes prove it, or the run's relay startup settled,
+/// which a selection without routes needs for either predecessor proof
+/// ([`select_predecessor`]). Presentation only (`graph foreground-owner`): read
+/// without a lease or the guest, an unreadable or foreign registry counts as no
+/// slot, and the recovery revalidates everything itself.
+pub(crate) fn relay_owner_provable(candidate: &Candidate, receipt: &Receipt) -> bool {
+    pinned_predecessor_eligible(receipt) || run_holds_slot(candidate, &receipt.run)
+}
+
+fn run_holds_slot(candidate: &Candidate, run: &str) -> bool {
+    state::read_bounded::<Store>(&root(candidate).join("state.json"), 65536)
+        .is_ok_and(|store| store.version == 1 && store.slots.values().any(|slot| slot.run == run))
+}
+
 fn predecessor_owner(
     receipt: &Receipt,
     previous: &str,

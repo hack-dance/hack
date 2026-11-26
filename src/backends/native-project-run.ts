@@ -460,7 +460,7 @@ async function verifyIgnore(ignore: string) {
 async function paths(
   opts: NativeProjectRunScope,
   create: boolean,
-  kind: "run" | "restart" | "down-hooks" = "run"
+  kind: "run" | "restart" | "down-hooks" | "lost-removal" = "run"
 ) {
   const identity = await scope(opts);
   const internal = join(identity.projectDir, ".internal");
@@ -2079,6 +2079,76 @@ export async function nativeProjectDownHookPaths(
   const p = await paths(opts, create, "down-hooks");
   return { root: p.root, file: p.file, lock: p.lock };
 }
+/** The run a lost-removal marker names. */
+export type NativeLostRemovalRun = Pick<
+  NativeProjectRun,
+  "run" | "owner" | "namespace" | "planId"
+>;
+
+function lostRemovalMarker(run: NativeLostRemovalRun): string {
+  return JSON.stringify({
+    version: 1,
+    lostRemoval: {
+      run: run.run,
+      owner: run.owner,
+      namespace: run.namespace,
+      planId: run.planId,
+    },
+  });
+}
+
+/**
+ * Note that a retained start found containers a lost VM brought back for
+ * `run` (HACK-2719): its receipt says they were removed, the guest lists them
+ * again, and only `hack down --recover` on a running pool removes them. The
+ * pool `hack up` booted may go idle and stop before the user runs that down;
+ * this marker lets the down start it again (HACK-2731). It is advisory: it
+ * grants nothing, the runtime revalidates the receipt and every container, and
+ * a stale marker costs one pool start, after which a verified stop clears it.
+ * A later marker replaces an earlier one.
+ */
+export async function recordNativeLostRemoval(
+  opts: NativeProjectRunScope & { readonly run: NativeLostRemovalRun }
+): Promise<void> {
+  const p = await paths(opts, true, "lost-removal");
+  const temp = join(p.root, `${randomUUID()}.tmp`);
+  try {
+    await write(temp, lostRemovalMarker(opts.run));
+    await rename(temp, p.file);
+    await sync(p.root);
+  } finally {
+    await unlink(temp).catch(() => undefined);
+  }
+}
+
+/** Whether a lost-removal marker names exactly `run`; unreadable is false. */
+export async function nativeLostRemovalRecorded(
+  opts: NativeProjectRunScope & { readonly run: NativeLostRemovalRun }
+): Promise<boolean> {
+  try {
+    const p = await paths(opts, false, "lost-removal");
+    return JSON.stringify(await read(p.file)) === lostRemovalMarker(opts.run);
+  } catch {
+    return false;
+  }
+}
+
+/** Remove the lost-removal marker once a down verified the run stopped. */
+export async function clearNativeLostRemoval(
+  opts: NativeProjectRunScope
+): Promise<void> {
+  const p = await paths(opts, false, "lost-removal");
+  try {
+    await unlink(p.file);
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  await sync(p.root);
+}
+
 /** Establish excluded metadata before source identity is reviewed. */
 export async function prepareNativeProjectRunStorage(
   opts: NativeProjectRunScope

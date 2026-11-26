@@ -48,7 +48,10 @@ import {
 import { nativeStartOutcomeUnknown } from "../lib/native-up-refusals.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
-import { nativeCrossBootRecoverable } from "./native-cross-boot-recovery.ts";
+import {
+  nativeCrossBootRecoverable,
+  parseNativeForegroundOwner,
+} from "./native-cross-boot-recovery.ts";
 import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
 import { emptyNativeDependencyPlanId } from "./native-dependency-plan.ts";
 import {
@@ -199,6 +202,7 @@ import { selectNativeRetainedImages } from "./native-project-retained-images.ts"
 import {
   confirmRunningRetainedGraph,
   preflightNativeRetainedStartup,
+  recordLostRemovalOf,
   reselectNativeRetainedStartup,
   runtimeUpJoiningChangedPool,
   verifyNativeResumedRetainedGraph,
@@ -2259,6 +2263,7 @@ async function selectNativeStartup(opts: {
       run: retained,
       invoke: opts.invoke,
       runtimePhase: preflight.runtimePhase,
+      onLostRemoval: recordLostRemovalOf(opts.scope, retained),
     });
   }
   const restore = opts.restore ?? retained ?? undefined;
@@ -3563,7 +3568,7 @@ async function startNativeProjectAttempt(
      * retained run, or a restart's old run). A fresh `up` has none until its
      * mapping is saved (HACK-2096).
      */
-    readonly onSelected?: (recorded: boolean, run?: string) => void;
+    readonly onSelected?: (recorded: boolean, run?: NativeProjectRun) => void;
     /**
      * The first service of this run is being requested from the runtime. A
      * run lost from here until `onReady` is retired across the boot by
@@ -3578,9 +3583,10 @@ async function startNativeProjectAttempt(
      * (HACK-2096). A fresh `up` that is ready but not yet mapped is still
      * `requested`: `down` would find no run. So is a started return before
      * its owner's ready line: it is mapped, but the runtime has not confirmed
-     * the start, and a loss there is HACK-2714's lost start.
+     * the start, and a loss there is HACK-2714's lost start. `run` is the
+     * saved mapping, for the lost-VM advice's selection (HACK-2731).
      */
-    readonly onReady?: () => void;
+    readonly onReady?: (run: NativeProjectRun) => void;
     /**
      * The graph is confirmed stopped (its receipt shows nothing running or
      * reserved). From then on the start no longer needs its VM, and the pool
@@ -3632,7 +3638,7 @@ async function startNativeProjectAttempt(
       endedBootOwnerWaitMs: deps.endedBootOwnerWaitMs,
     });
   requireActiveStartup(opts.signal);
-  graph.onSelected?.(restore !== undefined, restore?.run);
+  graph.onSelected?.(restore !== undefined, restore);
   const runtimeMetadata = nativeRuntimeMetadataSelected({
     selection: opts.runtimeMetadata,
     restore,
@@ -4036,6 +4042,9 @@ async function startNativeProjectAttempt(
       projectRoot: opts.scope.projectRoot,
       run: extension ? undefined : retained,
       invoke: deps.invoke,
+      onLostRemoval: retained
+        ? recordLostRemovalOf(opts.scope, retained)
+        : undefined,
     });
     const reviewedBranch = await prepareNativeReviewBranch({
       runtime: opts.runtime,
@@ -4550,7 +4559,7 @@ async function startNativeProjectAttempt(
               // The owner's ready line of a started return: confirmed and
               // mapped, so a loss from here is retired by `down --recover`.
               // This holds even when the graph owner settled meanwhile.
-              graph.onReady?.();
+              graph.onReady?.(mapped.persistedMapping);
               if (serveSettled || httpsClosing) {
                 return;
               }
@@ -4710,7 +4719,7 @@ async function startNativeProjectAttempt(
                 // `graph_foreground_owner_exited_unadmitted`, HACK-2714); it is
                 // ready only at the owner's ready line (`allReady`).
                 if (!returnAtStarted) {
-                  graph.onReady?.();
+                  graph.onReady?.(persistedMapping);
                 }
                 // The HTTPS owner admits a lease only under the provider lease, for a
                 // ready graph: a started return takes it at the owner's ready line.
@@ -5093,10 +5102,12 @@ export async function startNativeProject(
   // How far the start got, for the lost-VM message (HACK-2096): preparing
   // (with or without a run record for `down --recover`), services requested,
   // or ready and mapped.
-  // The recorded run this start resumes, for the lost-start check below.
-  let selectedRun: string | undefined = opts.restore?.run;
-  // A recorded run lost after its services were requested: whether the runtime
-  // would retire it, asked once the VM was lost (#1273 review).
+  // The recorded run this start resumes, or once ready its saved mapping, for
+  // the lost-start check below.
+  let selectedRun: NativeProjectRun | undefined = opts.restore;
+  // A recorded run lost after its services were requested, or a ready one:
+  // whether the runtime would retire it, asked once the VM was lost (#1273
+  // review, HACK-2731).
   const lostStage = () =>
     nativeLostStartRetirable({
       loss,
@@ -5189,7 +5200,8 @@ export async function startNativeProject(
             recorded: loss.stage === "preparing" && loss.recorded,
           };
         },
-        onReady: () => {
+        onReady: (run) => {
+          selectedRun = run;
           loss = { stage: "ready" };
         },
         onStopped: () => {
@@ -5285,52 +5297,67 @@ async function lostVmFailure(opts: {
 }
 
 /**
- * A recorded run lost after its services were requested is retirable by
- * `hack down --recover` only when the runtime's cross-boot recovery admits its
- * receipt, by the same predicate the down uses to start the pool
- * (`nativeCrossBootRecoverable`): a live phase (`started-observed` included: a
- * restore that started every service, real VM at d19aa31a), or a lost start
- * with `cross_boot_start` (settled relay and host dependency startup, no cleanup
- * marker). The selection reads host files only,
- * so it works with the VM gone. Any other stage is returned as it is; a failed
- * or older selection leaves the run not retirable, so no refused command is
- * named (#1273 review).
+ * Whether `hack down --recover` retires a run lost at `loss`, asked once the
+ * VM was lost, by the same predicate the down uses to start the pool
+ * (`nativeCrossBootRecoverable`) on the same parse of `graph foreground-owner`
+ * (`parseNativeForegroundOwner`). The selection reads host files only, so it
+ * works with the VM gone.
+ *
+ * - A recorded run lost after its services were requested: a live phase
+ *   (`started-observed` included: a restore that started every service, real
+ *   VM at d19aa31a) whose relay owner the runtime can prove, or a lost start
+ *   with `cross_boot_start` (settled relay and host dependency startup, no
+ *   cleanup marker). No run, or a failed or foreign selection, leaves it not
+ *   retirable, so no refused command is named (#1273 review).
+ * - A ready run: retirable unless the selection shows the runtime cannot prove
+ *   its relay owner (`cross_boot_relay` false: no published port and an
+ *   unsettled host relay startup, HACK-2731). An unknown run or a failed read
+ *   keeps the down advice it always had.
+ *
+ * Any other stage is returned as it is.
  */
 export async function nativeLostStartRetirable(opts: {
   readonly loss: NativeForegroundLossStage;
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
-  readonly run: string | undefined;
+  readonly run: Pick<NativeProjectRun, "run" | "owner"> | undefined;
   readonly invoke: typeof invokeNativeRuntime;
 }): Promise<NativeForegroundLossStage> {
-  if (opts.loss.stage !== "requested" || !opts.loss.recorded) {
+  const recorded =
+    opts.loss.stage === "ready" ||
+    (opts.loss.stage === "requested" && opts.loss.recorded);
+  if (!recorded) {
     return opts.loss;
   }
-  if (opts.run === undefined) {
-    return { ...opts.loss, retirable: false };
+  const run = opts.run;
+  const selection =
+    run === undefined
+      ? undefined
+      : parseNativeForegroundOwner(
+          await opts
+            .invoke({
+              runtime: opts.runtime,
+              cwd: opts.projectRoot,
+              args: [
+                "graph",
+                "foreground-owner",
+                "--run-id",
+                run.run,
+                "--json",
+              ],
+              timeoutMs: 5000,
+            })
+            .catch(() => undefined),
+          run
+        );
+  if (opts.loss.stage === "ready") {
+    return selection === undefined
+      ? opts.loss
+      : { ...opts.loss, retirable: nativeCrossBootRecoverable(selection) };
   }
-  const selected = await opts
-    .invoke({
-      runtime: opts.runtime,
-      cwd: opts.projectRoot,
-      args: ["graph", "foreground-owner", "--run-id", opts.run, "--json"],
-      timeoutMs: 5000,
-    })
-    .catch(() => undefined);
   return {
     ...opts.loss,
-    retirable:
-      isRecord(selected) &&
-      selected.run === opts.run &&
-      typeof selected.phase === "string" &&
-      nativeCrossBootRecoverable({
-        phase: selected.phase,
-        crossBootStart: selected.cross_boot_start === true,
-        liveOwnerRecovery:
-          typeof selected.live_owner_recovery === "string"
-            ? selected.live_owner_recovery
-            : null,
-      }),
+    retirable: selection !== undefined && nativeCrossBootRecoverable(selection),
   };
 }
 
@@ -5368,6 +5395,8 @@ export function restartPreflightLossStage(opts: {
 export async function routeNativeLostVm<T>(opts: {
   readonly home: string;
   readonly loss: NativeForegroundLossStage;
+  /** The loss stage as the runtime sees it once the VM was lost (HACK-2731). */
+  readonly resolveLoss?: () => Promise<NativeForegroundLossStage>;
   readonly signal?: AbortSignal;
   readonly run: () => Promise<T>;
   /** Test seams: the pool record read and the classification. */
@@ -5397,6 +5426,7 @@ export async function routeNativeLostVm<T>(opts: {
             home: opts.home,
             bootId,
             loss: opts.loss,
+            resolveLoss: opts.resolveLoss,
             classify: opts.classify,
           });
     throw lost ?? error;

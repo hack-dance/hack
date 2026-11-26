@@ -3917,11 +3917,12 @@ const contracts: readonly ModelContract[] = [
     // pinned-relay (HACK-2711), no-cross-boot (HACK-2714), failed-only
     // (01ab67fa: only a `failed-retained` lost start) and withhold-requested
     // (#1253's message on the fixed runtime) restore one rule of the runtime or
-    // message before the VM-loss recovery fix.
+    // message before the VM-loss recovery fix. live-relay (HACK-2731) is
+    // #1273's message once ready, which ignored an unsettled relay startup.
     // restart-recovers is the reachability witness of a recovered restart.
     name: "foreground-loss-recovery",
     module: "ForegroundLossRecovery",
-    states: 416,
+    states: 596,
     invariant: "NoRefusedAdvice",
     fields: ['outcome = "refused"', 'lostAt = "Preparing"'],
     alternativeWitnesses: [['outcome = "refused"', 'lostAt = "Requested"']],
@@ -4023,6 +4024,23 @@ const contracts: readonly ModelContract[] = [
             'msg = "downUp"',
             'lostAt = "GraphReady"',
           ],
+        ],
+      },
+      {
+        // HACK-2731 (#1273 review): the message once ready names
+        // `hack down --recover` for a run with no published port whose relay
+        // startup had not settled; the runtime refuses it
+        // (`relay_owner_refused`), since its no-route proof needs a settled
+        // relay.
+        name: "live-relay",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          "ports = FALSE",
+          "settled = FALSE",
+          'msg = "downUp"',
+          'lostAt = "GraphReady"',
         ],
       },
       {

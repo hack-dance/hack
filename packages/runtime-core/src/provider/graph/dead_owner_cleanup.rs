@@ -3116,4 +3116,65 @@ mod tests {
         fs::remove_file(fixture.0.join("restore-history.json")).unwrap();
         assert!(require_historical_recovery(&fixture.0, &current).is_err());
     }
+
+    #[test]
+    fn a_live_run_relay_owner_is_provable_by_its_bridge_slot_or_a_settled_relay() {
+        // HACK-2731: a run with no published port proves its dead relay owner only
+        // through a settled relay startup (`select_predecessor`), so
+        // `graph foreground-owner` reports `cross_boot_relay` false for one with
+        // neither a bridge slot nor a settled relay, and the CLI names no
+        // `hack down --recover` for it.
+        let fixture = super::super::retained_startup::tests::Fixture::new();
+        let provable =
+            |receipt: &Receipt| bridges::cleanup::relay_owner_provable(&fixture.candidate, receipt);
+        let mut receipt = fixture.receipt();
+        receipt.phase = "ready-observed".into();
+        assert!(!provable(&receipt));
+        receipt.relay_startup = Some(serde_json::from_value(json!({"control_only":true,"guest_root":null,"control_root":"/private/owned","control_generation":"a".repeat(32),"artifact":"e".repeat(64),"services":{}})).unwrap());
+        assert!(provable(&receipt));
+        let mut unsettled = receipt.clone();
+        unsettled.relay_startup.as_mut().unwrap().control_only = false;
+        assert!(!provable(&unsettled));
+        assert_eq!(
+            foreground_owner(&fixture.candidate, &fixture.run).unwrap()["cross_boot_relay"],
+            false
+        );
+        // A bridge slot of this run proves it through the run's routes, whatever
+        // the relay startup; another run's slot or a foreign registry does not.
+        let registry = fixture.candidate.state_root.join("run/bridge-assignments");
+        state::private_directory(&registry).unwrap();
+        let store = |run: &str, version: u32| {
+            json!({"version":version,"owner":"o","next_launch_serial":0,"slots":{"1":{
+                "reservation":"r","run":run,"service":"web","generation":"g",
+                "container_id":"c","network_id":"n","boot_id":"b","phase":"reserved"}}})
+        };
+        state::write(&registry.join("state.json"), &store(&receipt.run, 1)).unwrap();
+        assert!(provable(&unsettled));
+        assert_eq!(
+            foreground_owner(&fixture.candidate, &fixture.run).unwrap()["cross_boot_relay"],
+            true
+        );
+        state::write(&registry.join("state.json"), &store(&"f".repeat(32), 1)).unwrap();
+        assert!(!provable(&unsettled));
+        state::write(&registry.join("state.json"), &store(&receipt.run, 2)).unwrap();
+        assert!(!provable(&unsettled));
+    }
+
+    #[test]
+    fn foreground_owner_reports_an_unconfirmed_lost_removal_repair() {
+        // HACK-2731: read from the repair's host marker, so `hack down --recover`
+        // starts a stopped pool to finish it.
+        let fixture = super::super::retained_startup::tests::Fixture::new();
+        let pending = |fixture: &super::super::retained_startup::tests::Fixture| {
+            foreground_owner(&fixture.candidate, &fixture.run).unwrap()["lost_removal_pending"]
+                .clone()
+        };
+        assert_eq!(pending(&fixture), false);
+        fs::write(
+            fixture.graph().join(super::super::LOST_REMOVAL_REPAIR),
+            b"{}",
+        )
+        .unwrap();
+        assert_eq!(pending(&fixture), true);
+    }
 }

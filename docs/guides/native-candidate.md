@@ -2893,7 +2893,21 @@ list the run's containers again, stopped. `hack up` then refuses with nothing
 started and data kept, and says to run `hack down --recover`, which removes them
 again on the running pool, then `hack up`. An earlier `hack down --recover` of that
 kind that ended before it confirmed the removal is durable makes `hack up` refuse at
-once (`graph_lost_removal_pending`) and name the same two commands.
+once (`graph_lost_removal_pending`) and name the same two commands. The pool that
+`hack up` booted may go idle and stop before you run that down. `hack down
+--recover` then starts the pool again for the repair (HACK-2731): the refused
+`hack up` leaves a marker for that run beside its run mapping, and the runtime
+reports an unconfirmed repair from its own marker. Earlier versions answered that
+the runtime was not running, and the next `hack up` printed the same refusal
+again. The marker grants nothing: the runtime still checks the receipt and every
+container, and a verified stop removes it. A plain `hack down` does not start the
+pool for it.
+
+A cleanup that removed containers or networks reports a storage flush that did not
+confirm, by its deadline or with a failed guest command, as `graph_cleanup_uncertain`
+("Run hack down again"). Any other failure keeps its own code: a VM that was
+replaced meanwhile is `guest_identity_mismatch` and a changed runtime is
+`runtime_changed` (HACK-2731), not a slow flush.
 
 A foreground `hack up` (or `hack restart`) watches its pool the same way
 (HACK-2096). When its provider VM dies or the pool stops under it, it prints which
@@ -2906,6 +2920,11 @@ code 1, and what to run next, which depends on how far the start got:
   pool), then `hack up`, which starts it again. This holds with or without a
   published port: a run with no port has no bridge routes, and the runtime
   then proves its dead owner's relay by that relay's clean exit (HACK-2711).
+  That proof needs a settled relay startup: a run with no published port whose
+  host dependency services never released their startup is refused
+  (`relay_owner_refused`). The start asks the runtime once the VM is gone, and
+  for such a run it names no command and says to keep the native home for
+  inspection (HACK-2731); `hack down --recover` does not start the pool for it.
 - Before any service was requested (while it resolved, reviewed, built or
   pulled images, or selected the restore): for a run with a record (a resumed
   stopped run, or a restart's old run), the same `hack down --recover`, then

@@ -224,6 +224,62 @@ test("a resumed or running retained graph with containers a lost VM brought back
   );
 });
 
+// HACK-2731: the refusal first records the lost removal, so `hack down
+// --recover` starts the pool for the repair even after the pool this start
+// booted went idle. Only that shape records it, and a failed record still
+// refuses with the same message.
+test("only the lost-removal refusal records the lost removal for hack down --recover", async () => {
+  const recorded: string[] = [];
+  const onLostRemoval = async () => {
+    recorded.push("lost-removal");
+  };
+  await expectClosedRefusal(
+    verifyNativeResumedRetainedGraph({
+      runtime,
+      projectRoot: scope.projectRoot,
+      run,
+      invoke: async () => lostRemovalGraph(),
+      onLostRemoval,
+    }),
+    NATIVE_RETAINED_LOST_REMOVAL
+  );
+  await expectClosedRefusal(
+    confirmRunningRetainedGraph({
+      runtime,
+      projectRoot: scope.projectRoot,
+      run,
+      invoke: async () => lostRemovalGraph(),
+      runtimePhase: "running",
+      onLostRemoval,
+    }),
+    NATIVE_RETAINED_LOST_REMOVAL
+  );
+  expect(recorded).toEqual(["lost-removal", "lost-removal"]);
+  await expectClosedRefusal(
+    verifyNativeResumedRetainedGraph({
+      runtime,
+      projectRoot: scope.projectRoot,
+      run,
+      invoke: async () => lostRemovalGraph("9".repeat(32)),
+      onLostRemoval,
+    }),
+    "Native resumed retained graph differs; no graph restore was requested."
+  );
+  expect(recorded).toHaveLength(2);
+  await expectClosedRefusal(
+    verifyNativeResumedRetainedGraph({
+      runtime,
+      projectRoot: scope.projectRoot,
+      run,
+      invoke: async () => lostRemovalGraph(),
+      onLostRemoval: async () => {
+        throw new Error("unwritable");
+      },
+    }),
+    NATIVE_RETAINED_LOST_REMOVAL
+  );
+});
+
 test("a changed pool is retried only for a retained start, once (HACK-2732)", async () => {
   const changed = () =>
     new NativeRuntimeRequestError({

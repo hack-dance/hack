@@ -16,7 +16,8 @@ stateDiagram-v2
   state advice <<choice>>
   Lost --> advice
   advice --> Inspect : [fresh up, Requested]
-  advice --> Down : [run recorded]
+  advice --> Inspect : [relay unproven]
+  advice --> Down : [recorded, relay proven]
   advice --> Up : [fresh up, Preparing]
   Down --> Up : down --recover
   Up --> Recovered : hack up
@@ -40,8 +41,10 @@ stateDiagram-v2
   end note
   note left of Inspect
     A fresh up has no record
-    for down to retire yet:
-    none named.
+    for down to retire yet, and
+    a run with no port whose
+    relay never settled has no
+    owner proof: none named.
     INV NoNeedlessWithholding
   end note
   note right of Down

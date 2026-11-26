@@ -883,3 +883,108 @@ macTest(
   },
   CASE_TIMEOUT_MS
 );
+
+// HACK-2715 review round 5: a graph group member still present when the hook
+// owner ends (or a reused group) makes `graphSettled` refuse. That refusal must
+// not unwind and release the admission lock: the owner still ends as a crash
+// would, and the recovery's own check of the graph group refuses until the
+// group is gone, before it retires anything.
+macTest(
+  "HACK-2715 review round 5: an unsettled graph group still ends the pool-ended hook owner as a crash would, and its recovery waits for the group",
+  async () => {
+    const selected = await fixture({
+      finiteHooks: true,
+      poolEndsAfterReady: true,
+      poolEndLeavesGroupMember: true,
+    });
+    const runs = join(
+      selected.scope.projectDir,
+      ".internal",
+      "native-authored-runs"
+    );
+    const { holdDirectory } = await import(
+      "../src/lib/native-compose-private-state.ts"
+    );
+    const { retireNativeAuthoredRecoveredHooks } = await import(
+      "../src/backends/native-authored-hook-journal.ts"
+    );
+    const { createHash } = await import("node:crypto");
+    const memberPid = async () =>
+      Number(await readFile(join(selected.root, "group-member.pid"), "utf8"));
+    const ended = new Error("ended as a crash would");
+    let kept: string[] | undefined;
+    let refusedWhileMember = false;
+    let clearedAfterMember = false;
+    try {
+      const result = await serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
+        onReady: () => {
+          void writeFile(join(selected.root, "pool-ended"), "ended", {
+            mode: 0o600,
+          });
+          return undefined;
+        },
+        exitOnPoolEnd: async () => {
+          kept = (await readdir(runs)).sort();
+          const root = await holdDirectory(runs, true);
+          const store = {
+            root,
+            held: [root],
+            key: createHash("sha256")
+              .update(JSON.stringify(selected.scope.branch))
+              .digest("hex"),
+            projectRoot: selected.scope.projectRoot,
+            branch: selected.scope.branch,
+            check: async () => undefined,
+          };
+          try {
+            refusedWhileMember = await retireNativeAuthoredRecoveredHooks(
+              store,
+              run,
+              true
+            ).then(
+              () => false,
+              () => true
+            );
+            process.kill(await memberPid(), "SIGKILL");
+            const deadline = performance.now() + 5000;
+            while (performance.now() < deadline) {
+              try {
+                process.kill(await memberPid(), 0);
+                await Bun.sleep(20);
+              } catch {
+                break;
+              }
+            }
+            clearedAfterMember = await retireNativeAuthoredRecoveredHooks(
+              store,
+              run,
+              true
+            ).then(
+              () => true,
+              () => false
+            );
+          } finally {
+            await root.file.close();
+          }
+          throw ended;
+        },
+      }).catch((error: unknown) => error);
+      expect(result).toBeInstanceOf(NativeAuthoredProjectStartError);
+    } finally {
+      await memberPid()
+        .then((pid) => process.kill(pid, "SIGKILL"))
+        .catch(() => undefined);
+    }
+    expect(kept).toBeDefined();
+    const names = kept ?? [];
+    for (const suffix of [".admission.lock", ".start.json", ".hooks.json"]) {
+      expect(names.some((name) => name.endsWith(suffix))).toBe(true);
+    }
+    expect(refusedWhileMember).toBe(true);
+    expect(clearedAfterMember).toBe(true);
+  },
+  CASE_TIMEOUT_MS
+);

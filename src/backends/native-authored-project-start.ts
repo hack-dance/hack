@@ -850,7 +850,14 @@ async function runPreparedLifecycle(ctx: {
     // ended pool: a requested stop already ran `down.before`, `down.after`
     // follows only a proven removal, and the recovery after Removed retires its
     // host processes and hook journal as after any crash.
-    ctx.hookOwner?.graphSettled();
+    try {
+      ctx.hookOwner?.graphSettled();
+    } catch {
+      // Review round 5: a graph group member still present (or a reused group)
+      // must not unwind and release the admission lock. The recovery proves the
+      // group absent itself (`recoverGraphChild` → `requireAbsentGroup`) before
+      // it retires anything.
+    }
     await (ctx.options.exitOnPoolEnd ?? exitAsCrash)();
   }
   ctx.hookOwner?.graphSettled();

@@ -81,6 +81,13 @@ fn exited_unconfirmed_start(candidate: &Candidate, run: &str) -> bool {
         .is_some_and(|(receipt, _)| super::dead_owner_cleanup::unconfirmed_start(&receipt))
 }
 
+fn lost_removal_pending() -> CandidateError {
+    error(
+        "graph_lost_removal_pending",
+        "An earlier hack down --recover removed containers a lost VM had brought back and ended before it confirmed that the removal reached the guest disk, so this stop is not durable yet. Data is retained. Run hack down --recover to finish it, then hack up.",
+    )
+}
+
 fn no_file(root: &Path, name: &str) -> Result<(), CandidateError> {
     match fs::symlink_metadata(root.join(name)) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -98,7 +105,7 @@ pub(in crate::provider::graph) fn checked(
     // A lost-removal repair whose storage barrier has not confirmed (HACK-2719):
     // `hack down --recover` finishes it before the stop counts as retained.
     if let Ok(root) = directory(candidate, run) {
-        no_file(&root, super::LOST_REMOVAL_REPAIR)?;
+        no_file(&root, super::LOST_REMOVAL_REPAIR).map_err(|_| lost_removal_pending())?;
     }
     let owner = Owner::load(candidate)?;
     if owner.phase == "failed-boot-stopped" {
@@ -796,6 +803,23 @@ pub(in crate::provider::graph) mod tests {
         assert_eq!(error.code, "graph_foreground_owner_exited");
         assert!(error.message.contains("hack down --recover"));
         assert_eq!(state(&fixture), before);
+    }
+
+    #[test]
+    fn an_unfinished_lost_removal_repair_refuses_up_naming_down_recover() {
+        // Round-3 review of #1273: its own code and the command that finishes it.
+        let fixture = Fixture::new();
+        state::write(
+            &fixture.graph().join(super::super::LOST_REMOVAL_REPAIR),
+            &json!({"version":1}),
+        )
+        .unwrap();
+        let error = preflight(&fixture.candidate, &fixture.run).unwrap_err();
+        assert_eq!(error.code, "graph_lost_removal_pending");
+        assert!(error.message.contains("hack down --recover"));
+        assert!(error.message.contains("then hack up"));
+        std::fs::remove_file(fixture.graph().join(super::super::LOST_REMOVAL_REPAIR)).unwrap();
+        preflight(&fixture.candidate, &fixture.run).unwrap();
     }
 
     #[test]

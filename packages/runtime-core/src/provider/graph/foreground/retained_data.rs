@@ -191,12 +191,14 @@ pub(super) fn repair_lost_removals(
     guard.verify()?;
     let engine = Engine::connect_cleanup(candidate)?;
     let (receipt, root) = graph::load(candidate, &engine, run)?;
+    retain_interrupted_marker(&root)?;
     for name in [
         "state.pending",
         "retired-data-removal.pending",
         "retired-data-removal.json",
         "live-owner-cleanup.pending",
         "dead-owner-cleanup.pending",
+        LOST_REMOVAL_REPAIR_PENDING,
     ] {
         no_pending(&root, name).map_err(|_| lost_removal_refused())?;
     }
@@ -204,21 +206,9 @@ pub(super) fn repair_lost_removals(
         return Err(lost_removal_refused());
     }
     let marker = root.join(graph::LOST_REMOVAL_REPAIR);
-    let pending = match std::fs::symlink_metadata(&marker) {
-        Ok(metadata) if metadata.is_file() => {
-            // Only an exact marker of this run's receipt resumes; anything else is
-            // retained as evidence.
-            let recorded: LostRemovalRepair =
-                state::read_bounded(&marker, 4096).map_err(|_| lost_removal_refused())?;
-            if recorded != LostRemovalRepair::of(&receipt)? {
-                return Err(lost_removal_refused());
-            }
-            true
-        }
-        Ok(_) => return Err(lost_removal_refused()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(_) => return Err(lost_removal_refused()),
-    };
+    // Any marker under this stopped receipt means a barrier is owed: this full
+    // repair plus its barrier supersedes it, whichever receipt it names.
+    let pending = lost_removal_marker(&root)?;
     let mut present = Vec::new();
     for resource in receipt
         .resources
@@ -235,7 +225,7 @@ pub(super) fn repair_lost_removals(
     }
     // Containers first: a network is removed only once nothing is attached to it.
     present.sort_by_key(|resource| resource.kind != Kind::Container);
-    if !present.is_empty() && !pending {
+    if !present.is_empty() {
         // Durable before the first removal: a repair that ends before its barrier
         // confirms leaves this marker, so the stop is not accepted until a later
         // repair has flushed the guest disk, even when the guest lists nothing.
@@ -247,15 +237,50 @@ pub(super) fn repair_lost_removals(
     if pending || !present.is_empty() {
         graph::storage_barrier(&engine)?;
         guard.verify()?;
-        std::fs::remove_file(&marker).map_err(state::io)?;
-        std::fs::File::open(&root)
-            .and_then(|directory| directory.sync_all())
-            .map_err(state::io)?;
+        clear_lost_removal_marker(&root)?;
     }
     guard.verify()?;
     Ok(
         json!({"ok":true,"run":run,"phase":receipt.phase,"receipt":receipt,"removed_again":present.len()}),
     )
+}
+
+const LOST_REMOVAL_REPAIR_PENDING: &str = "lost-removal-repair.pending";
+
+/// A marker write interrupted before its rename: it comes before every removal,
+/// so its leftover temporary proves no DELETE ran. Its bytes are kept as evidence
+/// (never read as a marker) and the next write starts afresh.
+fn retain_interrupted_marker(root: &Path) -> Result<(), CandidateError> {
+    graph::journal::retain_file(
+        root,
+        LOST_REMOVAL_REPAIR_PENDING,
+        "lost-removal-repair-recovery",
+        4096,
+    )
+    .map(|_| ())
+    .map_err(|_| lost_removal_refused())
+}
+
+/// Whether a lost-removal marker is present. Only a regular file counts; anything
+/// else at that name refuses.
+fn lost_removal_marker(root: &Path) -> Result<bool, CandidateError> {
+    match std::fs::symlink_metadata(root.join(graph::LOST_REMOVAL_REPAIR)) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        _ => Err(lost_removal_refused()),
+    }
+}
+
+/// Remove the marker once a barrier has confirmed every removal it stood for.
+fn clear_lost_removal_marker(root: &Path) -> Result<(), CandidateError> {
+    match std::fs::remove_file(root.join(graph::LOST_REMOVAL_REPAIR)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(state::io(error)),
+    }
+    std::fs::File::open(root)
+        .and_then(|directory| directory.sync_all())
+        .map_err(state::io)
 }
 
 /// The repair-in-progress marker: the exact receipt (by digest) it repairs.
@@ -458,6 +483,9 @@ fn remove_guarded(candidate: &Candidate, run: &str, guard: Guard) -> Result<Valu
         )?;
     }
     verify_guard()?;
+    // An unfinished lost-removal repair (HACK-2719) is superseded: data removal
+    // removes every resource itself and flushes the guest disk before it commits.
+    retain_interrupted_marker(&root)?;
     let cleaned = graph::cleanup_owned_fenced(
         candidate,
         &engine,
@@ -468,6 +496,7 @@ fn remove_guarded(candidate: &Candidate, run: &str, guard: Guard) -> Result<Valu
         verify_guard,
     )?;
     verify_guard()?;
+    clear_lost_removal_marker(&root)?;
     graph::explicit_cleanup_done(&root);
     Ok(json!({"ok":true,"run":run,"phase":cleaned.phase,"receipt":cleaned}))
 }
@@ -478,6 +507,67 @@ mod tests {
     fn receipt() -> Receipt {
         serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"stopped-data-retained","readiness":{},"resources":{},"relay_startup":{"control_only":true,"guest_root":null,"control_root":"/private/owned","artifact":"e".repeat(64),"services":{}},"relay_cleanup":{"version":1,"runtime":vec![1;16],"boot":vec![2;16],"operation":vec![3;16],"effect":vec![4;32],"control_root":"/private/owned","phase":"confirmed"}})).unwrap()
     }
+    #[test]
+    fn an_interrupted_marker_write_never_wedges_the_repair() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        // Round-3 review of #1273: `state::write` creates the marker's `.pending`
+        // with `create_new`. One left by a repair that died before the rename
+        // proves no DELETE ran (the write comes first): it is kept as evidence
+        // and the next marker write succeeds instead of failing with EEXIST.
+        let fixture = graph::tests::Fixture::new();
+        let root = &fixture.0;
+        let pending = root.join(LOST_REMOVAL_REPAIR_PENDING);
+        let marker = root.join(graph::LOST_REMOVAL_REPAIR);
+        std::fs::write(&pending, b"{\"version\":1,").unwrap();
+        std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(state::write(&marker, &LostRemovalRepair::of(&receipt()).unwrap()).is_err());
+        retain_interrupted_marker(root).unwrap();
+        assert!(!pending.exists());
+        assert!(
+            std::fs::read_dir(root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("lost-removal-repair-recovery"))
+        );
+        state::write(&marker, &LostRemovalRepair::of(&receipt()).unwrap()).unwrap();
+        // Nothing left over is a no-op; an unsafe leftover refuses plainly.
+        retain_interrupted_marker(root).unwrap();
+        symlink(&marker, &pending).unwrap();
+        assert_eq!(
+            retain_interrupted_marker(root).unwrap_err().code,
+            "graph_lost_removal"
+        );
+    }
+
+    #[test]
+    fn any_marker_under_a_stopped_receipt_is_owed_a_barrier_and_then_cleared() {
+        // Round-3 review of #1273: a stale marker (naming an earlier receipt) is
+        // superseded by the full repair and its barrier, never a refusal.
+        let fixture = graph::tests::Fixture::new();
+        let root = &fixture.0;
+        assert!(!lost_removal_marker(root).unwrap());
+        clear_lost_removal_marker(root).unwrap();
+        let mut earlier = receipt();
+        earlier.namespace = "f".repeat(64);
+        state::write(
+            &root.join(graph::LOST_REMOVAL_REPAIR),
+            &LostRemovalRepair::of(&earlier).unwrap(),
+        )
+        .unwrap();
+        assert!(lost_removal_marker(root).unwrap());
+        clear_lost_removal_marker(root).unwrap();
+        assert!(!lost_removal_marker(root).unwrap());
+        // Anything but a regular file at the marker's name refuses.
+        std::fs::create_dir(root.join(graph::LOST_REMOVAL_REPAIR)).unwrap();
+        assert_eq!(
+            lost_removal_marker(root).unwrap_err().code,
+            "graph_lost_removal"
+        );
+    }
+
     #[test]
     fn an_unfinished_lost_removal_repair_resumes_only_for_its_own_receipt() {
         // Codex review of #1273: the marker binds the exact receipt it repairs, so

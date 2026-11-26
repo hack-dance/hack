@@ -22,6 +22,12 @@ type ModelContract = {
     readonly invariant?: string;
     readonly fields?: WitnessFields;
     readonly alternativeWitnesses?: readonly WitnessFields[];
+    /**
+     * TLC workers for this control (default 2). One worker makes breadth-first
+     * search report the shortest violation, for a control whose invariant other
+     * longer traces also break.
+     */
+    readonly workers?: 1;
   }[];
 };
 
@@ -2145,16 +2151,15 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NoAcquisitionAfterCleanup",
         fields: ['fin = "confirmed"', 'https = "pending"'],
-        // TLC runs two workers, so on a loaded runner the first violation it
-        // reports need not be the shortest. A cleanup that starts once the
-        // acquisition has moved on (`CleanupStart`) leaves `fin = "unconfirmed"`
-        // with `authority` or `verify` still in flight (hosted CI, PR #1273).
         alternativeWitnesses: [
           ['fin = "confirmed"', 'https = "authority"'],
           ['fin = "confirmed"', 'https = "verify"'],
-          ['fin = "unconfirmed"', 'https = "authority"'],
-          ['fin = "unconfirmed"', 'https = "verify"'],
         ],
+        // With two workers a loaded runner may report a longer violation first:
+        // a cleanup that starts once the acquisition moved on leaves
+        // `fin = "unconfirmed"`, the bug cleanup-before-settled isolates (hosted
+        // CI, PR #1273). One worker reports this control's own shortest trace.
+        workers: 1,
       },
       {
         // The waits stay bounded: a holder that outlasts the read's wait

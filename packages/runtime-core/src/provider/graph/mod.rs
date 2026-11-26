@@ -2116,9 +2116,11 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
         "live_owner_recovery": resumable,
         "failed_start_recoverable": !running && live_owner_cleanup::failed_start_recoverable(&root, &receipt),
         // Whether the cross-boot dead-owner recovery admits this receipt as a start
-        // lost before ready (HACK-2714), so a caller starts a stopped pool only for
-        // a recovery that can use it. Selection only, like the fields around it.
-        "cross_boot_start": !running && dead_owner_cleanup::unconfirmed_start(&receipt),
+        // lost before ready (HACK-2714), so a caller starts a stopped pool, or names
+        // `hack down --recover`, only for a recovery that can use it. It reads the
+        // receipt alone: a caller also requires the owner exited (`foreground`).
+        // Selection only, like the fields around it.
+        "cross_boot_start": dead_owner_cleanup::unconfirmed_start(&receipt),
         "dead_owner_recovery": predecessor,
         "dead_owner_recovery_complete": predecessor_complete,
         "dead_owner_recovery_error": predecessor_error,

@@ -63,6 +63,7 @@ import {
   NativeForegroundVmLostError,
   NativeStartupCanceledError,
   type NativeStartupProgress,
+  nativeLostStartRetirable,
   nativeReadinessArgs,
   nativeReadySummary,
   nativeStoppedNotice,
@@ -8682,6 +8683,72 @@ test("a failed exited-provider recovery says so, then keeps the original refusal
   expect(
     notices.filter((line) => line === NATIVE_EXITED_RUNTIME_RECOVERY_FAILED)
   ).toHaveLength(1);
+});
+
+test.each([
+  { name: "settled", selected: { cross_boot_start: true }, retirable: true },
+  // #1273 review: dependency services still `Prepared`.
+  {
+    name: "unsettled",
+    selected: { cross_boot_start: false },
+    retirable: false,
+  },
+  // An older runtime that does not report it, or a failed selection.
+  { name: "older runtime", selected: {}, retirable: false },
+  { name: "failed selection", selected: undefined, retirable: false },
+])("a recorded run lost before ready is retirable only as the runtime admits it ($name)", async ({
+  selected,
+  retirable,
+}) => {
+  const runId = "1".repeat(32);
+  const calls: string[][] = [];
+  const loss = await nativeLostStartRetirable({
+    loss: { stage: "requested", recorded: true },
+    runtime: { home: "/unused" } as Parameters<
+      typeof nativeLostStartRetirable
+    >[0]["runtime"],
+    projectRoot: "/unused",
+    run: runId,
+    invoke: (async (request: { args: readonly string[] }) => {
+      calls.push([...request.args]);
+      if (selected === undefined) {
+        throw new Error("selection failed");
+      }
+      return { version: 1, run: runId, ...selected };
+    }) as unknown as Parameters<typeof nativeLostStartRetirable>[0]["invoke"],
+  });
+  expect(loss).toEqual({ stage: "requested", recorded: true, retirable });
+  expect(calls).toEqual([
+    ["graph", "foreground-owner", "--run-id", runId, "--json"],
+  ]);
+});
+
+test("only a recorded requested loss asks the runtime", async () => {
+  const invoke = (async () => {
+    throw new Error("not asked");
+  }) as unknown as Parameters<typeof nativeLostStartRetirable>[0]["invoke"];
+  const base = {
+    runtime: { home: "/unused" } as Parameters<
+      typeof nativeLostStartRetirable
+    >[0]["runtime"],
+    projectRoot: "/unused",
+    run: "1".repeat(32),
+    invoke,
+  };
+  for (const loss of [
+    { stage: "ready" } as const,
+    { stage: "preparing", recorded: true } as const,
+    { stage: "requested", recorded: false } as const,
+  ]) {
+    expect(await nativeLostStartRetirable({ ...base, loss })).toEqual(loss);
+  }
+  expect(
+    await nativeLostStartRetirable({
+      ...base,
+      run: undefined,
+      loss: { stage: "requested", recorded: true },
+    })
+  ).toEqual({ stage: "requested", recorded: true, retirable: false });
 });
 
 test("a restart preflight's loss stage follows the restart it retries", () => {

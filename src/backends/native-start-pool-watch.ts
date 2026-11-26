@@ -71,7 +71,17 @@ export type NativeStartPoolEnd = {
  */
 export type NativeForegroundLossStage =
   | { readonly stage: "preparing"; readonly recorded: boolean }
-  | { readonly stage: "requested"; readonly recorded: boolean }
+  | {
+      readonly stage: "requested";
+      readonly recorded: boolean;
+      /**
+       * The runtime's cross-boot recovery admits the run's receipt as a lost
+       * start (`graph foreground-owner` `cross_boot_start`: settled relay and
+       * dependency startup, no cleanup marker), read once the VM was lost.
+       * Unknown or false names no command.
+       */
+      readonly retirable?: boolean;
+    }
   | { readonly stage: "ready" };
 
 /**
@@ -89,14 +99,17 @@ export type NativeForegroundLossStage =
  *   whether or not this start was a restart's replacement.
  * - `preparing` without a run record (a fresh `up`): nothing was requested
  *   and nothing is recorded, so `hack up` alone starts it again.
- * - `requested` with a run record: `hack down --recover`, then `hack up`
- *   (HACK-2714). The down starts the pool, and the runtime's cross-boot
- *   dead-owner recovery retires the start its owner left: `failed-retained`
- *   after its own unwind, or the admitted restore's `restoring` when it died
- *   without one (killed, or taken down with this CLI's exit), data kept.
- * - `requested` without one (a fresh `up`, or a restart retry whose old run's
- *   stop was never confirmed): the down finds no run it can retire, so the
- *   message names no command and says to keep the native home for inspection.
+ * - `requested` with a run record the runtime can retire (`retirable`):
+ *   `hack down --recover`, then `hack up` (HACK-2714). The down starts the
+ *   pool, and the runtime's cross-boot dead-owner recovery retires the start
+ *   its owner left: `failed-retained` after its own unwind, or the admitted
+ *   restore's `restoring` when it died without one (killed, or taken down with
+ *   this CLI's exit), data kept.
+ * - `requested` otherwise: a fresh `up` or a restart retry whose old run's
+ *   stop was never confirmed (the down finds no run it can retire), or a run
+ *   whose host dependency startup had not settled (#1273 review: the runtime
+ *   refuses it). The message names no command and says to keep the native home
+ *   for inspection.
  */
 export function nativeForegroundPoolEndMessage(
   end: NativeStartPoolEnd,
@@ -116,7 +129,7 @@ export function nativeForegroundPoolEndMessage(
   return [
     lost,
     "This foreground start ends now with exit code 1; the run's data is kept.",
-    loss.stage === "requested" && !loss.recorded
+    loss.stage === "requested" && !(loss.recorded && loss.retirable === true)
       ? UNRECORDED_REQUESTED_ADVICE
       : LOSS_ADVICE[loss.stage],
   ].join("\n");

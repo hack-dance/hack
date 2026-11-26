@@ -350,7 +350,7 @@ test("a recorded run lost after its services were requested and before ready nam
   // with its data kept, so `hack up` then starts it again.
   const message = nativeForegroundPoolEndMessage(
     { bootId: boot, providerPid: 4242 },
-    { stage: "requested", recorded: true }
+    { stage: "requested", recorded: true, retirable: true }
   );
   expect(message).toContain("pid 4242");
   expect(message).toContain("exit code 1");
@@ -361,6 +361,21 @@ test("a recorded run lost after its services were requested and before ready nam
   );
   expect(message).not.toContain("hack restart");
   expect(message).not.toContain("Keep this native home unchanged");
+});
+
+test("a recorded run lost before its host dependency startup settled names no command", () => {
+  // #1273 review: a resumed run whose dependency services were still `Prepared`
+  // is refused by the runtime's recovery (`cross_boot_start` false), so the
+  // message must not promise down --recover; unknown counts as not retirable.
+  for (const retirable of [false, undefined]) {
+    const message = nativeForegroundPoolEndMessage(
+      { bootId: boot, providerPid: 4242 },
+      { stage: "requested", recorded: true, retirable }
+    );
+    expect(message).not.toContain("hack down");
+    expect(message).not.toContain("hack up");
+    expect(message).toContain("Keep this native home unchanged");
+  }
 });
 
 test("a fresh run lost after its services were requested and before ready names no command", () => {

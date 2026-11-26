@@ -2879,8 +2879,11 @@ code 1, and what to run next, which depends on how far the start got:
   unwind runs, or `preparing` or `restoring` when it dies without one (killed,
   or taken down with the CLI), and the down starts the pool and retires that
   start across the boot with its data kept. The runtime admits it only with a
-  settled relay startup and no cleanup marker, and the down starts the pool only
-  then; a restart in progress (`restarting`) has no such retirement yet. A fresh `hack up` has no record yet for the down to
+  settled relay and host dependency startup and no cleanup marker, and the down
+  starts the pool only then. The lost start asks the runtime for that once the VM
+  is gone, and names `hack down --recover` only when it holds; otherwise, as for
+  a restart in progress (`restarting`), which has no such retirement yet, it
+  names no command. A fresh `hack up` has no record yet for the down to
   find, so the message names no command and says to keep the native home for
   inspection. A plain `hack up` that returned at "Project started" is in this
   stage until its services report ready: the runtime has not confirmed that

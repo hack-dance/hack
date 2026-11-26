@@ -5,6 +5,10 @@ import {
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
+import {
+  NATIVE_RECOVERABLE_LIVE_PHASES,
+  nativeCrossBootRecoverable,
+} from "./native-cross-boot-recovery.ts";
 import { awaitNativeEndedBootOwner } from "./native-ended-boot-owner.ts";
 import {
   nativeFrontendGone,
@@ -136,34 +140,6 @@ const RECEIPT_SHA = /^[a-f0-9]{64}$/;
 const RECOVERY_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 const FOREGROUND_STATES = new Set(["absent", "running", "exited", "uncertain"]);
-/**
- * Graph phases in which an exited foreground owner is recovered: ready, or every
- * service started with some goal still unmet (`started-observed`, written only
- * under `--report-started`). Only a run with a saved mapping gets here. A fresh
- * start saves its mapping only at ready today, so in the started phase this is a
- * restored run; PR B saves the mapping at started.
- */
-const RECOVERABLE_LIVE_PHASES: ReadonlySet<string> = new Set([
-  "ready-observed",
-  "started-observed",
-  "reconciled-cleanup-only",
-]);
-
-/**
- * Phases of a start lost before it was ready that the runtime's cross-boot
- * dead-owner recovery also retires once the pool is started again (HACK-2714):
- * the owner's own unwind leaves `failed-retained`; an owner that died without
- * unwinding leaves its start's `preparing` or (an admitted restore) `restoring`.
- * A restart in progress (`restarting`) is not one. The runtime also requires a
- * settled relay startup and no cleanup marker, which `graph foreground-owner`
- * reports as `cross_boot_start`.
- */
-const CROSS_BOOT_START_PHASES: ReadonlySet<string> = new Set([
-  "failed-retained",
-  "preparing",
-  "restoring",
-]);
-
 /** What `graph foreground-owner` selected; it grants no recovery authority. */
 type ForegroundOwnerSelection = {
   readonly phase: string;
@@ -613,7 +589,7 @@ function requireRecoverableOwner(
   }
   if (
     selection.foreground === "exited" &&
-    !RECOVERABLE_LIVE_PHASES.has(selection.phase) &&
+    !NATIVE_RECOVERABLE_LIVE_PHASES.has(selection.phase) &&
     !selection.failedStartRecoverable
   ) {
     throw exitedOwnerRefused(selection.phase, verb);
@@ -868,9 +844,7 @@ async function deadOwnerOfLiveRun(opts: {
     }
     if (
       selection.foreground === "exited" &&
-      (RECOVERABLE_LIVE_PHASES.has(selection.phase) ||
-        (CROSS_BOOT_START_PHASES.has(selection.phase) &&
-          selection.crossBootStart) ||
+      (nativeCrossBootRecoverable(selection) ||
         selection.deadOwnerRecovery !== null)
     ) {
       return true;

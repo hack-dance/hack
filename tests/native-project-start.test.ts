@@ -8686,15 +8686,45 @@ test("a failed exited-provider recovery says so, then keeps the original refusal
 });
 
 test.each([
-  { name: "settled", selected: { cross_boot_start: true }, retirable: true },
+  {
+    name: "settled",
+    selected: { phase: "failed-retained", cross_boot_start: true },
+    retirable: true,
+  },
   // #1273 review: dependency services still `Prepared`.
   {
     name: "unsettled",
-    selected: { cross_boot_start: false },
+    selected: { phase: "failed-retained", cross_boot_start: false },
+    retirable: false,
+  },
+  // Real VM at d19aa31a (the `restoring` variant: graph owner and provider
+  // killed together): the restore had started every service, so the receipt
+  // was `started-observed` (`started_from: restoring`), a live phase the
+  // recovery admits, while `cross_boot_start` is false for it.
+  {
+    name: "started restore",
+    selected: {
+      phase: "started-observed",
+      cross_boot_start: false,
+      live_owner_recovery: null,
+    },
+    retirable: true,
+  },
+  { name: "ready", selected: { phase: "ready-observed" }, retirable: true },
+  // A pending same-boot recovery resumes only in its own boot.
+  {
+    name: "same-boot recovery pending",
+    selected: { phase: "ready-observed", live_owner_recovery: "a".repeat(64) },
+    retirable: false,
+  },
+  {
+    name: "restart in progress",
+    selected: { phase: "restarting" },
     retirable: false,
   },
   // An older runtime that does not report it, or a failed selection.
-  { name: "older runtime", selected: {}, retirable: false },
+  { name: "older runtime", selected: { phase: "restoring" }, retirable: false },
+  { name: "no phase", selected: {}, retirable: false },
   { name: "failed selection", selected: undefined, retirable: false },
 ])("a recorded run lost before ready is retirable only as the runtime admits it ($name)", async ({
   selected,

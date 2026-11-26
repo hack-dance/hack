@@ -48,6 +48,7 @@ import {
 import { nativeStartOutcomeUnknown } from "../lib/native-up-refusals.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
+import { nativeCrossBootRecoverable } from "./native-cross-boot-recovery.ts";
 import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
 import { emptyNativeDependencyPlanId } from "./native-dependency-plan.ts";
 import {
@@ -5272,8 +5273,11 @@ async function lostVmFailure(opts: {
 /**
  * A recorded run lost after its services were requested is retirable by
  * `hack down --recover` only when the runtime's cross-boot recovery admits its
- * receipt (`graph foreground-owner` `cross_boot_start`: settled relay and host
- * dependency startup, no cleanup marker). The selection reads host files only,
+ * receipt, by the same predicate the down uses to start the pool
+ * (`nativeCrossBootRecoverable`): a live phase (`started-observed` included: a
+ * restore that started every service, real VM at d19aa31a), or a lost start
+ * with `cross_boot_start` (settled relay and host dependency startup, no cleanup
+ * marker). The selection reads host files only,
  * so it works with the VM gone. Any other stage is returned as it is; a failed
  * or older selection leaves the run not retirable, so no refused command is
  * named (#1273 review).
@@ -5304,7 +5308,15 @@ export async function nativeLostStartRetirable(opts: {
     retirable:
       isRecord(selected) &&
       selected.run === opts.run &&
-      selected.cross_boot_start === true,
+      typeof selected.phase === "string" &&
+      nativeCrossBootRecoverable({
+        phase: selected.phase,
+        crossBootStart: selected.cross_boot_start === true,
+        liveOwnerRecovery:
+          typeof selected.live_owner_recovery === "string"
+            ? selected.live_owner_recovery
+            : null,
+      }),
   };
 }
 

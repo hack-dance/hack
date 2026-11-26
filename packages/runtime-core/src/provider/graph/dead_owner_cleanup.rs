@@ -2375,6 +2375,19 @@ mod tests {
         // Before this change (the negative control) only a ready or started run
         // was a cross-boot selection.
         assert!(!live(&receipt.phase) && !live(&preparing.phase));
+        // Real VM at d19aa31a: a restore whose services had all started when its
+        // graph owner and provider were killed together leaves `started-observed`
+        // (`started_from: restoring`). It is a live run, admitted as one, while
+        // `cross_boot_start` (`unconfirmed_start`) stays false for it.
+        let mut started = receipt.clone();
+        started.phase = "restoring".into();
+        mark_started(&mut started).unwrap();
+        assert_eq!(started.phase, STARTED_OBSERVED);
+        assert!(live(&started.phase) && !unconfirmed_start(&started));
+        assert_eq!(
+            hint(&started, &owner, true),
+            Some(selected(&started).unwrap())
+        );
     }
 
     #[test]

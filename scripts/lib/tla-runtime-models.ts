@@ -2032,6 +2032,27 @@ const contracts: readonly ModelContract[] = [
         invariant: "NeverExpired",
         fields: ['waiter = "expired"', "elapsed = 5", "earlyEffect = FALSE"],
       },
+      {
+        // HACK-2724: a start's 35 s wait outlasts another project's stop,
+        // which holds the lease for about 31 s (one tick is one second).
+        name: "stop-outlasted",
+        negative: false,
+        states: 96,
+      },
+      {
+        // The old 5 s start wait refused while that stop still held the lease.
+        name: "old-start-bound",
+        negative: true,
+        invariant: "StopNeverRefuses",
+        fields: ['waiter = "expired"', "elapsed = 5", 'holder = "first"'],
+      },
+      {
+        // The wait stays bounded: a holder past it is refused, still named.
+        name: "stop-past-bound",
+        negative: true,
+        invariant: "StopNeverRefuses",
+        fields: ['waiter = "expired"', "elapsed = 35", 'holder = "first"'],
+      },
     ],
   },
   {

@@ -8960,6 +8960,10 @@ test.each([
     "Provider lease acquisition refused; recorded holder: retained startup check; no operation was admitted.",
     "retained startup check",
   ],
+  [
+    "Provider lease acquisition refused; recorded holder: project stop; no operation was admitted.",
+    "project stop",
+  ],
   [undefined, "unavailable"],
 ])("a bounded startup lock refusal reports holder %s and tells the user how to retry", async (nativeMessage, holder) => {
   const { opts, events } = await fixture();
@@ -8973,9 +8977,11 @@ test.each([
   };
   await expect(startNativeProject(opts)).rejects.toThrow(
     [
-      "Native startup could not acquire a runtime lock (provider_busy).",
+      "Native startup could not acquire the native runtime lock (provider_busy); nothing was started.",
       `Holder: ${holder}.`,
-      "Run hack up again after the holder finishes.",
+      holder === "unavailable"
+        ? "Retry hack up once the holder finishes."
+        : `Retry hack up once that ${holder} finishes.`,
     ].join("\n")
   );
   expect(events).toEqual([]);

@@ -32,6 +32,7 @@ import {
   nativeDetachedUpShellVariables,
   reportNativeImageDownloadWait,
   reportNativeImageWork,
+  reportNativeStartLeaseWait,
   runNativeDetachedOwner,
   setNativeDetachedHeartbeatIntervalForTests,
   startNativeDetachedUp,
@@ -543,6 +544,7 @@ if (role === "channel-holder") {
       "immediate-failure",
       "exit-first-failure",
       "failed-services",
+      "lease-busy",
       "exited-service",
       "exited-service-zero",
       "exited-service-inadmissible",
@@ -728,6 +730,22 @@ if (role === "channel-holder") {
           new NativeRuntimeRequestError({
             message: "synthetic-private-value",
             nativeCode: "engine_rejected",
+          })
+        );
+        server.stop(true);
+        process.off("SIGTERM", terminate);
+        return 1;
+      }
+      if (mode === "lease-busy") {
+        // HACK-2724: the start waited on another project's stop, said so once,
+        // then gave up with nothing admitted.
+        reportNativeStartLeaseWait("project-stop");
+        await nativeDetachedUpFailure(
+          new NativeRuntimeRequestError({
+            message: "synthetic-private-value",
+            nativeCode: "provider_busy",
+            nativeMessage:
+              "Provider lease acquisition refused; recorded holder: project stop; no operation was admitted.",
           })
         );
         server.stop(true);

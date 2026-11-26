@@ -131,7 +131,7 @@ pub(super) fn resume(
     request: &StartRequest<'_>,
     verify_retained: impl Fn() -> Result<(), CandidateError>,
 ) -> Result<RuntimeStatus, CandidateError> {
-    let lock = startup_lease(&root(candidate), STARTUP_LEASE_WAIT)?;
+    let lock = startup_lease(&root(candidate), START_LEASE_WAIT)?;
     restore_released_short_home(candidate)?;
     verify_retained()?;
     super::super::network_update::require_complete(candidate)?;

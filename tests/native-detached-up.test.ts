@@ -475,6 +475,47 @@ test("detached failure names the services that failed during startup and how to 
   }
 });
 
+test("HACK-2724: a start that waited on a project stop prints one progress line, then names the holder and a plain retry", async () => {
+  const root = await fixtureRoot("native-detached-lease-busy-");
+  const launcher = Bun.spawn(
+    [process.execPath, fixture, "launcher", root, "lease-busy"],
+    {
+      env: fixtureEnv(root),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  try {
+    const [code, stdout, stderr] = await Promise.all([
+      launcher.exited,
+      new Response(launcher.stdout).text(),
+      new Response(launcher.stderr).text(),
+    ]);
+    expect(code).toBe(1);
+    expect(stderr).toBe(
+      "Waiting for the native runtime lock, held by a project stop (hack down). This start continues once it is released (up to 35 s).\n"
+    );
+    const error = JSON.parse(stdout).error;
+    expect(error.code).toBe("E_STARTUP_INCOMPLETE");
+    expect(error.message.split("\n")).toEqual([
+      "Native startup could not acquire the native runtime lock (provider_busy); nothing was started.",
+      "Holder: project stop.",
+      "Retry hack up -d once that project stop finishes.",
+    ]);
+    // Neither hack ps nor a pool stop is the next step for a lock someone else holds.
+    expect(error.message).not.toContain("hack ps");
+    expect(error.message).not.toContain("runtime down");
+    expect(stdout + stderr).not.toContain("synthetic-private-value");
+  } finally {
+    if (launcher.exitCode === null) {
+      launcher.kill("SIGTERM");
+      await launcher.exited;
+    }
+    await removeFixture(root);
+  }
+});
+
 for (const { mode, exitCode, phrase } of [
   {
     mode: "exited-service",

@@ -23,6 +23,10 @@ import {
   NATIVE_IDLE_POOL_NOTE,
   NATIVE_PROVIDER_PIN_MESSAGE,
 } from "../backends/native-runtime-client.ts";
+import {
+  nativeStartLeaseRefusal,
+  nativeStartLeaseWaitLine,
+} from "../backends/native-start-lease.ts";
 import { CliUsageError } from "../cli/command.ts";
 import { writeLifecycleStarted } from "../ui/lifecycle-closing.ts";
 import { formatDuration } from "../ui/text-output.ts";
@@ -618,6 +622,17 @@ function startupFailureError(failure: StartupFailure): HackCliError {
       message: `${nativeBuilderMissingDetachedRefusal()} ${NATIVE_IDLE_POOL_NOTE}`,
     });
   }
+  if (failure.code === "provider_busy" && failure.causeCode === undefined) {
+    // Nothing was admitted, and the pool belongs to whoever holds the lock: name
+    // the holder and a plain retry, not hack ps or a pool stop (HACK-2724).
+    return new HackCliError({
+      code: "E_STARTUP_INCOMPLETE",
+      message: nativeStartLeaseRefusal({
+        nativeMessage: failure.message,
+        command: "hack up -d",
+      }),
+    });
+  }
   let detail = "";
   if (failure.message) {
     detail = failure.service
@@ -772,6 +787,18 @@ export function reportNativeImageDownloadWait(reference: string | null): void {
     if (!reportNativeImageNotice(line)) {
       process.stderr.write(`${line}\n`);
     }
+  }
+}
+
+/**
+ * The one progress line of a start waiting on the native runtime lock
+ * (HACK-2724), with the runtime's closed holder token. A detached owner hands
+ * it to its launcher, which prints it; a foreground start prints it itself.
+ */
+export function reportNativeStartLeaseWait(holder: string): void {
+  const line = nativeStartLeaseWaitLine(holder);
+  if (!reportNativeImageNotice(line)) {
+    process.stderr.write(`${line}\n`);
   }
 }
 

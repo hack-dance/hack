@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { reportNativeStartLeaseWait } from "../lib/native-detached-up.ts";
 import { nativeCacheInitializers } from "./native-project-cache.ts";
 import type { NativeProjectReview } from "./native-project-review.ts";
 import type { NativeProjectRun } from "./native-project-run.ts";
@@ -128,6 +129,9 @@ export async function selectNativeProjectRestore(opts: {
     runtime: opts.runtime,
     cwd: opts.projectRoot,
     args: ["graph", "restore-selection", "--run-id", saved.run, "--json"],
+    // The runtime waits up to 35 s for a lock another project's stop holds
+    // (HACK-2724); say so once that wait lasts.
+    onLeaseWait: reportNativeStartLeaseWait,
   });
   const selection = validateNativeRestoreSelection({
     selected,

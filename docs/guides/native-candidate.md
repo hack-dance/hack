@@ -996,6 +996,23 @@ their receipts say.
 another operation holds, such as a project start writing its receipt, and then refuses
 `provider_busy`, naming the holder when the lock records one.
 
+A `hack up` or `hack up -d` waits up to 35 seconds for the provider lease when another
+operation holds it. The usual holder is another project's `hack down`, which holds
+the lease for its whole graph stop: a service with the 30-second stop grace limit
+keeps it for about 31 seconds. This applies to the waits that admit nothing: the
+retained-start check, resuming the running pool, the pool boot's admission, and the
+startup reads before a restore. A short holder such as `hack ps` costs only its own
+hold, because the start takes the lease as soon as it is free. When the wait lasts
+about 3 seconds, the start prints one line that names the holder, for example
+`Waiting for the native runtime lock, held by a project stop (hack down).` A
+foreground owner that stops its own run records itself as `project stop` in the
+lock. The record is advisory and never names the project. If the holder keeps the
+lease past 35 seconds, the start refuses `provider_busy` with nothing started,
+names the holder, and tells you to retry the same command once that holder
+finishes. You do not need `hack down` or a pool stop first. This wait is only for
+starts: `hack exec` keeps its own 15-second wait, and `hack ps` and `hack logs`
+keep their short observer behavior.
+
 `runtime down --force` stops the pool anyway, as a crash or a host reboot would. The
 projects' containers stop with the guest and their data is kept. Its JSON lists the
 runs that were live in `interrupted_runs`, or sets `interrupted_runs_unknown` when they

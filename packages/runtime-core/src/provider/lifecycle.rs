@@ -369,6 +369,23 @@ const NOT_RUNNING: &str = "The native runtime is not in its running state, so th
 /// a finite `graph inspect` (presentation `ps` takes no provider lease).
 pub(super) const STARTUP_LEASE_WAIT: Duration = Duration::from_secs(5);
 
+/// How long a start's lease waits that admit nothing wait for a provider lease another
+/// operation holds (HACK-2724): the retained-start preflight, the resume of a running
+/// pool (`runtime up`), the pool boot's admission lease, and the startup reads behind
+/// `connect_cleanup_for_start` (`graph restore-selection`, `graph inspect
+/// --startup-wait`). Another project's `hack down` holds the lease for its whole graph
+/// stop, which is bounded by the per-service stop grace limit (30 s, see
+/// `graph::config` and `graph::shutdown`) plus the stop's own removals. A start that
+/// gave up after [`STARTUP_LEASE_WAIT`] refused `provider_busy` while that stop was
+/// still running, so these waits cover that limit with a 5 s margin. A brief holder
+/// (`hack ps`, a ready owner's tick) still costs only its own hold: acquisition
+/// returns as soon as the lease is free. Waiting admits nothing; every check runs
+/// under the acquired lease. On expiry the refusal still names the holder, which is
+/// what a holder that keeps the lease longer (a stop with dependent services stopped
+/// in turn, another project's cold start) gets. `hack exec`, `ps` and `logs` keep
+/// their own waits ([`COMMAND_LEASE_WAIT`], none).
+pub(super) const START_LEASE_WAIT: Duration = Duration::from_secs(30 + 5);
+
 /// How long a one-shot service command (`hack exec`, and the dependency refresh that
 /// `hack exec` and `hack run` send first) waits for a provider lease another operation
 /// holds. A ready foreground owner takes the lease briefly and often, for example
@@ -656,7 +673,7 @@ impl<'a> OwnedGuest<'a> {
     pub(super) fn connect_cleanup_for_start(
         candidate: &'a Candidate,
     ) -> Result<Self, CandidateError> {
-        Self::connect_mode(candidate, false, Some(Instant::now() + STARTUP_LEASE_WAIT))
+        Self::connect_mode(candidate, false, Some(Instant::now() + START_LEASE_WAIT))
     }
 
     #[cfg(target_os = "macos")]
@@ -1691,7 +1708,7 @@ fn start_pool_observed(
     let opening = admission::opening::Opening::new(&pool_root, &opening_host, admission_reuse);
     let (lock, leased) = startup_admission_lease(
         &pool_root,
-        STARTUP_LEASE_WAIT,
+        START_LEASE_WAIT,
         profile,
         opened,
         &admission_clock,

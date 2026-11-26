@@ -28,6 +28,7 @@ import {
   reportNativeImageDownloadWait,
   reportNativeImageNotice,
   reportNativeImageWork,
+  reportNativeStartLeaseWait,
 } from "../lib/native-detached-up.ts";
 import {
   describeNativeProcessRefusals,
@@ -265,6 +266,7 @@ import {
   monitorNativeServiceExits,
   type NativeServiceExit,
 } from "./native-service-exit-monitor.ts";
+import { nativeStartLeaseRefusal } from "./native-start-lease.ts";
 import {
   classifyNativeLostProvider,
   NATIVE_START_POOL_GRACE_MS,
@@ -3997,6 +3999,7 @@ async function startNativeProjectAttempt(
             "--json",
           ],
           signal: controller.signal,
+          onLeaseWait: reportNativeStartLeaseWait,
         });
     emitNativeHotReloadNotice(pool, deps.warn);
     requireActiveStartup(controller.signal);
@@ -5032,23 +5035,18 @@ function reportForegroundStopFailure(failure: unknown, failed: boolean): void {
   }
 }
 
-const START_LOCK_HOLDER =
-  /^Provider lease acquisition refused; recorded holder: ([a-z ]+); no operation was admitted\.$/;
-
-function withStartupLockBlocker(error: unknown): unknown {
+/** A start whose lease wait expired names the holder and a plain retry (HACK-2724). */
+function withStartupLockBlocker(error: unknown, detached: boolean): unknown {
   if (
     !(error instanceof NativeRuntimeRequestError) ||
     error.nativeCode !== "provider_busy"
   ) {
     return error;
   }
-  const holder =
-    START_LOCK_HOLDER.exec(error.nativeMessage ?? "")?.[1] ?? "unavailable";
-  error.message = [
-    "Native startup could not acquire a runtime lock (provider_busy).",
-    `Holder: ${holder}.`,
-    "Run hack up again after the holder finishes.",
-  ].join("\n");
+  error.message = nativeStartLeaseRefusal({
+    nativeMessage: error.nativeMessage,
+    command: detached ? "hack up -d" : "hack up",
+  });
   return error;
 }
 
@@ -5167,7 +5165,7 @@ export async function startNativeProject(
             loss,
             classify: opts.dependencies?.classifyLostProvider,
           });
-    throw lost ?? withStartupLockBlocker(error);
+    throw lost ?? withStartupLockBlocker(error, detached);
   } finally {
     settled = true;
     stopPoolWatch?.();

@@ -15,16 +15,32 @@
 (* fix ("nothing ran" at the refresh, "the command did not run" at the       *)
 (* exec). After the send the reply may still be lost: only that outcome is   *)
 (* really unconfirmed.                                                       *)
+(*                                                                           *)
+(* HACK-2739, the authored path. An authored project's `hack exec` sends one *)
+(* request to its owner, which takes the lease on its only loop thread and   *)
+(* then starts the command. The same two waits model it: the first wait      *)
+(* ("refresh") is the requesting process's wait for a free lease, which      *)
+(* reads nothing, holds nothing and sends nothing; the second ("exec") is    *)
+(* the owner's own wait, which may block its loop only briefly, so it has    *)
+(* its own bound, SecondBound (15 s inside the owner's 30 s budget, which    *)
+(* the requester reads for 40 s). Probe = FALSE is the authored path before  *)
+(* the fix: no requester wait, only the owner's 15 s. The Compose configs    *)
+(* set SecondBound = Bound and Probe = TRUE.                                 *)
 EXTENDS Naturals
-CONSTANTS Bound, StopHold, ExpiryUnconfirmed, Holders, EnforceLease
+CONSTANTS Bound, SecondBound, Probe, StopHold, ExpiryUnconfirmed, Holders,
+          EnforceLease
 VARIABLES holder, holds, phase, elapsed, held, sent, sentHeld, report
 vars == <<holder, holds, phase, elapsed, held, sent, sentHeld, report>>
 
-Init == /\ holder = "stop" /\ holds = 1 /\ phase = "refresh"
+Init == /\ holder = "stop" /\ holds = 1
+        /\ phase = IF Probe THEN "refresh" ELSE "exec"
         /\ elapsed = 0 /\ held = 0 /\ sent = FALSE /\ sentHeld = FALSE
         /\ report = "none"
 
 Waiting == phase \in {"refresh", "exec"}
+
+\* The bound of the wait in progress.
+PhaseBound == IF phase = "refresh" THEN Bound ELSE SecondBound
 
 \* The current holder releases the lease, at the latest after StopHold ticks.
 Release == /\ holder \in {"stop", "peer"} /\ holder' = "free"
@@ -37,7 +53,7 @@ PeerTake == /\ phase = "exec" /\ holder = "free" /\ holds < Holders
 
 \* Time passes for the waiter only while someone else holds the lease: the
 \* waiter polls every 5 to 50 ms, so it does not sit on a free lease.
-Tick == /\ Waiting /\ elapsed < Bound
+Tick == /\ Waiting /\ elapsed < PhaseBound
         /\ holder # "free" /\ held < StopHold
         /\ elapsed' = elapsed + 1 /\ held' = held + 1
         /\ UNCHANGED <<holder, holds, phase, sent, sentHeld, report>>
@@ -45,7 +61,7 @@ Tick == /\ Waiting /\ elapsed < Bound
 \* The refresh reads under the lease and releases it, sending nothing yet;
 \* the exec's own wait starts with its own budget. The exec takes the lease
 \* and sends the command, whose effects may start from here on.
-Acquire == /\ Waiting /\ elapsed < Bound
+Acquire == /\ Waiting /\ elapsed < PhaseBound
            /\ (EnforceLease => holder = "free")
            /\ elapsed' = 0
            /\ phase' = IF phase = "refresh" THEN "exec" ELSE "sent"
@@ -53,8 +69,9 @@ Acquire == /\ Waiting /\ elapsed < Bound
            /\ sentHeld' = (phase = "exec" /\ holder # "free")
            /\ UNCHANGED <<holder, holds, held, report>>
 
-\* At the bound the wait refuses provider_busy, naming the holder.
-Expire == /\ Waiting /\ elapsed = Bound
+\* At the bound the wait refuses: provider_busy naming the holder for the
+\* requester, its own pre-effect code for the authored owner.
+Expire == /\ Waiting /\ elapsed = PhaseBound
           /\ phase' = "refused"
           /\ report' = IF ExpiryUnconfirmed THEN "unconfirmed" ELSE "not-run"
           /\ UNCHANGED <<holder, holds, elapsed, held, sent, sentHeld>>
@@ -68,9 +85,10 @@ Next == Release \/ PeerTake \/ Tick \/ Acquire \/ Expire \/ Finish
 Spec == Init /\ [][Next]_vars
         /\ WF_vars(Acquire \/ Tick \/ Expire \/ Finish) /\ WF_vars(Release)
 
+MaxBound == IF Bound >= SecondBound THEN Bound ELSE SecondBound
 TypeOK == /\ holder \in {"stop", "peer", "free"} /\ holds \in 1..Holders
           /\ phase \in {"refresh", "exec", "sent", "done", "refused"}
-          /\ elapsed \in 0..Bound /\ held \in 0..StopHold
+          /\ elapsed \in 0..MaxBound /\ held \in 0..StopHold
           /\ sent \in BOOLEAN /\ sentHeld \in BOOLEAN
           /\ report \in {"none", "ran", "unconfirmed", "not-run"}
 \* The command is sent only while no one else holds the lease.
@@ -88,4 +106,7 @@ NeverRanAfterStop == ~(report = "ran" /\ held = StopHold)
 NeverRanAfterPeer == ~(report = "ran" /\ holds = 2)
 \* Reachability: a reply lost after the send is still reported as unconfirmed.
 NeverUnconfirmed == report # "unconfirmed"
+\* Reachability: the second wait refuses as not run, with nothing sent.
+NeverRefusedAtSecondWait == ~(phase = "refused" /\ elapsed = SecondBound
+                              /\ report = "not-run" /\ holds = 2)
 =============================================================================

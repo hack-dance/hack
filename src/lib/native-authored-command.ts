@@ -49,6 +49,7 @@ import {
   nativeAuthoredUnreservedStartSelected,
   retireNativeAuthoredUnreservedStart,
 } from "../backends/native-authored-unreserved-start.ts";
+import { isNativeCommandNotRun } from "../backends/native-command-lease.ts";
 import { resolveNativeAuthoredExecStaleEnvWarning } from "../backends/native-exec-stale-env.ts";
 import { NATIVE_RECOVERY_RUNTIME_STARTED_NOTE } from "../backends/native-project-runtime-up.ts";
 import { parseNativeHttpsSelection } from "../backends/native-project-start.ts";
@@ -1232,8 +1233,10 @@ const COMMAND_CONTRACTS: Readonly<Record<"exec" | "run", CommandContract>> = {
 /**
  * The closed CLI refusal for a failed exec or one-off run. A selection with no
  * saved Ready generation never sent a request, so it reports not started (or a
- * pending startup) instead of an unknown command outcome (HACK-1312). Every
- * other failure keeps the unconfirmed-completion contract.
+ * pending startup) instead of an unknown command outcome (HACK-1312). An exec
+ * whose lease wait expired before anything ran says so, names the holder and
+ * gives a retry step (HACK-2739). Every other failure keeps the
+ * unconfirmed-completion contract.
  */
 export function nativeAuthoredCommandFailure(input: {
   readonly error: unknown;
@@ -1246,6 +1249,13 @@ export function nativeAuthoredCommandFailure(input: {
       code: "E_LIFECYCLE_FAILED",
       message: pending ? contract.pending : contract.notStarted,
       detail: { status: pending ? "pending" : "not_started" },
+    });
+  }
+  if (isNativeCommandNotRun(input.error) && input.error instanceof Error) {
+    return new HackCliError({
+      code: "E_LIFECYCLE_FAILED",
+      message: input.error.message,
+      detail: { status: "not_run", nativeCode: "provider_busy" },
     });
   }
   return new HackCliError({

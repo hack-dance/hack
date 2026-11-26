@@ -67,6 +67,26 @@ impl ServiceExec {
             && valid_stream(&self.stderr_base64)
     }
 }
+/// The owner's answer code when its own lease wait for an authored exec expired
+/// (HACK-2739). That wait is the first thing the owner does for the exec: no
+/// journal was read, no container was touched and no command was started. The
+/// wire carries only this code, which the requester forwards as the cause of its
+/// `native_graph_foreground` refusal, so the CLI can say that nothing ran. A
+/// `provider_busy` from anywhere else keeps its own code.
+pub(super) const OWNER_EXEC_LEASE_BUSY: &str = "graph_authored_exec_lease_busy";
+
+/// Maps only the owner's expired lease wait to [`OWNER_EXEC_LEASE_BUSY`].
+pub(super) fn owner_lease_refusal(error: CandidateError) -> CandidateError {
+    if error.code == "provider_busy" {
+        CandidateError::new(
+            OWNER_EXEC_LEASE_BUSY,
+            "The owner's authored exec could not acquire the provider lease; nothing ran.",
+        )
+    } else {
+        error
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub(in crate::provider::graph::native) fn execute(
     candidate: &Candidate,
@@ -80,8 +100,11 @@ pub(in crate::provider::graph::native) fn execute(
     guard()?;
     let deadline = Instant::now() + Duration::from_secs(30);
     // The owner loop's guard (signals, publication, pin) runs before every lease
-    // attempt, and the wait counts against this 30 s budget (HACK-2669).
-    let engine = Engine::connect_command_until(candidate, deadline, guard)?;
+    // attempt, and the wait counts against this 30 s budget (HACK-2669). The
+    // requester already waited out a longer holder before it sent this
+    // (HACK-2739), so this wait only covers a holder that took the lease since.
+    let engine =
+        Engine::connect_command_until(candidate, deadline, guard).map_err(owner_lease_refusal)?;
     let (receipt, _) = journal::load(
         candidate,
         expected.review.scope().run,

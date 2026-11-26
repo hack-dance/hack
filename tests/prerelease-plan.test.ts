@@ -1931,6 +1931,56 @@ test("registered Release routes explicit prerelease to the same-commit reusable 
   expect(JSON.stringify(prerelease)).not.toContain("RELEASE_PAT");
 });
 
+test("macOS prerelease restores and saves only the verified Zig archive", async () => {
+  const prerelease = Bun.YAML.parse(
+    await Bun.file(".github/workflows/prerelease.yml").text()
+  ) as {
+    jobs: {
+      build: {
+        steps: Array<{
+          uses?: string;
+          if?: string;
+          run?: string;
+          "continue-on-error"?: boolean;
+          with?: Record<string, unknown>;
+        }>;
+      };
+    };
+  };
+  const { steps } = prerelease.jobs.build;
+  const cacheIndex = steps.findIndex((step) =>
+    step.uses?.startsWith("actions/cache/restore@")
+  );
+  const saveIndex = steps.findIndex((step) =>
+    step.uses?.startsWith("actions/cache/save@")
+  );
+  const miseIndex = steps.findIndex((step) =>
+    step.uses?.startsWith("jdx/mise-action@")
+  );
+  const zigIndex = steps.findIndex((step) =>
+    step.run?.includes("mise install zig")
+  );
+  const bunInstallIndex = steps.findIndex(
+    (step) => step.run === "bun install --frozen-lockfile"
+  );
+  expect(cacheIndex).toBeGreaterThanOrEqual(0);
+  expect(miseIndex).toBeGreaterThan(cacheIndex);
+  expect(zigIndex).toBeGreaterThan(miseIndex);
+  expect(saveIndex).toBeGreaterThan(zigIndex);
+  expect(bunInstallIndex).toBeGreaterThan(saveIndex);
+  expect(steps[cacheIndex]?.["continue-on-error"]).toBe(true);
+  expect(steps[cacheIndex]?.with?.["fail-on-cache-miss"]).toBeUndefined();
+  expect(steps[cacheIndex]?.with?.path).toBe(
+    "${{ runner.temp }}/${{ env.HACK_PRERELEASE_ZIG_ARCHIVE }}"
+  );
+  expect(steps[saveIndex]?.with?.path).toBe(steps[cacheIndex]?.with?.path);
+  expect(steps[saveIndex]?.if).toContain("steps.zig.outputs.archive-ready");
+  expect(steps[saveIndex]?.["continue-on-error"]).toBe(true);
+  expect(steps[miseIndex]?.with?.install).toBe(false);
+  expect(steps[zigIndex]?.if).toBeUndefined();
+  expect(steps[zigIndex]?.["continue-on-error"]).toBeUndefined();
+});
+
 test("CI admits next branch pushes while excluding release tags", async () => {
   const ci = Bun.YAML.parse(
     await Bun.file(".github/workflows/ci.yml").text()

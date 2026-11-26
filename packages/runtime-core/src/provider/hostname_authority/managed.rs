@@ -204,8 +204,16 @@ mod tests {
             drop(held);
         });
         let start = Instant::now();
-        let result =
-            serve_with_startup_wait(&candidate, None, Duration::from_secs(2), &|| Ok(()), None);
+        // The production bound: the release above ends the wait, so a busy host
+        // that runs the releasing thread late cannot turn this into a timeout
+        // (HACK-2743).
+        let result = serve_with_startup_wait(
+            &candidate,
+            None,
+            lifecycle::AUTHORITY_STARTUP_LEASE_WAIT,
+            &|| Ok(()),
+            None,
+        );
         worker.join().unwrap();
         assert!(start.elapsed() >= Duration::from_millis(100));
         // The exact production path gets past contention and rejects the unprepared
@@ -328,14 +336,16 @@ mod tests {
     /// owner's exit, an open one is a live owner (stray payload is discarded).
     #[test]
     fn owner_pipe_end_of_file_is_the_owners_exit() {
-        let mut fds = [0; 2];
-        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-        let idle = owner_pipe_open(fds[0]);
-        assert_eq!(unsafe { libc::write(fds[1], b"x".as_ptr().cast(), 1) }, 1);
-        let payload = owner_pipe_open(fds[0]);
-        unsafe { libc::close(fds[1]) };
-        let closed = owner_pipe_open(fds[0]);
-        unsafe { libc::close(fds[0]) };
+        use std::{io::Write, os::fd::AsRawFd};
+        // Close-on-exec ends (see `owner_fifo`): a process another test spawns
+        // must not keep the writer open past the close below.
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        let idle = owner_pipe_open(reader.as_raw_fd());
+        writer.write_all(b"x").unwrap();
+        let payload = owner_pipe_open(reader.as_raw_fd());
+        drop(writer);
+        let closed = owner_pipe_open(reader.as_raw_fd());
+        drop(reader);
         assert!(idle.is_ok());
         assert!(payload.is_ok());
         assert!(matches!(closed, Err(e) if e.code == "provider_acquisition_cancelled"));
@@ -344,14 +354,31 @@ mod tests {
     /// A named FIFO opened the way `spawnNativeHttpsChild` opens the
     /// authority's stdin: a reader exists before the writer opens, and the
     /// authority's end is a blocking read end. Returns (reader, writer).
+    ///
+    /// Both ends are close-on-exec, opened that way atomically (HACK-2743).
+    /// Other tests in this process spawn children all the time (the HTTP probe
+    /// helpers live for seconds), and a child spawned while an inheritable
+    /// writer was open kept the FIFO's write side open after the test closed
+    /// its own: end of file never came, and the loop rightly kept serving.
+    /// Production avoids the same leak by opening the owner's writer only
+    /// after spawning the authority (`spawnNativeHttpsChild`).
     fn owner_fifo(fixture: &Fixture) -> (libc::c_int, libc::c_int) {
         let path = fixture.0.join("owner-stdin");
         let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-        let reader = unsafe { libc::open(name.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+        let reader = unsafe {
+            libc::open(
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
         assert!(reader >= 0);
-        let writer = unsafe { libc::open(name.as_ptr(), libc::O_WRONLY) };
+        let writer = unsafe { libc::open(name.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
         assert!(writer >= 0);
+        for fd in [reader, writer] {
+            let descriptor = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(descriptor >= 0 && descriptor & libc::FD_CLOEXEC != 0);
+        }
         let flags = unsafe { libc::fcntl(reader, libc::F_GETFL) };
         assert_eq!(
             unsafe { libc::fcntl(reader, libc::F_SETFL, flags & !libc::O_NONBLOCK) },
@@ -526,7 +553,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         // A healthy owner holds the pipe longer than one check interval.
-        std::thread::sleep(Duration::from_millis(1500));
+        let interval = Duration::from_millis(super::super::OWNER_CHECK_MS as u64);
+        std::thread::sleep(interval + interval / 2);
         assert!(
             socket.exists() && ended.try_recv().is_err(),
             "the authority stopped while its owner held the pipe"
@@ -534,13 +562,13 @@ mod tests {
         let closed = Instant::now();
         unsafe { libc::close(writer) };
         let result = ended
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(2 * interval)
             .expect("the authority kept serving after its owner's pipe closed");
         let after = closed.elapsed();
         unsafe { libc::close(reader) };
         let request = caddy.join().unwrap();
         assert!(result.is_ok(), "{result:?}");
-        assert!(after < Duration::from_secs(2), "noticed after {after:?}");
+        assert!(after < 2 * interval, "noticed after {after:?}");
         assert!(
             request.starts_with(b"POST /stop HTTP/1.1\r\n"),
             "{:?}",
@@ -557,9 +585,12 @@ mod tests {
         let session = SocketDirectory::new("open");
         let (admin, caddy) = caddy_admin(&session);
         fs::set_permissions(&session.0, fs::Permissions::from_mode(0o755)).unwrap();
+        let patience = Duration::from_secs(2);
         let started = Instant::now();
-        super::super::stop_caddy(&admin, Duration::from_secs(2));
-        assert!(started.elapsed() < Duration::from_millis(500));
+        super::super::stop_caddy(&admin, patience);
+        // Refused at once: well short of the patience it would otherwise spend.
+        let elapsed = started.elapsed();
+        assert!(elapsed < patience / 2, "{elapsed:?}");
         fs::set_permissions(&session.0, fs::Permissions::from_mode(0o700)).unwrap();
         // The stand-in is still waiting: end it with a request of our own,
         // kept open until the stand-in has read it.
@@ -638,6 +669,11 @@ mod tests {
     /// #1271 review, M1: an owner killed after it spawned Caddy but before Caddy
     /// bound its admin socket. With patience the stop waits for the socket to
     /// appear in the session directory, then stops that Caddy.
+    ///
+    /// The stand-in binds and then sets mode 0600, as Caddy does. The patience
+    /// is the test's own and generous: the stop returns as soon as it has
+    /// stopped the stand-in, so only a stop that never reaches it waits it out
+    /// (HACK-2743: a 2 s patience left a loaded host little room).
     #[test]
     fn caddy_still_starting_is_stopped_once_its_admin_socket_appears() {
         let session = SocketDirectory::new("late");
@@ -648,10 +684,41 @@ mod tests {
             caddy_admin_in(&directory).1
         });
         let started = Instant::now();
-        super::super::stop_caddy(&admin, Duration::from_secs(2));
+        super::super::stop_caddy(&admin, Duration::from_secs(10));
         let elapsed = started.elapsed();
         let request = late.join().unwrap().join().unwrap();
         assert!(elapsed >= Duration::from_millis(400), "{elapsed:?}");
+        assert!(
+            request.starts_with(b"POST /stop HTTP/1.1\r\n"),
+            "{:?}",
+            String::from_utf8_lossy(&request)
+        );
+    }
+
+    /// HACK-2743: Caddy binds its admin socket before it applies `|0600`, so a
+    /// Caddy still starting can show a socket others could open. The stop must
+    /// not connect to it, and must not give up on it either: it waits, within
+    /// its patience, until the socket is private, then stops that Caddy.
+    #[test]
+    fn caddy_stop_waits_for_its_admin_socket_to_become_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let session = SocketDirectory::new("mode");
+        let (admin, caddy) = caddy_admin(&session);
+        fs::set_permissions(&admin, fs::Permissions::from_mode(0o644)).unwrap();
+        let (done, stopped) = std::sync::mpsc::channel();
+        let target = admin.clone();
+        let stopper = std::thread::spawn(move || {
+            super::super::stop_caddy(&target, Duration::from_secs(10));
+            let _ = done.send(());
+        });
+        // Several retry steps: a stop that gave up has finished by now.
+        assert!(
+            stopped.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the stop gave up on a socket that was not private yet"
+        );
+        fs::set_permissions(&admin, fs::Permissions::from_mode(0o600)).unwrap();
+        stopper.join().unwrap();
+        let request = caddy.join().unwrap();
         assert!(
             request.starts_with(b"POST /stop HTTP/1.1\r\n"),
             "{:?}",
@@ -666,6 +733,12 @@ mod tests {
     fn caddy_stop_is_bounded_when_its_admin_socket_is_missing_refusing_or_silent() {
         use std::os::unix::fs::PermissionsExt;
         let patience = Duration::from_secs(2);
+        // The lower bounds show the patience was spent; the upper bounds only
+        // show the stop ended, so they allow one I/O timeout of scheduling
+        // slack rather than a fraction of a retry step (HACK-2743).
+        let io = super::super::CADDY_STOP_IO;
+        let waited = patience + io;
+        let silent_bound = super::super::CADDY_STOP_WAIT + 2 * io;
         let missing = SocketDirectory::new("missing");
         let admin = missing.0.join("admin.sock");
         let started = Instant::now();
@@ -675,7 +748,7 @@ mod tests {
         super::super::stop_caddy(&admin, patience);
         let elapsed = started.elapsed();
         assert!(
-            elapsed >= Duration::from_millis(1900) && elapsed < Duration::from_millis(2600),
+            elapsed >= Duration::from_millis(1900) && elapsed < waited,
             "missing: {elapsed:?}"
         );
 
@@ -688,7 +761,7 @@ mod tests {
         super::super::stop_caddy(&admin, patience);
         let elapsed = started.elapsed();
         assert!(
-            elapsed >= Duration::from_millis(1900) && elapsed < Duration::from_millis(2600),
+            elapsed >= Duration::from_millis(1900) && elapsed < waited,
             "refusing: {elapsed:?}"
         );
 
@@ -699,7 +772,7 @@ mod tests {
         let started = Instant::now();
         super::super::stop_caddy(&admin, patience);
         let elapsed = started.elapsed();
-        assert!(elapsed < Duration::from_millis(3500), "silent: {elapsed:?}");
+        assert!(elapsed < silent_bound, "silent: {elapsed:?}");
     }
 
     /// A listener for the serving loop alone, in a private short directory.
@@ -715,36 +788,50 @@ mod tests {
     /// check interval) and ends within the bound once the writer closes, with
     /// `OwnerGone`. Linux reports the hangup through `poll` at once; Darwin
     /// reports nothing and the bounded wait plus the non-blocking read find it.
+    ///
+    /// The bound is the contract: one owner-check interval, plus one more for
+    /// scheduling. A child process alive across the close stands in for the
+    /// processes other tests spawn under full-suite load (HACK-2743): it must
+    /// not inherit the owner's writer and so keep the owner "present".
     #[test]
     fn serving_loop_exits_soon_after_its_owner_fifo_closes() {
+        let interval = Duration::from_millis(super::super::OWNER_CHECK_MS as u64);
         let fixture = Fixture::new();
         let candidate = fixture.candidate();
         let directory = SocketDirectory::new("loop");
         let (_path, listener) = loop_listener(&directory);
         let (reader, writer) = owner_fifo(&fixture);
+        let mut bystander = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
         let (done, ended) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result =
                 super::super::serve_clients(&candidate, &listener, &"0".repeat(64), None, reader);
             let _ = done.send(result);
         });
-        std::thread::sleep(Duration::from_millis(1500));
+        std::thread::sleep(interval + interval / 2);
         assert!(
             ended.try_recv().is_err(),
             "the loop stopped while its owner held the pipe"
         );
         let closed = Instant::now();
         unsafe { libc::close(writer) };
-        let result = ended
-            .recv_timeout(Duration::from_secs(2))
-            .expect("the loop kept serving after its owner's pipe closed");
+        let outcome = ended.recv_timeout(2 * interval);
         let after = closed.elapsed();
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+        let result = outcome.expect("the loop kept serving after its owner's pipe closed");
         unsafe { libc::close(reader) };
         assert!(
             matches!(result, Ok(super::super::ServeEnd::OwnerGone)),
             "{result:?}"
         );
-        assert!(after < Duration::from_secs(2), "noticed after {after:?}");
+        assert!(after < 2 * interval, "noticed after {after:?}");
     }
 
     /// The cooperative stop ends the serving loop on every host, with

@@ -9068,6 +9068,39 @@ test.each([
   expect(message.includes("Run hack down --recover")).toBe(retirable);
 });
 
+// #1279 review (Codex P2): the start's own error (here the final inspection's
+// unconfirmed cleanup) recommends `hack down --recover`. Its cause line must
+// not name that command when the stage message says none can retire the run.
+test.each([
+  { name: "unprovable ready", loss: { stage: "ready", retirable: false } },
+  { name: "provable ready", loss: { stage: "ready", retirable: true } },
+  { name: "ready, not read", loss: { stage: "ready" } },
+] as {
+  name: string;
+  loss: NativeForegroundLossStage;
+}[])("a lost VM's cause line names the down only where the stage message does ($name)", ({
+  loss,
+}) => {
+  const end = { bootId: "b".repeat(32), providerPid: 4242 };
+  const cause = new Error(
+    "Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Run hack down --recover to resume this run's confirmed cleanup with data retained. Native exit diagnostic: process_identity_unavailable."
+  );
+  const lost = new NativeForegroundVmLostError({ end, loss, cause });
+  const withheld = loss.stage === "ready" && loss.retirable === false;
+  const cleanup =
+    "Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained.";
+  const diagnostic = "Native exit diagnostic: process_identity_unavailable.";
+  expect(lost.message).toBe(
+    [
+      nativeForegroundPoolEndMessage(end, loss),
+      withheld
+        ? `(cause: ${cleanup} ${diagnostic})`
+        : `(cause: ${cleanup} Run hack down --recover to resume this run's confirmed cleanup with data retained. ${diagnostic})`,
+    ].join("\n")
+  );
+  expect(lost.message.includes("hack down --recover")).toBe(!withheld);
+});
+
 test("a ready run whose relay owner is unprovable is told no command", () => {
   const end = { bootId: "b".repeat(32) };
   const named = nativeForegroundPoolEndMessage(end, { stage: "ready" });

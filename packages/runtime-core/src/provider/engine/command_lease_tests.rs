@@ -400,3 +400,113 @@ fn a_requested_command_refuses_a_stop_past_its_bound_naming_it() {
     release.send(()).unwrap();
     holder.join().unwrap();
 }
+
+/// HACK-2739, scaled 50 times (35 s is 700 ms): the requesting process of an
+/// authored `hack exec` waits for a free lease before it sends anything to its
+/// owner. It outlasts a project stop held for 600 ms, then returns, having
+/// released the lease. It opens no engine connection, so unlike
+/// `connect_command_request` it reaches no post-acquisition check.
+#[test]
+fn the_authored_exec_request_waits_out_a_project_stop_and_releases_the_lease() {
+    use crate::provider::lifecycle::await_free_command_lease;
+    let (_home, candidate) = running_pool();
+    let hold = Duration::from_millis(600);
+    let (_release, holder) = hold_lease_as_project_stop(&candidate, hold);
+    let started = Instant::now();
+    await_free_command_lease(&candidate, started + Duration::from_millis(700)).unwrap();
+    assert!(
+        started.elapsed() >= hold - Duration::from_millis(50),
+        "returned before the stop released: {:?}",
+        started.elapsed()
+    );
+    holder.join().unwrap();
+    // Released: the next holder acquires at once.
+    drop(state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap());
+}
+
+/// HACK-2739: a stop past the requesting side's bound is refused within it with
+/// the raw, uncaused `provider_busy` that names the stop. That is the refusal the
+/// CLI reports as "nothing ran".
+#[test]
+fn the_authored_exec_request_refuses_a_stop_past_its_bound_naming_it() {
+    use crate::provider::lifecycle::await_free_command_lease;
+    let (_home, candidate) = running_pool();
+    let (release, holder) = hold_lease_as_project_stop(&candidate, Duration::from_secs(30));
+    let started = Instant::now();
+    let refused = await_free_command_lease(&candidate, started + Duration::from_millis(300))
+        .err()
+        .unwrap();
+    assert_eq!(refused.code, "provider_busy");
+    assert_eq!(refused.message, PROJECT_STOP_REFUSAL);
+    assert!(refused.cause_code.is_none());
+    assert!(started.elapsed() >= Duration::from_millis(250));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    release.send(()).unwrap();
+    holder.join().unwrap();
+}
+
+/// HACK-2739, the normal path: with nothing holding the lease the wait is one
+/// lock attempt. On a home with no pool it returns at once and creates nothing,
+/// so the owner's answer says what it said before.
+#[test]
+fn the_authored_exec_request_wait_is_one_attempt_when_free_and_inert_without_a_pool() {
+    use crate::provider::lifecycle::{COMMAND_REQUEST_LEASE_WAIT, await_free_command_lease};
+    let (_home, candidate) = running_pool();
+    let started = Instant::now();
+    for _ in 0..100 {
+        await_free_command_lease(&candidate, Instant::now() + COMMAND_REQUEST_LEASE_WAIT).unwrap();
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "100 uncontended waits took {:?}",
+        started.elapsed()
+    );
+
+    let mut bytes = [0_u8; 16];
+    std::io::Read::read_exact(&mut fs::File::open("/dev/urandom").unwrap(), &mut bytes).unwrap();
+    let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let checkout = std::env::temp_dir()
+        .canonicalize()
+        .unwrap()
+        .join(format!("hack-command-lease-empty-{token}"));
+    fs::DirBuilder::new().mode(0o700).create(&checkout).unwrap();
+    let _empty_home = Home {
+        checkout: checkout.clone(),
+        alias: None,
+    };
+    let empty = Candidate::discover(&checkout).unwrap();
+    let started = Instant::now();
+    await_free_command_lease(&empty, started + COMMAND_REQUEST_LEASE_WAIT).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(!empty.state_root.join("run/smolvm/operation.lock").exists());
+}
+
+/// HACK-2739, the call site: `native::foreground::exec`, the requesting side of an
+/// authored `hack exec`, waits out the stop before it loads the owner's pin. This
+/// fixture has no owner, so it then refuses with something other than
+/// `provider_busy`. Before the fix it went straight to the owner.
+#[cfg(feature = "native-config-plan")]
+#[test]
+fn the_authored_exec_requester_waits_before_it_contacts_the_owner() {
+    let (_home, candidate) = running_pool();
+    let hold = Duration::from_millis(600);
+    let (_release, holder) = hold_lease_as_project_stop(&candidate, hold);
+    let started = Instant::now();
+    let after = crate::provider::graph::native::foreground::exec(
+        &candidate,
+        &"a".repeat(32),
+        "web",
+        &["true".to_owned()],
+        None,
+    )
+    .err()
+    .unwrap();
+    assert!(
+        started.elapsed() >= hold - Duration::from_millis(50),
+        "contacted the owner before the stop released: {:?} ({})",
+        started.elapsed(),
+        after.code
+    );
+    assert_ne!(after.code, "provider_busy", "{}", after.message);
+    holder.join().unwrap();
+}

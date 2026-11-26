@@ -750,6 +750,23 @@ class StoppedPoolStarted extends Error {}
 export const NATIVE_RECOVERED_RESTART_NOTE =
   "The interrupted hack restart of this run was retired with its data kept; hack up starts the project again.";
 
+/**
+ * Shown when `hack down --recover` stopped the run but left its pending
+ * `hack restart` because the restart's operation lock is held (HACK-2096): by a
+ * live restart, recovery or data removal of this project, or one interrupted
+ * before the fix. Down does not wait for or remove the lock.
+ */
+export function nativeRestartLockHeldNote(lock: string): string {
+  return `The pending hack restart of this run was kept: its operation lock (${lock}) is held by another hack restart, recovery or data removal of this project. Once that finishes, run hack down --recover again to retire it; hack up refuses while it is pending.`;
+}
+
+/**
+ * Shown when `hack down --recover` stopped the run but could not read (or
+ * remove) its pending restart intent (HACK-2096). The stop itself stands.
+ */
+export const NATIVE_RESTART_INTENT_UNREADABLE_NOTE =
+  "The run was stopped with its data kept, but its pending hack restart could not be read, so it was not retired; hack up refuses while it is pending. Inspect native state before recovery.";
+
 /** Shown after a down started the pool to recover its run (HACK-2456). */
 export const NATIVE_RECOVERY_RUNTIME_STARTED_NOTE =
   "The native runtime was started to recover this run and is still running; run `runtime down` to stop it.";
@@ -1284,6 +1301,52 @@ async function nativeProjectDownOnce(opts: {
  */
 
 /**
+ * After `hack down --recover` stopped `run` with its data kept, retire a
+ * pending restart of it (HACK-2096; see {@link retireCleanedNativeRestart}),
+ * re-inspecting the run under the restart lock, and say what happened in one
+ * line when it was retired, kept for a held lock, or unreadable. A plain down
+ * and the restart coordinator's own down (`deferFinalization`) never retire.
+ */
+async function retirePendingRestartAfterRecover(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly scope: NativeProjectRunScope;
+  readonly run: string;
+  readonly recover?: boolean;
+  readonly deferFinalization?: boolean;
+  readonly invoke?: typeof invokeNativeRuntime;
+  readonly notice?: (line: string) => void;
+}): Promise<void> {
+  if (opts.recover !== true || opts.deferFinalization === true) {
+    return;
+  }
+  const invoke = withNativeRecoveryGuidance(opts.invoke ?? invokeNativeRuntime);
+  const retirement = await retireCleanedNativeRestart({
+    ...opts.scope,
+    run: opts.run,
+    // A busy provider means another owner acts on the pool: not stopped.
+    stillStopped: async () =>
+      stoppedRetained(
+        await inspectNativeProjectGraph({
+          runtime: opts.runtime,
+          projectRoot: opts.scope.projectRoot,
+          run: opts.run,
+          invoke,
+          busyWaitMs: 0,
+        })
+      ),
+  });
+  const notice =
+    opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`));
+  if (retirement.status === "retired") {
+    notice(NATIVE_RECOVERED_RESTART_NOTE);
+  } else if (retirement.status === "locked") {
+    notice(nativeRestartLockHeldNote(retirement.lock));
+  } else if (retirement.status === "unreadable") {
+    notice(NATIVE_RESTART_INTENT_UNREADABLE_NOTE);
+  }
+}
+
+/**
  * Stop an instance's native run. See {@link nativeProjectDownOnce}. A down
  * that waited on a start resuming the retained run begins once more, with no
  * further startup wait, so it stops the resumed graph under its new owner.
@@ -1311,15 +1374,8 @@ export async function nativeProjectDown(
         startStoppedPool: opts.deferFinalization !== true && !started,
         startupWaitMs,
       });
-      if (
-        result.status === "stopped" &&
-        opts.recover &&
-        opts.deferFinalization !== true &&
-        (await retireCleanedNativeRestart({ ...opts.scope, run: result.run }))
-      ) {
-        (opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)))(
-          NATIVE_RECOVERED_RESTART_NOTE
-        );
+      if (result.status === "stopped") {
+        await retirePendingRestartAfterRecover({ ...opts, run: result.run });
       }
       return started ? { ...result, runtimeStarted: true } : result;
     } catch (error) {

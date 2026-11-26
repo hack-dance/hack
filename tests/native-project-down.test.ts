@@ -6,6 +6,7 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,8 +14,10 @@ import { join } from "node:path";
 import {
   NATIVE_OWNER_EXIT_NOTICE,
   NATIVE_RECOVERED_RESTART_NOTE,
+  NATIVE_RESTART_INTENT_UNREADABLE_NOTE,
   nativeDownEnvironment,
   nativeProjectDown,
+  nativeRestartLockHeldNote,
 } from "../src/backends/native-project-down.ts";
 import {
   beginNativeProjectFinalization,
@@ -29,6 +32,7 @@ import {
   type NativeProjectRun,
   type NativeProjectRunScope,
   type NativeRestartIntent,
+  nativeRestartOperationLock,
   removeNativeProjectRun,
   retireCleanedNativeRestart,
   saveNativeProjectRun,
@@ -2968,8 +2972,18 @@ async function lostReplacementDown(opts: {
   readonly phase: NativeRestartIntent["phase"];
   readonly intentRun?: string;
   readonly lockHeld?: boolean;
+  /** An inspect under the restart lock no longer reads the run as stopped. */
+  readonly resumedUnderLock?: boolean;
+  /** The intent on disk cannot be read. */
+  readonly unreadable?: boolean;
 }) {
   const fx = await fixture();
+  const { lock } = await nativeRestartOperationLock(fx.scope);
+  const locked = () =>
+    stat(lock).then(
+      () => true,
+      () => false
+    );
   const intentRun = { ...run, run: opts.intentRun ?? run.run };
   const prepared: NativeRestartIntent = {
     phase: "prepared",
@@ -2983,7 +2997,12 @@ async function lostReplacementDown(opts: {
   if (opts.phase === "cleaned") {
     await completeNativeRestartCleanup({ ...fx.scope, expected: prepared });
   }
+  const intentFile = lock.replace(/\.lock\.operation$/, ".json");
+  if (opts.unreadable) {
+    await writeFile(intentFile, "{}\n", { mode: 0o600 });
+  }
   await deadFrontend(fx.scope);
+  let inspectsUnderLock = 0;
   const notices: string[] = [];
   let recovered = false;
   const down = () =>
@@ -3013,6 +3032,11 @@ async function lostReplacementDown(opts: {
           return { authority: { present: false } };
         }
         expect(command).toBe("inspect");
+        if (!opts.lockHeld && (await locked())) {
+          inspectsUnderLock++;
+          // Another owner resumed the run between the down and the lock.
+          return snapshot(recovered && !opts.resumedUnderLock);
+        }
         return snapshot(recovered);
       },
     });
@@ -3022,7 +3046,11 @@ async function lostReplacementDown(opts: {
   return {
     result,
     notices,
-    intent: await loadNativeRestartIntent(fx.scope),
+    lock,
+    inspectsUnderLock,
+    intent: opts.unreadable
+      ? await readFile(intentFile, "utf8")
+      : await loadNativeRestartIntent(fx.scope),
   };
 }
 
@@ -3051,16 +3079,61 @@ test.each([
     phase: "cleaned",
     lockHeld: true,
   },
+  {
+    // HACK-2096 review L5: the run is re-inspected under the lock.
+    name: "a run resumed before the lock was taken",
+    recover: true,
+    phase: "cleaned",
+    resumedUnderLock: true,
+  },
 ] as const)("down keeps the pending restart for $name", async (opts) => {
-  const { result, notices, intent } = await lostReplacementDown(opts);
+  const { result, notices, intent, inspectsUnderLock } =
+    await lostReplacementDown(opts);
   expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
-  expect(intent?.phase).toBe(opts.phase);
+  expect(typeof intent === "string" ? undefined : intent?.phase).toBe(
+    opts.phase
+  );
   expect(notices).not.toContain(NATIVE_RECOVERED_RESTART_NOTE);
+  if ("resumedUnderLock" in opts) {
+    expect(inspectsUnderLock).toBe(1);
+  }
+});
+
+test("down --recover names the pending restart and the held lock it kept", async () => {
+  // HACK-2096 review L6: a held lock is no longer skipped silently.
+  const { result, notices, lock } = await lostReplacementDown({
+    recover: true,
+    phase: "cleaned",
+    lockHeld: true,
+  });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(notices).toContain(nativeRestartLockHeldNote(lock));
+  const line = notices.find((notice) => notice.includes(lock));
+  expect(line).toContain("pending hack restart");
+  expect(line).toContain("run hack down --recover again");
+  expect(line).not.toContain("\n");
+});
+
+test("an unreadable restart intent does not fail a down --recover that stopped the run", async () => {
+  // HACK-2096 review L7: the stop stands; the intent is reported, not retired.
+  const { result, notices, intent } = await lostReplacementDown({
+    recover: true,
+    phase: "cleaned",
+    unreadable: true,
+  });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(notices).toContain(NATIVE_RESTART_INTENT_UNREADABLE_NOTE);
+  expect(notices).not.toContain(NATIVE_RECOVERED_RESTART_NOTE);
+  expect(intent).toBe("{}\n");
 });
 
 test("retiring a cleaned restart is a no-op without one", async () => {
   const fx = await fixture();
-  expect(await retireCleanedNativeRestart({ ...fx.scope, run: run.run })).toBe(
-    false
-  );
+  expect(
+    await retireCleanedNativeRestart({
+      ...fx.scope,
+      run: run.run,
+      stillStopped: async () => true,
+    })
+  ).toEqual({ status: "none" });
 });

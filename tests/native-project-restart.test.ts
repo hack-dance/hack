@@ -3023,7 +3023,7 @@ test("a replacement that ends the process on a lost VM leaves the restart lock f
     await saveNativeProjectRun({ ...lostScope, run });
     const f = fixture();
     let lockFree: boolean | undefined;
-    let retired: boolean | undefined;
+    let retired: string | undefined;
     const code = await restartNativeProject({
       ...f.options,
       scope: lostScope,
@@ -3037,10 +3037,13 @@ test("a replacement that ends the process on a lost VM leaves the restart lock f
           "cleaned"
         );
         // `hack down --recover` then retires it once the run is stopped.
-        retired = await retireCleanedNativeRestart({
-          ...lostScope,
-          run: run.run,
-        });
+        retired = (
+          await retireCleanedNativeRestart({
+            ...lostScope,
+            run: run.run,
+            stillStopped: async () => true,
+          })
+        ).status;
         // The real process has exited by now; the fixture just returns.
         return 1;
       },
@@ -3056,7 +3059,7 @@ test("a replacement that ends the process on a lost VM leaves the restart lock f
     });
     expect(code).toBe(1);
     expect(lockFree).toBe(true);
-    expect(retired).toBe(true);
+    expect(retired).toBe("retired");
     expect(await loadNativeRestartIntent(lostScope)).toBeNull();
     // The restart's own release after the start returned is a no-op.
     expect(await withNativeRestartLock(lostScope, async () => true)).toBe(true);

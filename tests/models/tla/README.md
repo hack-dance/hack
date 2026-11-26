@@ -787,14 +787,20 @@ provider (HACK-2579).
 
 [`ForegroundLossRecovery.tla`](foreground-loss-recovery/ForegroundLossRecovery.tla)
 checks that the commands a foreground `hack up` or `hack restart` names after
-its VM is lost are all accepted when the user runs them in order (HACK-2096).
-The start is lost before the runtime reported its graph ready (`Starting`),
-after that but before the frontend's own readiness work finished (`GraphReady`:
-for a restart, its cleaned intent and operation lock are still held), or once
-serving. Command acceptance follows the code: `hack down --recover` retires a
-run only once its graph was ready (a run lost before that has no cross-boot
-retirement yet, HACK-2714); `hack up` refuses a pending restart; `hack restart`
-refuses while its lock is held and a stopped run with nothing pending.
+its VM is lost are all accepted when the user runs them in order, and that it
+withholds a command only where none works (HACK-2096). The pool watch starts
+right after `runtime up`, so the start is lost while `Preparing` (no service
+requested yet: resolve, review, image builds and pulls, restore selection),
+once services are `Requested` and before the graph is ready and mapped, at
+`GraphReady` (ready and mapped; for a restart, its cleaned intent and operation
+lock are still held), or once serving. `recorded` says whether a run record
+exists while preparing: a resumed retained run or a restart's old run has one,
+a fresh `up` has none. Command acceptance follows the code and depends on the
+stage, not on the message: `hack down --recover` accepts a run lost while
+preparing (the stopped retained run, or `not_started` for a fresh `up`) or once
+ready, and refuses one lost in between (no cross-boot retirement yet,
+HACK-2714); `hack up` refuses a pending restart; `hack restart` refuses while
+its lock is held and a stopped run with nothing pending.
 
 ![Foreground loss recovery state chart](../../../docs/diagrams/foreground-loss-recovery.png)
 [SVG](../../../docs/diagrams/foreground-loss-recovery.svg) ·
@@ -802,27 +808,31 @@ refuses while its lock is held and a stopped run with nothing pending.
 
 | Control | Result |
 | --- | --- |
-| `positive` | `NoRefusedAdvice` and `NoNeedlessWithholding` hold across 20 reachable states. |
-| `negative` | PR #1253 at `cd0ebff10`: the message names `hack restart` while an intent is pending, the lost start leaves the restart lock held, and `hack down --recover` keeps the intent. A run lost while starting is sent to `hack down --recover`, which refuses: `NoRefusedAdvice` fails. |
-| `keep-intent` | Only `hack down --recover` keeps the cleaned intent: a restart lost at `GraphReady` is sent to `hack up`, which refuses the pending restart. |
+| `positive` | `NoRefusedAdvice` and `NoNeedlessWithholding` hold across 41 reachable states. |
+| `negative` | PR #1253 at `cd0ebff10`: the message names `hack restart` while an intent is pending and `hack down --recover` otherwise, at every stage; the lost start leaves the restart lock held; `hack down --recover` keeps the intent. A run lost after its services were requested is sent to `hack down --recover`, which refuses (or a restart lost while preparing to `hack restart`, which refuses the held lock): `NoRefusedAdvice` fails. |
+| `keep-intent` | Only `hack down --recover` keeps the cleaned intent: a lost restart is sent to `hack up`, which refuses the pending restart. |
 | `leak-lock` | Only the lock stays held after the exit: `hack down --recover` cannot retire the intent under it, and `hack up` refuses. |
-| `intent-message` | Only the message rule is the old one: a start lost while starting is sent to `hack down --recover`, which refuses. |
+| `intent-message` | Only the old intent rule, where it differs (once ready): a restart lost at `GraphReady` is told `hack down --recover`, then `hack restart`, which refuses once the down retired its intent. |
+| `withhold-preparing` | PR #1253 at `a6c4cba`: no command before the graph was ready. A start lost while preparing is told nothing, though `hack down --recover` and `hack up` (or `hack up` alone) work: `NoNeedlessWithholding` fails. |
 | `restart-recovers` | Reachability witness: `NoRestartRecovery` fails, so a lost restart is recovered by following its message. |
 
 | Model action | Implementation boundary |
 | --- | --- |
-| `GraphReady` | `graph.onReady` at the top of the serve `onReady` handler in `startNativeProjectAttempt` (the runtime's `graph_foreground_ready` frame). |
+| `Init` (`recorded`) | `graph.onSelected(restore !== undefined)` in `startNativeProjectAttempt`, before `runtime up`. |
+| `Request` | `graph.onRequested` where `servicesRequested` is set, just before the serve request. |
+| `GraphReady` | `graph.onReady` in the serve `onReady` handler, after `ensureMapping` saved the run mapping (the runtime's `graph_foreground_ready` frame, or the started line of a started return). |
 | `Serve` | The restart's `onReady` (`removeNativeRestartIntent`, lock release) runs inside the start's readiness work, before `ready` progress sets `serving`. |
-| `Lose` | `onEnded` in `startNativeProject`: `nativeForegroundPoolEndMessage(end, { graphReady })`, then `beforeLostExit` (the restart passes `releaseLock`), then exit 1. |
-| `Step` (`down`) | `nativeProjectDown` with `recover`: after a stopped result, `retireCleanedNativeRestart` removes a `cleaned` intent of the same run under `withNativeRestartLock`, and prints `NATIVE_RECOVERED_RESTART_NOTE`. |
+| `Lose` | `onEnded` in `startNativeProject`: `nativeForegroundPoolEndMessage(end, loss)`, then `beforeLostExit` (the restart passes `releaseLock`), then exit 1. |
+| `Step` (`down`) | `nativeProjectDown` with `recover`: after a stopped result, `retireCleanedNativeRestart` re-reads the intent and re-inspects the run (`stopped-data-retained`) under `withNativeRestartLock`, removes a `cleaned` intent of the same run, and prints `NATIVE_RECOVERED_RESTART_NOTE` (or one line for a held lock or an unreadable intent, which it keeps). |
 | `Step` (`up`, `restart`) | `refusePendingFreshStart` in native start; `withNativeRestartLock` and `activeReceipt` (`needs an active graph`) in restart. |
 
 Bounds: one start, one loss, at most two user commands. Not modeled: the Rust
 runtime's own recovery proofs (a cross-boot recovery that refuses for another
 reason, as HACK-2711 found for a project without a published port, is outside
 this model), the start's own unwind racing the pool watch (it ends through its
-own error, which releases the lock in the restart's `finally`), and real VM
-timing. The real-VM check is the gate for the runtime half.
+own error, which releases the lock in the restart's `finally`), `up.after`
+commands that outlive the exit, and real VM timing. The real-VM check is the
+gate for the runtime half.
 
 ## Native pool stop under a live run
 

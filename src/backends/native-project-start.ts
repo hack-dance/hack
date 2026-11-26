@@ -260,6 +260,7 @@ import {
 } from "./native-service-exit-monitor.ts";
 import {
   NATIVE_START_POOL_GRACE_MS,
+  type NativeForegroundLossStage,
   nativeForegroundPoolEndMessage,
   watchNativeStartPool,
 } from "./native-start-pool-watch.ts";
@@ -2758,6 +2759,18 @@ type NativeProjectStartOptions = {
    * just before it ends the process (HACK-2096). `hack restart` releases its
    * operation lock here, which the process exit would otherwise leave held, so
    * the pending restart stays resumable. Its failure never blocks the exit.
+   *
+   * The release does not wait for `up.after` commands still running (HACK-2096
+   * review, L8). They run without a cancel signal, in this process's group, so
+   * a stop during startup lets them settle; `process.exit` neither signals nor
+   * reaps them, and one can outlive this process until it ends or its next
+   * write hits the closed output pipe. That is accepted, not prevented: the
+   * hook acts on services of the lost VM, which are gone; a plain `hack up`
+   * lost at the same point leaves the same orphan with no lock at all; and
+   * holding the lock past the exit leaves it held for good,
+   * since no command removes it, so every later restart, filesystem recovery
+   * and data removal would refuse. Waiting for the hook instead would give up
+   * the bounded exit of a lost foreground start.
    */
   readonly beforeLostExit?: () => Promise<void>;
   readonly scope: NativeProjectRunScope;
@@ -3382,10 +3395,24 @@ async function startNativeProjectAttempt(
   watchAdmittedBoot: ((bootId: string) => void) | undefined,
   graph: {
     /**
+     * The startup selection is known, before `runtime up`: `recorded` says
+     * whether a run record exists that `hack down --recover` finds (a resumed
+     * retained run, or a restart's old run). A fresh `up` has none until its
+     * mapping is saved (HACK-2096).
+     */
+    readonly onSelected?: (recorded: boolean) => void;
+    /**
+     * The first service of this run is being requested from the runtime. A
+     * run lost from here until `onReady` has no retirement yet (HACK-2714).
+     */
+    readonly onRequested?: () => void;
+    /**
      * The runtime reported this run's graph ready (its receipt is
-     * `ready-observed`), before the frontend's own readiness work (mapping,
-     * HTTPS, `up.after`, the caller's `onReady`). A run lost from here on is
-     * retired across boots by `hack down --recover` (HACK-2096).
+     * `ready-observed`) and its run mapping is saved, before the rest of the
+     * frontend's readiness work (HTTPS, `up.after`, the caller's `onReady`). A
+     * run lost from here on is retired across boots by `hack down --recover`
+     * (HACK-2096). A fresh `up` that is ready but not yet mapped is still
+     * `requested`: `down` would find no run.
      */
     readonly onReady?: () => void;
     /**
@@ -3439,6 +3466,7 @@ async function startNativeProjectAttempt(
       endedBootOwnerWaitMs: deps.endedBootOwnerWaitMs,
     });
   requireActiveStartup(opts.signal);
+  graph.onSelected?.(restore !== undefined);
   const runtimeMetadata = nativeRuntimeMetadataSelected({
     selection: opts.runtimeMetadata,
     restore,
@@ -4365,6 +4393,7 @@ async function startNativeProjectAttempt(
               planId: restore?.planId ?? review.planId,
             });
             servicesRequested = true;
+            graph.onRequested?.();
             reviewTiming?.();
             code = await deps.serve({
               runtime: opts.runtime,
@@ -4445,12 +4474,13 @@ async function startNativeProjectAttempt(
                 await ensureMapping();
               },
               onReady: async () => {
-                graph.onReady?.();
                 const finalizeTiming = beginUpTiming("cli.readiness.finalize");
                 // Ready: the startup view is no longer needed.
                 void startupStatus.stop();
                 const { readyMapping, persistedMapping } =
                   await ensureMapping();
+                // Ready and mapped: `down --recover` now finds this run.
+                graph.onReady?.();
                 // The HTTPS owner admits a lease only under the provider lease, for a
                 // ready graph: a started return takes it at the owner's ready line.
                 if (!returnAtStarted) {
@@ -4812,9 +4842,13 @@ export async function startNativeProject(
   let stopPoolWatch: (() => void) | undefined;
   // Ready and not stopping: the start has nothing left to finish on its own.
   let serving = false;
-  // The runtime reported the graph ready: a loss from here on leaves a run that
-  // `hack down --recover` retires across boots; before it, none can yet.
-  let graphReady = false;
+  // How far the start got, for the lost-VM message (HACK-2096): preparing
+  // (with or without a run record for `down --recover`), services requested,
+  // or ready and mapped.
+  let loss: NativeForegroundLossStage = {
+    stage: "preparing",
+    recorded: opts.restore !== undefined,
+  };
   // The graph is confirmed stopped: the start is finishing (down.after, the
   // finalization acknowledgement) and no longer needs its VM. The pool now
   // counts as idle, so another project's up or a runtime down may stop it
@@ -4841,7 +4875,7 @@ export async function startNativeProject(
                 return;
               }
               if (!detached) {
-                warn(nativeForegroundPoolEndMessage(end, { graphReady }));
+                warn(nativeForegroundPoolEndMessage(end, loss));
               }
               await finish?.();
               if (!settled) {
@@ -4861,7 +4895,7 @@ export async function startNativeProject(
           // like a ready one, it has nothing left to finish on its own.
           if (event.phase === "ready" || event.phase === "started") {
             serving = true;
-            graphReady = true;
+            loss = { stage: "ready" };
           } else if (event.phase === "stopping" || event.phase === "stopped") {
             serving = false;
           }
@@ -4877,8 +4911,14 @@ export async function startNativeProject(
       },
       watchAdmittedBoot,
       {
+        onSelected: (recorded) => {
+          loss = { stage: "preparing", recorded };
+        },
+        onRequested: () => {
+          loss = { stage: "requested" };
+        },
         onReady: () => {
-          graphReady = true;
+          loss = { stage: "ready" };
         },
         onStopped: () => {
           graphStopped = true;

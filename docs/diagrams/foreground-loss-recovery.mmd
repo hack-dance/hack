@@ -3,25 +3,33 @@ title: ForegroundLossRecovery
 ---
 stateDiagram-v2
   direction TB
-  [*] --> Starting
-  Starting --> GraphReady : GraphReady
+  [*] --> Preparing
+  Preparing --> Requested : Request
+  Requested --> GraphReady : GraphReady [mapped]
   GraphReady --> Serving : Serve / retire intent, lock
-  Starting --> Lost : Lose
+  Preparing --> Lost : Lose / release lock
+  Requested --> Lost : Lose
   GraphReady --> Lost : Lose / release lock
   Serving --> Lost : Lose
   state advice <<choice>>
   Lost --> advice
-  advice --> Inspect : [lostAt = Starting]
-  advice --> Down : [graph was ready]
+  advice --> Inspect : [lostAt = Requested]
+  advice --> Down : [run recorded]
+  advice --> Up : [fresh up, Preparing]
   Down --> Up : down --recover
   Up --> Recovered : hack up
   Inspect --> [*]
   Recovered --> [*]
 
+  note right of Preparing
+    Images, review, restore
+    selection; nothing requested.
+    A restart holds its lock.
+  end note
   note right of GraphReady
-    Receipt ready-observed.
-    A restart still holds its
-    cleaned intent and its lock.
+    Ready and mapped. A restart
+    still holds its cleaned
+    intent and its lock.
   end note
   note left of Inspect
     No command can retire it
@@ -39,7 +47,7 @@ stateDiagram-v2
   classDef ok stroke-width:1.6px
   classDef fail stroke-width:1.6px
   classDef idle stroke-width:1.6px
-  class Starting,GraphReady wait
+  class Preparing,Requested,GraphReady wait
   class Serving live
   class Lost fail
   class Down,Up wait

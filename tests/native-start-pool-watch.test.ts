@@ -241,14 +241,14 @@ test("the end carries its evidence: the gone provider pid, or none for an ended 
 test("a run lost after its graph was ready names down --recover, then hack up", () => {
   const exited = nativeForegroundPoolEndMessage(
     { bootId: boot, providerPid: 4242 },
-    { graphReady: true }
+    { stage: "ready" }
   );
   expect(exited).toContain("pid 4242");
   expect(exited).toContain(boot);
   expect(exited).toContain("exit code 1");
   const stopped = nativeForegroundPoolEndMessage(
     { bootId: boot },
-    { graphReady: true }
+    { stage: "ready" }
   );
   expect(stopped).toContain(boot);
   expect(stopped).not.toContain("pid");
@@ -264,13 +264,14 @@ test("a run lost after its graph was ready names down --recover, then hack up", 
   }
 });
 
-test("a run lost before its graph was ready names no command that refuses it", () => {
+test("a run lost after its services were requested and before ready names no command that refuses it", () => {
   // HACK-2714: neither `hack down --recover` nor `hack up` can retire a run
-  // whose VM was lost before it was ready, so the message sends the user to
-  // neither, and says to keep the home for inspection.
+  // whose VM was lost after its services were requested and before it was
+  // ready and mapped, so the message sends the user to neither, and says to
+  // keep the home for inspection.
   const message = nativeForegroundPoolEndMessage(
     { bootId: boot, providerPid: 4242 },
-    { graphReady: false }
+    { stage: "requested" }
   );
   expect(message).toContain("pid 4242");
   expect(message).toContain("exit code 1");
@@ -279,4 +280,37 @@ test("a run lost before its graph was ready names no command that refuses it", (
   expect(message).not.toContain("hack restart");
   expect(message).toContain("Keep this native home unchanged");
   expect(message).toContain("hack ps --json");
+});
+
+test("a run lost before any service was requested names the commands that work", () => {
+  // Resolve, review, image builds and pulls, restore selection: nothing of
+  // this attempt was requested yet. A resumed retained run (or a restart's old
+  // run) is still the stopped retained run, which down --recover retires with
+  // any pending restart, so hack up works after it.
+  const recorded = nativeForegroundPoolEndMessage(
+    { bootId: boot, providerPid: 4242 },
+    { stage: "preparing", recorded: true }
+  );
+  expect(recorded).toContain("pid 4242");
+  expect(recorded).toContain("exit code 1");
+  expect(recorded).toContain("the run's data is kept");
+  expect(recorded.match(/hack down --recover/g)).toHaveLength(1);
+  expect(recorded).toContain("then hack up to start it again");
+  expect(recorded.indexOf("hack down --recover")).toBeLessThan(
+    recorded.indexOf("hack up")
+  );
+  expect(recorded).not.toContain("hack restart");
+  expect(recorded).not.toContain("Keep this native home unchanged");
+  // A fresh up has no run record: down --recover would only say not_started,
+  // so the message names hack up alone.
+  const fresh = nativeForegroundPoolEndMessage(
+    { bootId: boot },
+    { stage: "preparing", recorded: false }
+  );
+  expect(fresh).toContain(boot);
+  expect(fresh).toContain("exit code 1");
+  expect(fresh).not.toContain("hack down");
+  expect(fresh).not.toContain("data is kept");
+  expect(fresh).not.toContain("hack restart");
+  expect(fresh.split("\n").at(-1)).toBe("Run hack up to start it again.");
 });

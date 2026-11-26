@@ -7737,12 +7737,19 @@ test("the foreground lost-VM bound covers one pool check and the grace", () => {
  * next, then exits non-zero: at once when ready, after the grace otherwise.
  *
  * - `serving`: ready, nothing left to finish.
- * - `graph-ready`: the runtime reported the graph ready, and the frontend's own
- *   readiness work (here the caller's `onReady`, where `hack restart` retires
- *   its intent) still runs. The run is retired across boots by `hack down
- *   --recover`, which also retires a restart still pending.
- * - `starting`: lost before the graph was ready, which no command can retire
- *   yet (HACK-2714), so the message names none.
+ * - `graph-ready`: the runtime reported the graph ready and the run is mapped,
+ *   and the frontend's own readiness work (here the caller's `onReady`, where
+ *   `hack restart` retires its intent) still runs. The run is retired across
+ *   boots by `hack down --recover`, which also retires a restart still pending.
+ * - `ready-unmapped`: a started return whose runtime frame came, but whose
+ *   mapping save is still running (review L4). `down` would find no run, so
+ *   it is still the requested stage, not the ready one.
+ * - `starting`: services requested, lost before the graph was ready, which no
+ *   command can retire yet (HACK-2714), so the message names none.
+ * - `preparing` / `preparing-restore`: lost during image pulls, before any
+ *   service was requested (review M1). A fresh `up` has no run record, so the
+ *   message names `hack up` alone; a restore (a restart's replacement, or a
+ *   resumed retained run) names `hack down --recover`, then `hack up`.
  *
  * Every case runs `beforeLostExit` (a restart releases its lock there) once,
  * after the startup observation finished and before the exit.
@@ -7750,7 +7757,10 @@ test("the foreground lost-VM bound covers one pool check and the grace", () => {
 test.each([
   { stage: "serving" },
   { stage: "graph-ready" },
+  { stage: "ready-unmapped" },
   { stage: "starting" },
+  { stage: "preparing" },
+  { stage: "preparing-restore" },
 ] as const)("a foreground start exits non-zero when its provider VM dies ($stage)", async ({
   stage,
 }) => {
@@ -7767,6 +7777,24 @@ test.each([
   const released = Promise.withResolvers<void>();
   const exited = Promise.withResolvers<void>();
   opts.dependencies.warn = (line) => void warnings.push(line);
+  if (stage === "preparing" || stage === "preparing-restore") {
+    // Lost while the start acquires its images.
+    const retainedImages = opts.dependencies.retainedImages!;
+    opts.dependencies.retainedImages = async (request) => {
+      reached.resolve();
+      await released.promise;
+      return await retainedImages(request);
+    };
+  }
+  if (stage === "ready-unmapped") {
+    // The mapping save of a started return is still in flight.
+    const save = opts.dependencies.save!;
+    opts.dependencies.save = async (request) => {
+      reached.resolve();
+      await released.promise;
+      return await save(request);
+    };
+  }
   opts.dependencies.watchPool = (options) => {
     watched = options.bootId;
     return watchNativeStartPool({
@@ -7823,6 +7851,19 @@ test.each([
           },
         }
       : {}),
+    // A started return: the mapping is saved after the runtime's frame.
+    ...(stage === "ready-unmapped" ? { waitForReady: false } : {}),
+    // A restart's replacement (or a resumed retained run) has a run record.
+    ...(stage === "preparing-restore"
+      ? {
+          restore: {
+            run: "1".repeat(32),
+            owner: "c".repeat(32),
+            namespace: "b".repeat(64),
+            planId: "a".repeat(64),
+          },
+        }
+      : {}),
     beforeLostExit: async () => {
       order.push("beforeLostExit");
     },
@@ -7860,10 +7901,19 @@ test.each([
     expect(message).toContain(boot);
     expect(message).toContain("exit code 1");
     expect(message).not.toContain("hack restart");
-    if (stage === "starting") {
+    if (stage === "starting" || stage === "ready-unmapped") {
       expect(message).not.toContain("hack down");
       expect(message).not.toContain("hack up");
       expect(message).toContain("Keep this native home unchanged");
+    } else if (stage === "preparing") {
+      expect(message).not.toContain("hack down");
+      expect(message?.split("\n").at(-1)).toBe(
+        "Run hack up to start it again."
+      );
+    } else if (stage === "preparing-restore") {
+      expect(message).toContain(
+        "Run hack down --recover to retire the interrupted start with the run's data kept, then hack up to start it again."
+      );
     } else {
       expect(message).toContain(
         "Run hack down --recover to retire this run with its data kept, then hack up to start it again."

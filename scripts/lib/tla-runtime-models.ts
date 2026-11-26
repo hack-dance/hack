@@ -48,6 +48,23 @@ function runtimeServiceEither(first: ClientFields, ...others: ClientFields[]) {
   };
 }
 
+// foreground-loss-recovery: a lost restart told `hack down --recover`, then
+// `hack up`, whose `hack up` refuses the intent the down could not retire
+// (kept, or the lock still held). Shortest while preparing; also once ready.
+function pendingRestartRefused(lock: "TRUE" | "FALSE") {
+  const at = (lostAt: string) => [
+    'outcome = "refused"',
+    `lostAt = "${lostAt}"`,
+    'kind = "restart"',
+    'intent = "cleaned"',
+    `lock = ${lock}`,
+  ];
+  return {
+    fields: at("Preparing"),
+    alternativeWitnesses: [at("GraphReady")],
+  };
+}
+
 // Bounds and witnesses are reviewed contracts, not learned from each run.
 const laterIncompleteMissingLockStages = [
   "temp",
@@ -3276,51 +3293,63 @@ const contracts: readonly ModelContract[] = [
   },
   {
     // HACK-2096: after a foreground up or restart loses its VM, every command
-    // its message names is accepted in order. The negative control is PR #1253
-    // at cd0ebff10 (restart named by intent, lock left held, intent kept);
-    // keep-intent, leak-lock and intent-message each restore one old rule.
+    // its message names is accepted in order, and it withholds a command only
+    // where none works. The negative control is PR #1253 at cd0ebff10 (restart
+    // named by intent everywhere, lock left held, intent kept); keep-intent,
+    // leak-lock and intent-message each restore one old rule, and
+    // withhold-preparing is a6c4cba (no command before the graph was ready).
     // restart-recovers is the reachability witness of a recovered restart.
     name: "foreground-loss-recovery",
     module: "ForegroundLossRecovery",
-    states: 20,
+    states: 41,
     invariant: "NoRefusedAdvice",
-    fields: ['outcome = "refused"', 'lostAt = "Starting"'],
+    fields: ['outcome = "refused"', 'lostAt = "Requested"'],
+    alternativeWitnesses: [
+      ['outcome = "refused"', 'lostAt = "Preparing"', 'kind = "restart"'],
+    ],
     additionalControls: [
       {
         name: "keep-intent",
         negative: true,
         invariant: "NoRefusedAdvice",
-        fields: [
-          'outcome = "refused"',
-          'lostAt = "GraphReady"',
-          'kind = "restart"',
-          'intent = "cleaned"',
-          "lock = FALSE",
-        ],
+        ...pendingRestartRefused("FALSE"),
       },
       {
         name: "leak-lock",
         negative: true,
         invariant: "NoRefusedAdvice",
-        fields: [
-          'outcome = "refused"',
-          'lostAt = "GraphReady"',
-          'kind = "restart"',
-          'intent = "cleaned"',
-          "lock = TRUE",
-        ],
+        ...pendingRestartRefused("TRUE"),
       },
       {
+        // Only the intent rule differs, and only once ready: the restart lost
+        // at GraphReady is told `hack restart`, which refuses after down
+        // --recover retired its intent.
         name: "intent-message",
         negative: true,
         invariant: "NoRefusedAdvice",
-        fields: ['outcome = "refused"', 'lostAt = "Starting"'],
+        fields: [
+          'outcome = "refused"',
+          'kind = "restart"',
+          'msg = "downRestart"',
+          'lostAt = "GraphReady"',
+          'intent = "none"',
+        ],
+      },
+      {
+        name: "withhold-preparing",
+        negative: true,
+        invariant: "NoNeedlessWithholding",
+        fields: ['msg = "inspect"', 'lostAt = "Preparing"'],
       },
       {
         name: "restart-recovers",
         negative: true,
         invariant: "NoRestartRecovery",
-        fields: ['kind = "restart"', 'outcome = "ok"', 'lostAt = "GraphReady"'],
+        fields: ['kind = "restart"', 'outcome = "ok"', 'lostAt = "Preparing"'],
+        alternativeWitnesses: [
+          ['kind = "restart"', 'outcome = "ok"', 'lostAt = "GraphReady"'],
+          ['kind = "restart"', 'outcome = "ok"', 'lostAt = "Serving"'],
+        ],
       },
     ],
   },

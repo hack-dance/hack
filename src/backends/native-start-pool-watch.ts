@@ -52,35 +52,76 @@ export type NativeStartPoolEnd = {
 };
 
 /**
- * What a foreground start prints when its VM is lost (HACK-2096): which VM, that
- * this start exits non-zero with data kept, and what to run next.
+ * How far a foreground start got when its VM was lost (HACK-2096). The pool
+ * watch starts right after this attempt's `runtime up`, so a loss can come in
+ * any of three stages:
  *
- * `graphReady` says whether the runtime had reported this run's graph ready
- * (receipt `ready-observed`) before the loss. Only such a run is retired across
- * boots: `hack down --recover` first runs `runtime recover` for an exited
- * provider (HACK-2579), starts the pool and retires the run with its data kept,
- * and also retires a `hack restart` whose old run was already stopped, so
- * `hack up` then starts it again whether or not this start was a restart's
- * replacement. A graph lost before it was ready has no supported retirement yet
- * (HACK-2714): `hack down --recover` and `hack up` both refuse it, so the
- * message names neither and says to keep the native home for inspection.
+ * - `preparing`: no service of this run was requested yet (resolve, review,
+ *   image builds and pulls, restore selection). `recorded` says whether a run
+ *   record exists for `hack down --recover` to find: a stopped retained run
+ *   this `up` resumes, or the old run of a `hack restart`. A fresh `up` has
+ *   none, so that down would only say `not_started`.
+ * - `requested`: services were requested, and the graph is not yet both
+ *   reported ready by the runtime and mapped.
+ * - `ready`: the runtime reported the graph ready (receipt `ready-observed`)
+ *   and the run mapping is saved.
+ */
+export type NativeForegroundLossStage =
+  | { readonly stage: "preparing"; readonly recorded: boolean }
+  | { readonly stage: "requested" }
+  | { readonly stage: "ready" };
+
+/**
+ * What a foreground start prints when its VM is lost (HACK-2096): which VM, that
+ * this start exits non-zero, and what to run next. Each stage names only
+ * commands that are accepted, in order:
+ *
+ * - `ready`, and `preparing` with a run record: `hack down --recover`, then
+ *   `hack up`. The down first runs `runtime recover` for an exited provider
+ *   (HACK-2579) and starts the pool. A ready run is retired with its data kept;
+ *   a run lost while preparing is still the stopped retained run (for a
+ *   restart, its old run), and the down retires the interrupted start's
+ *   leftovers with it. Either way it also retires a pending `hack restart`
+ *   whose old run was already stopped, so `hack up` then starts the project
+ *   whether or not this start was a restart's replacement.
+ * - `preparing` without a run record (a fresh `up`): nothing was requested
+ *   and nothing is recorded, so `hack up` alone starts it again.
+ * - `requested`: no hack command retires a run lost there yet (HACK-2714);
+ *   `hack down --recover` and `hack up` both refuse it, so the message names
+ *   neither and says to keep the native home for inspection.
  */
 export function nativeForegroundPoolEndMessage(
   end: NativeStartPoolEnd,
-  opts: { readonly graphReady: boolean }
+  loss: NativeForegroundLossStage
 ): string {
   const lost =
     end.providerPid === undefined
       ? `The native runtime VM under this start stopped: guest boot ${end.bootId} ended (the pool was stopped or booted again).`
       : `The native runtime VM under this start exited: its provider process (pid ${end.providerPid}) is gone, and guest boot ${end.bootId} with it.`;
+  if (loss.stage === "preparing" && !loss.recorded) {
+    return [
+      lost,
+      "This foreground start ends now with exit code 1; none of its services had been requested yet.",
+      "Run hack up to start it again.",
+    ].join("\n");
+  }
   return [
     lost,
     "This foreground start ends now with exit code 1; the run's data is kept.",
-    opts.graphReady
-      ? "Run hack down --recover to retire this run with its data kept, then hack up to start it again."
-      : "It was lost before its services were ready, and no hack command can retire a run lost at that point yet. Keep this native home unchanged for inspection; hack ps --json shows what the run left.",
+    LOSS_ADVICE[loss.stage],
   ].join("\n");
 }
+
+const LOSS_ADVICE: Readonly<
+  Record<NativeForegroundLossStage["stage"], string>
+> = {
+  preparing:
+    "It was lost before any of its services were requested. Run hack down --recover to retire the interrupted start with the run's data kept, then hack up to start it again.",
+  requested:
+    "It was lost before its services were ready, and no hack command can retire a run lost at that point yet. Keep this native home unchanged for inspection; hack ps --json shows what the run left.",
+  ready:
+    "Run hack down --recover to retire this run with its data kept, then hack up to start it again.",
+};
 
 export function watchNativeStartPool(opts: {
   readonly home: string;

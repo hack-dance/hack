@@ -1249,7 +1249,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-foreground-down-hooks",
     module: "DownHooks",
-    states: 1246,
+    states: 1288,
     invariant: "Safe",
     fields: [
       "unsafeBefore = TRUE",
@@ -1300,6 +1300,30 @@ const contracts: readonly ModelContract[] = [
           'jState = "complete"',
           'jGen = "D"',
           "unsafeBefore = FALSE",
+          "unsafeAfter = FALSE",
+        ],
+      },
+      {
+        // HACK-2715, real VM at efcec5d3: without the boot-ended forfeit, a
+        // down claims the ready run's owed record after the boot ended.
+        name: "owed-after-boot-end",
+        negative: true,
+        fields: [
+          "unsafeBoot = TRUE",
+          "ended = TRUE",
+          'jState = "beforeStarted"',
+          'jGen = "D"',
+        ],
+      },
+      {
+        name: "after-owed-post-boot-reachable",
+        negative: true,
+        invariant: "NeverAfterPostBoot",
+        fields: [
+          "ended = TRUE",
+          'jState = "complete"',
+          'jGen = "D"',
+          "unsafeBoot = FALSE",
           "unsafeAfter = FALSE",
         ],
       },
@@ -3357,6 +3381,146 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NoRestartOverLiveRun",
         fields: ["stoppedLive = TRUE", 'pool = "stopped"', 'run = "ready"'],
+      },
+      // HACK-2477: a plain `runtime down` refuses while a run is live; only
+      // `--force` stops the pool under it. Without the refusal the plain down
+      // stops the pool under a ready run.
+      {
+        name: "down-no-refusal",
+        negative: true,
+        invariant: "NoDownOverLiveRun",
+        fields: ["downOverLive = TRUE", 'pool = "stopped"', 'run = "ready"'],
+      },
+      // HACK-2715 (seen on a real VM): a native-authored project shares the pool.
+      // After `runtime down --force` (or a crash) each project comes back by its
+      // own commands (`CanComeUp`, `NativeCanComeUp`). Each control is `next`
+      // before the fix for one part: admission refused the native run of the
+      // ended boot, so the Compose start was refused for good; the native
+      // recovery accepted only its own boot; its down --recover did not start a
+      // stopped pool. The review of HACK-2715 adds a native start in progress
+      // (`preparing`), a run with boot-bound state that is refused by name
+      // (`NativeStranded`), and an owner that outlives the pool (seen on a real
+      // VM). Its controls: a start caught mid-way refused by admission and
+      // recovery; the live owner's stop same-boot only; `hack down` starting a
+      // stopped pool without checking the receipt first.
+      { name: "two-projects", negative: false, states: 12_290 },
+      {
+        name: "admission-ended-boot",
+        negative: true,
+        invariant: "CanComeUp",
+        fields: ['nrun = "preparing"', "nrunBoot = 1"],
+        alternativeWitnesses: [
+          ['nrun = "ready"', "nrunBoot = 1"],
+          ['nrun = "preparing"', "nrunBoot = 2"],
+          ['nrun = "ready"', "nrunBoot = 2"],
+        ],
+      },
+      {
+        name: "native-same-boot",
+        negative: true,
+        invariant: "NativeCanComeUp",
+        fields: ['pool = "running"', 'nrun = "preparing"', 'nowner = "dead"'],
+        alternativeWitnesses: [
+          ['pool = "running"', 'nrun = "ready"', 'nowner = "dead"'],
+        ],
+      },
+      {
+        name: "native-stopped-pool",
+        negative: true,
+        invariant: "NativeCanComeUp",
+        fields: ['pool = "stopped"', 'nrun = "preparing"', 'nowner = "dead"'],
+        alternativeWitnesses: [
+          ['pool = "stopped"', 'nrun = "ready"', 'nowner = "dead"'],
+          ['pool = "stopped"', 'nrun = "ready"', 'nowner = "live"'],
+        ],
+      },
+      {
+        name: "native-mid-start",
+        negative: true,
+        invariant: "CanComeUp",
+        fields: ['nrun = "preparing"', 'nowner = "dead"', "nbound = FALSE"],
+        alternativeWitnesses: [
+          ['nrun = "preparing"', 'nowner = "dead"', "nbound = TRUE"],
+        ],
+      },
+      {
+        name: "native-live-owner",
+        negative: true,
+        invariant: "NativeCanComeUp",
+        fields: ['pool = "running"', 'nrun = "ready"', 'nowner = "live"'],
+      },
+      {
+        name: "native-start-unchecked",
+        negative: true,
+        invariant: "NoWastedPoolStart",
+        fields: ["nwasted = TRUE", "nbound = TRUE", 'pool = "running"'],
+      },
+      // HACK-2715 review round 2: a boot-bound run of an ended boot is refused
+      // by name, but its live owner must still be asked to stop (that needs no
+      // pool). The old ordering refused before the stop on a stopped pool, so
+      // the owner and its publication stayed up: `NativeStranded` no longer
+      // accepts a live owner.
+      {
+        name: "native-bound-owner",
+        negative: true,
+        invariant: "NativeCanComeUp",
+        fields: [
+          'pool = "stopped"',
+          'nrun = "ready"',
+          'nowner = "live"',
+          "nbound = TRUE",
+        ],
+      },
+      // HACK-2715 review round 2 (real VM at c1dfac73): `hack down` started a
+      // stopped pool, then the live owner's stop did not confirm, and the run
+      // was left. The fix asks the owner to stop first, on the stopped pool,
+      // and settles the run by the dead-owner recovery in the same command.
+      {
+        name: "native-stop-after-start",
+        negative: true,
+        invariant: "DownConfirms",
+        fields: [
+          "nunconfirmed = TRUE",
+          'nowner = "dead"',
+          'nrun = "ready"',
+          'pool = "running"',
+        ],
+      },
+      // The same VM run: a native owner outlived `runtime down --force`. The fix
+      // makes the owner notice that its boot ended and exit, and `--force` waits.
+      {
+        name: "force-leaves-owner",
+        negative: true,
+        invariant: "NoOwnerLeftByForce",
+        fields: ["forcedOwner = TRUE", 'pool = "stopped"', 'nowner = "live"'],
+      },
+      // Codex P2 on #1257: a provider that died under the pool leaves its record
+      // `running`; only `hack native recover` moved such a pool on. The native
+      // `hack down` now runs `runtime recover` first, and owners count a provider
+      // proven gone as the end of their boot.
+      {
+        name: "native-down-on-crash",
+        negative: true,
+        invariant: "NativeDownActs",
+        fields: ['pool = "crashed"', 'nrun = "preparing"'],
+        alternativeWitnesses: [['pool = "crashed"', 'nrun = "ready"']],
+      },
+      // The real-VM regression at 3c88966f: an owner whose pool boot ended
+      // returned normally and released its admission lock, which the dead-owner
+      // recovery needs. It now ends as a crash would.
+      {
+        name: "owner-exits-released",
+        negative: true,
+        invariant: "NativeCanComeUp",
+        fields: ['nowner = "gone"', 'nrun = "ready"'],
+      },
+      // Review round 4 (High): a project with lifecycle hooks took the hook path
+      // once its pool boot ended and released the admission lock the same way.
+      {
+        name: "hook-owner-exits-released",
+        negative: true,
+        invariant: "NativeCanComeUp",
+        fields: ['nowner = "gone"', 'nrun = "ready"', "nhooks = TRUE"],
       },
     ],
   },

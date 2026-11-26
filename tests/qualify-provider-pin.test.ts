@@ -1127,6 +1127,56 @@ esac
     }
   });
 
+  test("HACK-2477: the emergency stop forces each pool down; the measured stop stays plain", () => {
+    const { root, run, done } = fixture();
+    try {
+      const calls: string[][] = [];
+      run.exec = (_name, argv) => {
+        calls.push(argv);
+        return { code: 0, stdout: "{}", stderr: "", seconds: 0 };
+      };
+      for (const home of run.homes()) {
+        mkdirSync(join(home, ".hack-local/run/smolvm"), { recursive: true });
+        writeFileSync(join(home, ".hack-local/run/smolvm/owner.json"), "{}");
+      }
+      run.stopAll("cleanup");
+      expect(calls[0]).toEqual([
+        join(root, "bin", "hack"),
+        "down",
+        "--path",
+        run.project,
+      ]);
+      expect(calls.slice(1)).toEqual(
+        run
+          .homes()
+          .map((home) => [
+            "/bin/true",
+            "--candidate-root",
+            home,
+            "runtime",
+            "down",
+            "--force",
+            "--json",
+          ])
+      );
+      calls.length = 0;
+      run.status = () => ({ process_alive: false });
+      run.stopMainPool("network");
+      expect(calls).toEqual([
+        [
+          "/bin/true",
+          "--candidate-root",
+          run.main,
+          "runtime",
+          "down",
+          "--json",
+        ],
+      ]);
+    } finally {
+      done();
+    }
+  });
+
   test("restart retains the previous foreground when its replacement fails before readiness", async () => {
     const { root, run, done } = fixture();
     try {

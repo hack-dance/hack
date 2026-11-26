@@ -15,6 +15,12 @@ type RecoverySelectionFields = {
   readonly receipt: NativeAuthoredReceipt;
   readonly receipt_sha256: string;
   readonly owner_sha256: string;
+  /**
+   * Present (`true`) only when the receipt belongs to a pool boot that ended
+   * under it (HACK-2715): the runtime then admits a start caught mid-way,
+   * whose pending effects ended with that boot's guest.
+   */
+  readonly ended_boot?: true;
 };
 export type NativeAuthoredRecoverySelection = RecoverySelectionFields &
   (
@@ -25,7 +31,13 @@ export type NativeAuthoredRecoveryResult = {
   readonly version: 1;
   readonly kind: "native-graph-live-owner-recovered";
   readonly run: string;
-  readonly same_boot: true;
+  /**
+   * Whether the run belonged to the current pool boot. `false` when it was
+   * recovered from a boot that ended under it (`runtime down --force`, a crash
+   * or a host reboot, HACK-2715). `null` in a resumed frontend recovery whose
+   * runtime cleanup completed in an earlier attempt.
+   */
+  readonly same_boot: boolean | null;
   readonly publication_retired: true;
   readonly receipt: NativeAuthoredReceipt;
 };
@@ -80,6 +92,25 @@ function settled(value: unknown): NativeAuthoredReceipt {
   }
   return receipt;
 }
+/**
+ * A receipt of an ended pool boot that the runtime's cleanup from that boot
+ * admits (HACK-2715): a graph2 receipt in any phase, including a start caught
+ * mid-way. The runtime re-checks the boot, the owner and each member before any
+ * effect; this copy only binds what it selected.
+ */
+function endedBootSettled(value: unknown): NativeAuthoredReceipt {
+  const receipt = parseNativeAuthoredReceipt(value);
+  if (
+    receipt.version !== 2 ||
+    (receipt.phase === "removed" &&
+      Object.values(receipt.resources).some(
+        (resource) => resource.phase !== "removed"
+      ))
+  ) {
+    return refused();
+  }
+  return receipt;
+}
 function ready(value: unknown): NativeAuthoredReceipt {
   const receipt = settled(value);
   if (
@@ -90,6 +121,44 @@ function ready(value: unknown): NativeAuthoredReceipt {
     return refused();
   }
   return receipt;
+}
+
+/**
+ * Whether a selection carries the runtime's ended-boot marker (HACK-2715). The
+ * marker is present only as `true`; any other value refuses.
+ */
+function endedBootMarker(value: unknown): boolean {
+  if (!(isRecord(value) && Object.hasOwn(value, "ended_boot"))) {
+    return false;
+  }
+  return value.ended_boot === true ? true : refused();
+}
+/** The exact own fields of a selection with this qualifier and marker. */
+function selectionFields(qualifier: string, endedBoot: boolean): string[] {
+  const names = [
+    "version",
+    "kind",
+    "run",
+    "receipt",
+    "receipt_sha256",
+    "owner_sha256",
+    qualifier,
+  ];
+  return endedBoot ? [...names, "ended_boot"] : names;
+}
+/**
+ * The selected receipt's admission rule. A readied run of an ended boot may
+ * have recorded a failure since Ready, or be caught in its own stop; its
+ * binding to the admitted Ready is still checked by the caller.
+ */
+function selectedReceipt(
+  value: unknown,
+  opts: { readonly endedBoot: boolean; readonly admitted: boolean }
+): NativeAuthoredReceipt {
+  if (opts.endedBoot) {
+    return endedBootSettled(value);
+  }
+  return opts.admitted ? ready(value) : settled(value);
 }
 
 /** Raw selectors belong to Rust's secure reader. This copied, closed envelope
@@ -111,16 +180,9 @@ export function parseNativeAuthoredRecoverySelection(
     isRecord(value) && Object.hasOwn(value, "host_boot_uuid")
       ? "host_boot_uuid"
       : "host_boot_micros";
+  const endedBoot = endedBootMarker(value);
   if (
-    !fields(value, [
-      "version",
-      "kind",
-      "run",
-      "receipt",
-      "receipt_sha256",
-      "owner_sha256",
-      qualifier,
-    ]) ||
+    !fields(value, selectionFields(qualifier, endedBoot)) ||
     (value.version !== 1 && value.version !== 2) ||
     value.kind !== "native-graph-recovery-selection" ||
     value.run !== review.provenance.run ||
@@ -129,7 +191,10 @@ export function parseNativeAuthoredRecoverySelection(
   ) {
     return refused();
   }
-  const receipt = admitted ? ready(value.receipt) : settled(value.receipt);
+  const receipt = selectedReceipt(value.receipt, {
+    endedBoot,
+    admitted: admitted !== undefined,
+  });
   if (
     JSON.stringify(receipt.review) !== JSON.stringify(review) ||
     (admitted &&
@@ -144,6 +209,7 @@ export function parseNativeAuthoredRecoverySelection(
     receipt,
     receipt_sha256: value.receipt_sha256,
     owner_sha256: value.owner_sha256,
+    ...(endedBoot ? { ended_boot: true as const } : {}),
   };
   if (value.version === 1) {
     if (
@@ -189,7 +255,7 @@ export function parseNativeAuthoredRecoveryResult(opts: {
     value.version !== 1 ||
     value.kind !== "native-graph-live-owner-recovered" ||
     value.run !== expected.run ||
-    value.same_boot !== true ||
+    typeof value.same_boot !== "boolean" ||
     value.publication_retired !== true
   ) {
     return refused();
@@ -206,7 +272,7 @@ export function parseNativeAuthoredRecoveryResult(opts: {
     version: 1,
     kind: "native-graph-live-owner-recovered",
     run: expected.run,
-    same_boot: true,
+    same_boot: value.same_boot === true,
     publication_retired: true,
     receipt,
   };

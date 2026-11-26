@@ -2110,6 +2110,10 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
         "foreground": publication.word(),
         "live_owner_recovery": resumable,
         "failed_start_recoverable": !running && live_owner_cleanup::failed_start_recoverable(&root, &receipt),
+        // Whether the cross-boot dead-owner recovery admits this receipt as a start
+        // lost before ready (HACK-2714), so a caller starts a stopped pool only for
+        // a recovery that can use it. Selection only, like the fields around it.
+        "cross_boot_start": !running && dead_owner_cleanup::unconfirmed_start(&receipt),
         "dead_owner_recovery": predecessor,
         "dead_owner_recovery_complete": predecessor_complete,
         "dead_owner_recovery_error": predecessor_error,
@@ -2743,28 +2747,43 @@ fn cleanup_owned_fenced(
     Ok(receipt)
 }
 
-/// Flushes the guest's filesystems (the engine state on `/storage` included) and
-/// confirms the flush returned. The guest script itself first checks the boot,
-/// the pool owner and the ext4 `/storage` mount (`Guest::execute`).
-const STORAGE_BARRIER: &str = "sync\nprintf 'hack-storage-barrier-v1 synced\\n'\n";
+/// Flushes the guest's `/storage` filesystem, where the engine keeps its state, and
+/// confirms the flush returned. The guest's BusyBox `sync -f` flushes only that
+/// filesystem (`syncfs`); a build without that option ignores it and flushes all
+/// of them, which is slower but never less durable. The guest script itself first
+/// checks the boot, the pool owner and the ext4 `/storage` mount.
+const STORAGE_BARRIER: &str = "sync -f /storage\nprintf 'hack-storage-barrier-v1 synced\\n'\n";
 const STORAGE_BARRIER_DONE: &str = "hack-storage-barrier-v1 synced\n";
+/// The barrier's own bound. The cleanup holds the provider lease, so a flush that
+/// stalls must end well before another project's start gives up waiting for it.
+const STORAGE_BARRIER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Durability barrier for a cleanup that has removed guest resources: commit them
-/// to the guest disk before any host record says they are gone. A barrier that
-/// does not confirm leaves the receipt at `cleanup-intent`, which every recovery
-/// already resumes by reinspection.
+/// to the guest disk before any host record says they are gone (HACK-2719). It runs
+/// without allocation admission, so memory pressure cannot refuse a `hack down`. A
+/// barrier that does not confirm in time leaves the receipt at `cleanup-intent`,
+/// which a repeated `hack down` (and every recovery) resumes by reinspection.
 pub(super) fn storage_barrier(engine: &Engine<'_>) -> Result<(), CandidateError> {
-    storage_barrier_confirmed(&engine.guest().execute(STORAGE_BARRIER, &[], None)?)
+    let deadline = std::time::Instant::now() + STORAGE_BARRIER_TIMEOUT;
+    let output = engine
+        .guest()
+        .execute_cleanup_until(STORAGE_BARRIER, &[], deadline)
+        .map_err(|_| storage_barrier_refused())?;
+    storage_barrier_confirmed(&output)
+}
+
+fn storage_barrier_refused() -> CandidateError {
+    error(
+        "graph_cleanup_uncertain",
+        "The guest did not confirm within 10 seconds that the removed graph resources reached its disk, so the cleanup is not recorded yet; retained data is kept. Run hack down again.",
+    )
 }
 
 fn storage_barrier_confirmed(output: &str) -> Result<(), CandidateError> {
     if output == STORAGE_BARRIER_DONE {
         return Ok(());
     }
-    Err(error(
-        "graph_cleanup_uncertain",
-        "The guest did not confirm that the removed graph resources reached its disk; cleanup is not confirmed.",
-    ))
+    Err(storage_barrier_refused())
 }
 
 #[cfg(test)]
@@ -2773,7 +2792,9 @@ mod storage_barrier_tests {
 
     #[test]
     fn only_the_exact_confirmation_commits_a_cleanup() {
-        assert!(STORAGE_BARRIER.starts_with("sync\n"));
+        // Only the storage filesystem is flushed, within its own short bound.
+        assert!(STORAGE_BARRIER.starts_with("sync -f /storage\n"));
+        assert_eq!(STORAGE_BARRIER_TIMEOUT, Duration::from_secs(10));
         storage_barrier_confirmed(STORAGE_BARRIER_DONE).unwrap();
         for output in [
             "",
@@ -2781,10 +2802,9 @@ mod storage_barrier_tests {
             "hack-storage-barrier-v1 synced\n\n",
             "sync: error\nhack-storage-barrier-v1 synced\n",
         ] {
-            assert_eq!(
-                storage_barrier_confirmed(output).unwrap_err().code,
-                "graph_cleanup_uncertain"
-            );
+            let refused = storage_barrier_confirmed(output).unwrap_err();
+            assert_eq!(refused.code, "graph_cleanup_uncertain");
+            assert!(refused.message.contains("Run hack down again."));
         }
     }
 }

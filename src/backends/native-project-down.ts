@@ -152,12 +152,16 @@ const RECOVERABLE_LIVE_PHASES: ReadonlySet<string> = new Set([
 /**
  * Phases of a start lost before it was ready that the runtime's cross-boot
  * dead-owner recovery also retires once the pool is started again (HACK-2714):
- * the owner's own unwind leaves `failed-retained`; an owner killed while
- * starting leaves `preparing`. A restore or restart in progress is not one.
+ * the owner's own unwind leaves `failed-retained`; an owner that died without
+ * unwinding leaves its start's `preparing` or (an admitted restore) `restoring`.
+ * A restart in progress (`restarting`) is not one. The runtime also requires a
+ * settled relay startup and no cleanup marker, which `graph foreground-owner`
+ * reports as `cross_boot_start`.
  */
 const CROSS_BOOT_START_PHASES: ReadonlySet<string> = new Set([
   "failed-retained",
   "preparing",
+  "restoring",
 ]);
 
 /** What `graph foreground-owner` selected; it grants no recovery authority. */
@@ -172,6 +176,12 @@ type ForegroundOwnerSelection = {
   readonly deadOwnerRecoveryComplete: boolean;
   readonly deadOwnerRecoveryError: string | null;
   readonly failedStartRecoverable: boolean;
+  /**
+   * The runtime's cross-boot recovery admits this receipt as a start lost before
+   * ready (`cross_boot_start`: a lost-start phase, a settled relay startup and no
+   * cleanup marker). Absent from an older runtime, which never admitted one.
+   */
+  readonly crossBootStart: boolean;
 };
 
 /**
@@ -243,6 +253,7 @@ async function selectForegroundOwner(opts: {
     !isRecord(value) ||
     value.version !== 1 ||
     !optionalBoolean(value.failed_start_recoverable) ||
+    !optionalBoolean(value.cross_boot_start) ||
     value.run !== opts.run.run ||
     value.owner !== opts.run.owner ||
     typeof value.phase !== "string" ||
@@ -281,6 +292,7 @@ async function selectForegroundOwner(opts: {
   return {
     phase: value.phase,
     failedStartRecoverable: value.failed_start_recoverable === true,
+    crossBootStart: value.cross_boot_start === true,
     receiptSha256: value.receipt_sha256,
     foreground: value.foreground as ForegroundOwnerSelection["foreground"],
     liveOwnerRecovery:
@@ -798,14 +810,17 @@ export const NATIVE_RESTART_INTENT_UNREADABLE_NOTE =
  * it needs no running pool) shows an exited owner whose run the recovery after a
  * boot can still recover. Starting the pool begins a new boot, so only the
  * cross-boot dead-owner recovery applies: a ready run, a start lost before it
- * was ready (`failed-retained` after the owner's own unwind, or `preparing`;
- * HACK-2714), or an interrupted dead-owner recovery resuming by its own
+ * was ready (`failed-retained` after the owner's own unwind, or `preparing` or
+ * `restoring` without one; HACK-2714), or an interrupted dead-owner recovery
+ * resuming by its own
  * selection. The runtime admits a lost start only with a settled relay startup
- * and no cleanup marker, and revalidates the dead owner and the ended boot. The
+ * and no cleanup marker (`crossBootStart`, read from the receipt before the pool
+ * is started), and revalidates the dead owner and the ended boot. The
  * same-boot recoveries (`recover-live-owner`, which an interrupted live-owner
  * recovery uses) need the original boot's relay identity and cannot run after
- * it, so that case, an exited owner of a restore or restart in progress
- * (`restoring`, `restarting`), a live, absent or uncertain owner, a retained
+ * it, so that case, an exited owner of a restart in progress (`restarting`) or
+ * of a lost start the runtime would refuse, a live, absent or uncertain owner, a
+ * retained
  * stop (whose unadmitted owner is retired without the pool) and an unreadable
  * selection are all false: the caller keeps its refusal and never starts a pool
  * it could not then use.
@@ -827,7 +842,8 @@ async function deadOwnerOfLiveRun(opts: {
     if (
       selection.foreground === "exited" &&
       (RECOVERABLE_LIVE_PHASES.has(selection.phase) ||
-        CROSS_BOOT_START_PHASES.has(selection.phase) ||
+        (CROSS_BOOT_START_PHASES.has(selection.phase) &&
+          selection.crossBootStart) ||
         selection.deadOwnerRecovery !== null)
     ) {
       return true;
@@ -943,7 +959,8 @@ class ExitedPoolRecovered extends Error {
  * container absent, so `hack down --recover` refused ("cleanup is
  * unconfirmed") and `hack up` refused the mapping. Only this exact shape is
  * repaired, by the runtime's own `graph cleanup` of the receipt's resources
- * (exact ids, volumes kept); anything running, uncertain or unrecorded is not.
+ * (exact ids; named volumes and data kept, a container's anonymous volumes go
+ * with it as in the original down); anything running, uncertain or unrecorded is not.
  * The run's owner retired its publication when that down finished, so the
  * runtime removes them under that retirement's lock, without an owner
  * (HACK-2719). A cleanup also flushes the guest disk before it records the

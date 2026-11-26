@@ -46,8 +46,9 @@ stateDiagram-v2
   end note
   note right of Down
     Starts the pool; retires a
-    lost start or a ready run,
-    port or none, data kept.
+    lost start (failed-retained
+    or restoring) or a ready
+    run, port or none, data kept.
     Removes containers a lost
     VM brought back.
   end note

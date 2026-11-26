@@ -2787,10 +2787,19 @@ test.each([
   { foreground: "exited", phase: "stopped-data-retained" },
   // A retained stop whose frontend finished its finalization needs nothing more.
   { foreground: "absent", phase: "stopped-data-retained" },
-  // A restore or restart in progress has no supported recovery after a boot,
-  // so the pool is not started for it (requireRecoverableOwner).
-  { foreground: "exited", phase: "restoring" },
+  // A restart in progress has no supported recovery after a boot, so the pool
+  // is not started for it (requireRecoverableOwner).
   { foreground: "exited", phase: "restarting" },
+  // A lost start the runtime would refuse (an unsettled relay startup or a
+  // cleanup marker: no `cross_boot_start`) does not start a pool either.
+  { foreground: "exited", phase: "failed-retained" },
+  { foreground: "exited", phase: "preparing" },
+  { foreground: "exited", phase: "restoring" },
+  {
+    foreground: "exited",
+    phase: "failed-retained",
+    extra: { cross_boot_start: false, failed_start_recoverable: true },
+  },
   // A same-boot recovery (recover-live-owner) cannot run after the boot this
   // would start, so the pool is not started for it either.
   {
@@ -2837,6 +2846,8 @@ test.each([
 test.each([
   { phase: "failed-retained" },
   { phase: "preparing" },
+  // An owner killed mid-restore, without its unwind (reviewer finding).
+  { phase: "restoring" },
   // The same-boot hint does not matter once the boot has ended.
   { phase: "failed-retained", extra: { failed_start_recoverable: true } },
 ] as {
@@ -2866,6 +2877,7 @@ test.each([
         return {
           ...ownerSelection("exited", phase),
           ...extra,
+          cross_boot_start: true,
           dead_owner_recovery: pool ? receiptSha : null,
         };
       }

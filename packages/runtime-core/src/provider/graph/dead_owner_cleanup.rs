@@ -62,15 +62,26 @@ fn live(phase: &str) -> bool {
     matches!(phase, "ready-observed" | STARTED_OBSERVED)
 }
 
-/// A start whose owner died before it was ready, recovered across a boot the way
-/// `prepare` admits it on a stopped pool (HACK-2714): the owner's own unwind left
-/// `failed-retained`, or it died while `preparing`. Only a settled relay startup
-/// is admitted (every dependency service released or completed), so no prepared
-/// host reservation is left to a later boot. A restore or restart in progress
-/// keeps its refusal, as in `prepare`.
+/// A start whose owner died before it was ready, recovered across a boot
+/// (HACK-2714): the owner's own unwind left `failed-retained`, or it died without
+/// unwinding (killed, crashed, or ended with its frontend) while `preparing` or
+/// `restoring`. Only a settled relay startup is admitted (every dependency service
+/// released or completed), so no prepared host reservation is left to a later boot.
+///
+/// A `restoring` receipt on disk is always an admitted restore: a fresh owner
+/// commits it only with its startup enrollment (`restore.rs`), and before that the
+/// acknowledged stopped receipt stays, retired as an unadmitted owner. The restore's
+/// own failure path (`retain_restore_failure`) changes nothing else in it but the
+/// phase, to `failed-retained`, which `prepare` already admits. So a `restoring`
+/// receipt whose owner died holds the same resources and evidence as the
+/// `failed-retained` one an unwind would have left, and the same cleanup retires it.
+/// A restart in progress (`restarting`), which replaces a ready generation's
+/// containers in place, keeps its refusal.
 pub(super) fn unconfirmed_start(receipt: &Receipt) -> bool {
-    matches!(receipt.phase.as_str(), "failed-retained" | "preparing")
-        && receipt.relay_cleanup.is_none()
+    matches!(
+        receipt.phase.as_str(),
+        "failed-retained" | "preparing" | "restoring"
+    ) && receipt.relay_cleanup.is_none()
         && receipt.relay_startup.as_ref().is_some_and(|startup| {
             startup.valid(receipt)
                 && startup.services.values().all(|service| {
@@ -2322,21 +2333,27 @@ mod tests {
             hint(&receipt, &owner, true),
             Some(selected(&receipt).unwrap())
         );
+        // An owner that died without unwinding leaves the start's own phase: a
+        // fresh start's `preparing`, or an admitted restore's `restoring`.
+        for phase in ["preparing", "restoring"] {
+            let mut starting = receipt.clone();
+            starting.phase = phase.into();
+            assert!(unconfirmed_start(&starting));
+            assert_eq!(
+                hint(&starting, &owner, true),
+                Some(selected(&starting).unwrap())
+            );
+        }
         let mut preparing = receipt.clone();
         preparing.phase = "preparing".into();
-        assert!(unconfirmed_start(&preparing));
-        assert_eq!(
-            hint(&preparing, &owner, true),
-            Some(selected(&preparing).unwrap())
-        );
         // No exited publication, or the run's own boot still current: nothing.
         assert!(hint(&receipt, &owner, false).is_none());
         let mut same_boot = owner.clone();
         same_boot.guest_boot_id = Some(previous.clone());
         assert!(hint(&receipt, &same_boot, true).is_none());
-        // A restore or restart in progress keeps its refusal, as in `prepare`, and
-        // so does an enrolled cleanup marker or an unsettled relay startup.
-        for phase in ["restoring", "restarting", "stopped-data-retained"] {
+        // A restart in progress keeps its refusal, and so does an enrolled cleanup
+        // marker or an unsettled relay startup.
+        for phase in ["restarting", "stopped-data-retained"] {
             let mut other = receipt.clone();
             other.phase = phase.into();
             assert!(!unconfirmed_start(&other));

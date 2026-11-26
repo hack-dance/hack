@@ -91,8 +91,9 @@ export type NativeForegroundLossStage =
  *   and nothing is recorded, so `hack up` alone starts it again.
  * - `requested` with a run record: `hack down --recover`, then `hack up`
  *   (HACK-2714). The down starts the pool, and the runtime's cross-boot
- *   dead-owner recovery retires the start its owner left `failed-retained` (or
- *   `preparing`), data kept.
+ *   dead-owner recovery retires the start its owner left: `failed-retained`
+ *   after its own unwind, or the admitted restore's `restoring` when it died
+ *   without one (killed, or taken down with this CLI's exit), data kept.
  * - `requested` without one (a fresh `up`, or a restart retry whose old run's
  *   stop was never confirmed): the down finds no run it can retire, so the
  *   message names no command and says to keep the native home for inspection.

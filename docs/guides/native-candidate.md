@@ -2847,9 +2847,12 @@ code 1, and what to run next, which depends on how far the start got:
   `hack up`.
 - After its services were requested and before it was ready and mapped: for a
   run with a record, the same `hack down --recover`, then `hack up`
-  (HACK-2714). The start's owner leaves the run `failed-retained` (or
-  `preparing`), and the down starts the pool and retires that start across the
-  boot with its data kept. A fresh `hack up` has no record yet for the down to
+  (HACK-2714). The start's owner leaves the run `failed-retained` when its own
+  unwind runs, or `preparing` or `restoring` when it dies without one (killed,
+  or taken down with the CLI), and the down starts the pool and retires that
+  start across the boot with its data kept. The runtime admits it only with a
+  settled relay startup and no cleanup marker, and the down starts the pool only
+  then; a restart in progress (`restarting`) has no such retirement yet. A fresh `hack up` has no record yet for the down to
   find, so the message names no command and says to keep the native home for
   inspection. A plain `hack up` that returned at "Project started" is in this
   stage until its services report ready: the runtime has not confirmed that
@@ -2887,9 +2890,10 @@ disk). A cleanup now flushes the guest disk before it records any removal, so
 a down made by this version does not leave that state behind (HACK-2719). For
 one an earlier version left, `hack down --recover` removes them again, says so
 in one line, and then confirms the run stopped with its data kept: the
-runtime removes exactly the recorded, stopped containers (and networks) under
-the retired foreground owner's lock, without the owner, and never touches a
-volume. A plain `hack down` still refuses that state, and nothing is removed
+runtime removes exactly the recorded, stopped containers (and networks) by
+their recorded ids, under the retired foreground owner's lock, without the
+owner. It keeps the named volumes and the run's data; a container's anonymous
+volumes go with it, as in the original down. A plain `hack down` still refuses that state, and nothing is removed
 while any of them runs. If the runtime cannot prove the owner retired or a
 container's identity, `hack down --recover` says so, names no command, and
 leaves the data and the home as they are for inspection; `hack up` refuses that

@@ -3602,13 +3602,14 @@ const contracts: readonly ModelContract[] = [
     // brought-back containers unrepaired); keep-intent, leak-lock,
     // intent-message, generic-error and keep-leftover each restore one old
     // rule, and withhold-preparing is a6c4cba (no command before ready).
-    // pinned-relay (HACK-2711), no-cross-boot (HACK-2714) and
-    // withhold-requested (#1253's message on the fixed runtime) restore one
-    // rule of the runtime or message before the VM-loss recovery fix.
+    // pinned-relay (HACK-2711), no-cross-boot (HACK-2714), failed-only
+    // (01ab67fa: only a `failed-retained` lost start) and withhold-requested
+    // (#1253's message on the fixed runtime) restore one rule of the runtime or
+    // message before the VM-loss recovery fix.
     // restart-recovers is the reachability witness of a recovered restart.
     name: "foreground-loss-recovery",
     module: "ForegroundLossRecovery",
-    states: 360,
+    states: 416,
     invariant: "NoRefusedAdvice",
     fields: ['outcome = "refused"', 'lostAt = "Preparing"'],
     alternativeWitnesses: [['outcome = "refused"', 'lostAt = "Requested"']],
@@ -3721,6 +3722,20 @@ const contracts: readonly ModelContract[] = [
         fields: [
           'outcome = "refused"',
           "recorded = TRUE",
+          'msg = "downUp"',
+          'lostAt = "Requested"',
+        ],
+      },
+      {
+        // 01ab67fa (review of #1273): an owner killed mid-restore without its
+        // unwind leaves `restoring`, which that runtime did not admit, so the
+        // down --recover the message names is refused.
+        name: "failed-only",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          'left = "restoring"',
           'msg = "downUp"',
           'lostAt = "Requested"',
         ],

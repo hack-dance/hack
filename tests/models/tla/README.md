@@ -820,7 +820,10 @@ message: `hack down --recover` accepts a run lost while preparing (the stopped
 retained run, or `not_started` for a fresh `up`); otherwise it starts the pool
 and the runtime retires the run across the boot with data kept, once ready
 always and lost in between only for a recorded run whose lost start the
-runtime retires (`CrossBootStart`, HACK-2714). Both need the dead owner's relay
+runtime retires (`CrossBootStart`, HACK-2714). That start's receipt (`left`) is
+`failed-retained` when the owner's own unwind ran, and stays `restoring` when the
+owner died without it (killed, crashed, or taken down with the CLI); the runtime
+admits both, since a restore's failure path changes only that phase. Both need the dead owner's relay
 proved: by the run's routes, or without a published port by the relay's clean
 exit (`RouteProof = "exit"`, HACK-2711). It refuses brought-back containers it
 does not remove. `hack up` refuses a pending restart and an unconfirmed
@@ -833,7 +836,7 @@ nothing pending.
 
 | Control | Result |
 | --- | --- |
-| `positive` | `NoRefusedAdvice`, `NoNeedlessWithholding`, `NoFalseLoss` and `NoMissedLoss` hold across 360 reachable states, with and without a published port, whichever of the watch and the start error ends the start, whether the record still says `running` or is stuck mid-stop when the VM dies, and when an ordinary failure on a live VM ends it. A recorded run lost after its services were requested is told `hack down --recover`, then `hack up`. |
+| `positive` | `NoRefusedAdvice`, `NoNeedlessWithholding`, `NoFalseLoss` and `NoMissedLoss` hold across 416 reachable states, with and without a published port, whether a lost start's owner unwound or not, whichever of the watch and the start error ends the start, whether the record still says `running` or is stuck mid-stop when the VM dies, and when an ordinary failure on a live VM ends it. A recorded run lost after its services were requested is told `hack down --recover`, then `hack up`. |
 | `negative` | PR #1253 at `cd0ebff10`: the message names `hack restart` while an intent is pending and `hack down --recover` otherwise, at every stage; the lost start leaves the restart lock held; `hack down --recover` keeps the intent and the brought-back containers; a start error keeps its own text. `NoRefusedAdvice` fails. |
 | `keep-intent` | Only `hack down --recover` keeps the cleaned intent: a lost restart is sent to `hack up`, which refuses the pending restart. |
 | `leak-lock` | Only the lock stays held after the watch's exit: `hack down --recover` cannot retire the intent under it, and `hack up` refuses. |
@@ -843,6 +846,7 @@ nothing pending.
 | `keep-leftover` | Real-VM row 8 before HACK-2719: no storage barrier, and `hack down --recover` does not remove the brought-back containers, so it cannot confirm the cleanup, and the named sequence stops there. |
 | `pinned-relay` | HACK-2711 (the runtime before this fix): a run with no published port proves its dead owner's relay only by a published endpoint, which the owner's unwind removed. `hack down --recover` refuses (`relay_owner_refused`) once the run was requested: `NoRefusedAdvice` fails. |
 | `no-cross-boot` | HACK-2714 (the runtime before this fix): no cross-boot retirement of a start lost before ready, so a recorded run lost at `Requested` and told down, then up, is refused (`runtime_not_running`): `NoRefusedAdvice` fails. |
+| `failed-only` | `01ab67fa` (review of #1273): the runtime admits only a `failed-retained` lost start. An owner that died mid-restore without its unwind leaves `restoring`, and the `hack down --recover` the message names is refused: `NoRefusedAdvice` fails. |
 | `withhold-requested` | PR #1253's message on the fixed runtime: a recorded run lost at `Requested` is told no command, though `hack down --recover` and `hack up` now work: `NoNeedlessWithholding` fails. |
 | `code-without-veto` | `38347515`: a lost-provider code alone counts as a lost VM. An ordinary failure on a healthy VM (the runtime also reports `process_identity_unavailable` there) gets lost-VM advice: `NoFalseLoss` fails. |
 | `transitional-veto` | `c624229e`: only a `running` record's pid is read, and any record naming the boot vetoes the code. A provider that died with the record stuck in `quiescing` or `stopping` (a `runtime down` from another terminal, another project's idle stop) gets the start error's own text: `NoMissedLoss` fails. |
@@ -863,7 +867,9 @@ nothing pending.
 
 Bounds: one start, one loss, at most two user commands. Not modeled: the Rust
 runtime's own recovery proofs (the model takes `RouteProof` and
-`CrossBootStart` as given; the Rust unit tests check them), why a guest engine's
+`CrossBootStart` as given; the Rust unit tests check them), including that no
+proof can be forged (the exit proof's binding to the dead process and boot, the
+repair's exact ids), why a guest engine's
 removal can be lost (the model only allows it), a fresh `up` lost at
 `Requested` (no record, so no command is named), `up.after` commands that outlive the exit, a `hack restart` lost in its
 preflight (before it saves its intent; the old run is still the live run, so

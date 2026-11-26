@@ -178,9 +178,11 @@ pub(super) fn lost_removal_selected(candidate: &Candidate, run: &str) -> bool {
 /// loss (the removal had not reached the guest disk; real VM, row 8). The retired
 /// owner's held operation lock keeps any restore out, the provider lease keeps
 /// every other graph operation out, and each removal is the ordinary owned removal
-/// of the recorded identity, which `inspect_resource` verifies by labels. Volumes
-/// are never touched, no hook replays, and the receipt is unchanged: it already
-/// says absent. Anything running, recorded present or unexpected refuses.
+/// of the recorded identity, which `inspect_resource` verifies by labels and this
+/// repair by id. Named volumes, and with them the run's data, are never touched;
+/// each container's anonymous volumes go with it (`?v=true`), as in the original
+/// down. No hook replays, and the receipt is unchanged: it already says absent.
+/// Anything running, recorded present or unexpected refuses.
 pub(super) fn repair_lost_removals(
     candidate: &Candidate,
     run: &str,
@@ -229,17 +231,18 @@ pub(super) fn repair_lost_removals(
     )
 }
 
-/// One brought-back resource: recorded removed, and for a container its recorded
-/// id, stopped and not restarting.
+/// One brought-back resource: recorded removed, with its recorded id (container or
+/// network; `inspect_resource` has already matched its labels), and for a
+/// container stopped and not restarting.
 fn lost_removal_admits(resource: &graph::Resource, observed: &Value) -> bool {
     resource.phase == "absent"
+        && matches!(resource.kind, Kind::Container | Kind::Network)
+        && resource
+            .id
+            .as_deref()
+            .is_some_and(|id| observed["Id"] == id)
         && (resource.kind != Kind::Container
-            || (resource
-                .id
-                .as_deref()
-                .is_some_and(|id| observed["Id"] == id)
-                && observed["State"]["Running"] == false
-                && observed["State"]["Restarting"] != true))
+            || (observed["State"]["Running"] == false && observed["State"]["Restarting"] != true))
 }
 
 pub(super) fn remove(
@@ -463,6 +466,24 @@ mod tests {
         }))
         .unwrap();
         assert!(lost_removal_admits(&network, &json!({"Id":"1".repeat(64)})));
+        // A network of the same name and labels with another id is not the one
+        // the receipt recorded, and one recorded without an id is never removed.
+        assert!(!lost_removal_admits(
+            &network,
+            &json!({"Id":"2".repeat(64)})
+        ));
+        let mut unrecorded = network.clone();
+        unrecorded.id = None;
+        assert!(!lost_removal_admits(
+            &unrecorded,
+            &json!({"Id":"1".repeat(64)})
+        ));
+        let volume: graph::Resource = serde_json::from_value(json!({
+            "kind":"volume","key":"data","name":"hkg-data","id":null,
+            "image":null,"phase":"absent"
+        }))
+        .unwrap();
+        assert!(!lost_removal_admits(&volume, &json!({"Name":"hkg-data"})));
     }
 
     #[test]

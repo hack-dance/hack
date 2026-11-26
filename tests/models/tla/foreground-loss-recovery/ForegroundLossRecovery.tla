@@ -27,6 +27,10 @@
 \* `ports`: the project publishes a port, so its run holds bridge routes once
 \* ready. A run without one has no route to prove its relay owner by, only the
 \* relay owner's own publication, which the owner's unwind removes (HACK-2711).
+\* `left`: what the dead owner of a recorded run lost at Requested left in its
+\* receipt: "failed" when its own unwind ran (`failed-retained`), "restoring"
+\* when it died without unwinding (killed, crashed, or taken down with the CLI
+\* that exits 1), so the admitted restore's phase stays.
 \*
 \* Constants select the code:
 \*   MessageRule = "recover": this fix. As "stage", except that a recorded run
@@ -53,9 +57,10 @@
 \*     owner, under its retirement lock).
 \*   StorageBarrier: a cleanup flushes the guest disk before it records the
 \*     removal, so a lost VM brings nothing back (HACK-2719).
-\*   CrossBootStart: the runtime's cross-boot dead-owner recovery also
-\*     retires a start lost before ready (`failed-retained`, HACK-2714); FALSE
-\*     is the runtime before this fix, which admitted only a ready run.
+\*   CrossBootStart: which starts lost before ready the runtime's cross-boot
+\*     dead-owner recovery retires (HACK-2714). "restoring": this fix, a
+\*     `failed-retained` or a `restoring` receipt; "failed": 01ab67fa, only
+\*     `failed-retained`; "none": the runtime before, only a ready run.
 \*   RouteProof = "exit": a run with no route proves its dead owner's relay by
 \*     the relay's clean exit (HACK-2711); "pinned": only a still-published
 \*     relay endpoint counts, which a no-port run's unwound owner no longer has.
@@ -77,9 +82,9 @@ CONSTANTS MessageRule, ErrorRule, ReleaseLock, RetireIntent, RepairLeftover,
           ClassifyRule, StorageBarrier, CrossBootStart, RouteProof
 
 VARIABLES kind, recorded, ports, start, lostAt, endedBy, leftover, stale,
-          receipt, intent, lock, msg, todo, outcome
+          left, receipt, intent, lock, msg, todo, outcome
 vars == <<kind, recorded, ports, start, lostAt, endedBy, leftover, stale,
-          receipt, intent, lock, msg, todo, outcome>>
+          left, receipt, intent, lock, msg, todo, outcome>>
 
 Commands == {"down", "up", "restart"}
 Stages == {"Preparing", "Requested", "GraphReady", "Serving"}
@@ -93,6 +98,7 @@ TypeOK ==
     /\ endedBy \in {"none", "watch", "error", "ordinary"}
     /\ leftover \in BOOLEAN
     /\ stale \in BOOLEAN
+    /\ left \in {"none", "failed", "restoring"}
     /\ receipt \in {"none", "stopped", "unready", "ready"}
     /\ intent \in {"none", "cleaned"}
     /\ lock \in BOOLEAN
@@ -111,13 +117,13 @@ Init ==
     /\ kind = "restart" => recorded
     /\ ports \in BOOLEAN
     /\ start = "Preparing" /\ lostAt = "none" /\ endedBy = "none"
-    /\ leftover = FALSE /\ stale = FALSE
+    /\ leftover = FALSE /\ stale = FALSE /\ left = "none"
     /\ receipt = IF recorded THEN "stopped" ELSE "none"
     /\ intent = IF kind = "restart" THEN "cleaned" ELSE "none"
     /\ lock = (kind = "restart")
     /\ msg = "none" /\ todo = <<>> /\ outcome = "pending"
 
-Frozen == <<kind, recorded, ports, endedBy, leftover, stale, msg, todo,
+Frozen == <<kind, recorded, ports, endedBy, leftover, stale, left, msg, todo,
             outcome>>
 
 \* The first service of this run is requested (`graph.onRequested`).
@@ -152,6 +158,8 @@ Die ==
     /\ leftover' \in IF recorded /\ start = "Preparing" /\ ~StorageBarrier
                      THEN BOOLEAN ELSE {FALSE}
     /\ stale' \in BOOLEAN
+    /\ left' \in IF recorded /\ start = "Requested"
+                 THEN {"failed", "restoring"} ELSE {"none"}
     /\ UNCHANGED <<kind, recorded, ports, endedBy, receipt, intent, lock, msg,
                    todo, outcome>>
 
@@ -195,8 +203,8 @@ End(by, m, lockAfter) ==
     /\ msg' = m /\ todo' = Steps(m)
     /\ lock' = lockAfter
     /\ outcome' = IF Steps(m) = <<>> THEN "ok" ELSE "pending"
-    /\ UNCHANGED <<kind, recorded, ports, lostAt, leftover, stale, receipt,
-                   intent>>
+    /\ UNCHANGED <<kind, recorded, ports, lostAt, leftover, stale, left,
+                   receipt, intent>>
 
 \* The pool watch sees the lost VM, prints the message, runs `beforeLostExit`
 \* (the restart's lock release) and exits 1; nothing else of the start runs.
@@ -226,7 +234,8 @@ OrdinaryFail ==
     /\ start' = "Lost" /\ lostAt' = start /\ endedBy' = "ordinary"
     /\ todo' = <<>> /\ outcome' = "ok"
     /\ lock' = FALSE
-    /\ UNCHANGED <<kind, recorded, ports, leftover, stale, receipt, intent>>
+    /\ UNCHANGED <<kind, recorded, ports, leftover, stale, left, receipt,
+                   intent>>
 
 \* `hack down --recover` depends on where the start was lost, not on what the
 \* message said. Lost while preparing, the record (if any) is still the
@@ -239,9 +248,12 @@ OrdinaryFail ==
 \* Containers a lost VM brought back fail the confirmation unless the down
 \* removes them again.
 RelayProved == ports \/ RouteProof = "exit"
+LostStartAdmitted ==
+    \/ CrossBootStart = "restoring"
+    \/ CrossBootStart = "failed" /\ left = "failed"
 Retirable ==
     CASE lostAt = "Preparing" -> TRUE
-      [] lostAt = "Requested" -> recorded /\ CrossBootStart /\ RelayProved
+      [] lostAt = "Requested" -> recorded /\ LostStartAdmitted /\ RelayProved
       [] OTHER -> RelayProved
 DownAccepts ==
     /\ Retirable
@@ -273,8 +285,8 @@ Step ==
             /\ intent' = IF c = "down" /\ RetireIntent /\ ~lock
                          THEN "none"
                          ELSE IF c = "restart" THEN "none" ELSE intent
-    /\ UNCHANGED <<kind, recorded, ports, start, lostAt, endedBy, stale, lock,
-                   msg>>
+    /\ UNCHANGED <<kind, recorded, ports, start, lostAt, endedBy, stale, left,
+                   lock, msg>>
 
 Next == Request \/ GraphReady \/ Serve \/ Die \/ Watch \/ StartFails
         \/ OrdinaryFail \/ Step
@@ -288,7 +300,7 @@ NoRefusedAdvice == outcome # "refused"
 \* HACK-2714).
 NoNeedlessWithholding ==
     msg = "inspect" =>
-        lostAt = "Requested" /\ ~(recorded /\ CrossBootStart)
+        lostAt = "Requested" /\ ~(recorded /\ CrossBootStart # "none")
 \* Reachability witness (expected to fail): a lost restart is recovered by
 \* following its message.
 NoRestartRecovery ==

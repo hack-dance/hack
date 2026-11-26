@@ -2,7 +2,10 @@ import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { reportNativeStartLeaseWait } from "../lib/native-detached-up.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
-import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
+import {
+  confirmedNativeRetainedGraph,
+  lostContainerRemovals,
+} from "./native-project-retained.ts";
 import type {
   loadNativeProjectRun,
   NativeProjectRun,
@@ -205,7 +208,9 @@ export async function confirmRunningRetainedGraph(opts: {
     invoke: opts.invoke,
   });
   if (!confirmedNativeRetainedGraph(observed, opts.run)) {
-    throw new ClosedCliError(
+    throw unconfirmedRetainedGraph(
+      observed,
+      opts.run,
       "Native project already has an owned run mapping that is not safely stopped; inspect it before starting another run."
     );
   }
@@ -260,9 +265,43 @@ export async function verifyNativeResumedRetainedGraph(opts: {
     run: opts.run.run,
   });
   if (!confirmedNativeRetainedGraph(observed, opts.run)) {
-    throw new ClosedCliError(
+    throw unconfirmedRetainedGraph(
+      observed,
+      opts.run,
       "Native resumed retained graph differs; no graph restore was requested."
     );
   }
   return { run: opts.run.run, snapshot: observed };
+}
+
+/**
+ * The refusal when a retained run's stopped graph is not the stop its receipt
+ * records because a lost VM brought back containers that its `hack down` had
+ * removed (HACK-2096, HACK-2719). Seen after HACK-2730: the provider died
+ * seconds after `hack down`, `hack up` recovered and booted the pool, and the
+ * removal had not reached the guest disk. `hack down --recover` removes them
+ * again on the running pool (data kept), and `hack up` then starts the run.
+ */
+export const NATIVE_RETAINED_LOST_REMOVAL =
+  "This run is stopped with its data kept, but stopped containers that its last hack down had removed are listed again, most likely because the VM was lost seconds after that down, before the removal reached the guest disk. Nothing was started. Run hack down --recover to remove them again (data kept), then hack up.";
+
+/** A retained graph that is not the confirmed stop: the lost-removal shape of
+ * this exact run names its repair, anything else keeps `fallback`. */
+function unconfirmedRetainedGraph(
+  observed: unknown,
+  run: NativeProjectRun,
+  fallback: string
+): ClosedCliError {
+  const receipt =
+    isRecord(observed) && isRecord(observed.receipt) ? observed.receipt : {};
+  const thisRun =
+    receipt.run === run.run &&
+    receipt.owner === run.owner &&
+    receipt.namespace === run.namespace &&
+    receipt.plan_id === run.planId;
+  return new ClosedCliError(
+    thisRun && lostContainerRemovals(observed)
+      ? NATIVE_RETAINED_LOST_REMOVAL
+      : fallback
+  );
 }

@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import {
+  confirmRunningRetainedGraph,
+  NATIVE_RETAINED_LOST_REMOVAL,
   NATIVE_RETAINED_POOL_CHANGED_AGAIN,
   preflightNativeRetainedStartup,
   runtimeUpJoiningChangedPool,
@@ -150,6 +152,75 @@ test("a resumed retained graph that differs refuses", async () => {
       invoke: async () => ({ journal_incomplete: false, receipt: {} }),
     }),
     "Native resumed retained graph differs; no graph restore was requested."
+  );
+});
+
+/** This run's stopped graph after a lost VM brought back a removed container. */
+function lostRemovalGraph(owner = run.owner) {
+  return {
+    journal_incomplete: false,
+    receipt: {
+      phase: "stopped-data-retained",
+      run: run.run,
+      owner,
+      namespace: run.namespace,
+      plan_id: run.planId,
+      resources: {
+        "container:web": { kind: "container", key: "web", phase: "absent" },
+        "volume:data": { kind: "volume", key: "data", phase: "created" },
+      },
+    },
+    observations: {
+      "container:web": { state: "exited" },
+      "volume:data": { state: "present" },
+    },
+  };
+}
+
+test("a resumed or running retained graph with containers a lost VM brought back names down --recover, then up (HACK-2730)", async () => {
+  await expectClosedRefusal(
+    verifyNativeResumedRetainedGraph({
+      runtime,
+      projectRoot: scope.projectRoot,
+      run,
+      invoke: async () => lostRemovalGraph(),
+    }),
+    NATIVE_RETAINED_LOST_REMOVAL
+  );
+  await expectClosedRefusal(
+    confirmRunningRetainedGraph({
+      runtime,
+      projectRoot: scope.projectRoot,
+      run,
+      invoke: async () => lostRemovalGraph(),
+      runtimePhase: "running",
+    }),
+    NATIVE_RETAINED_LOST_REMOVAL
+  );
+  expect(NATIVE_RETAINED_LOST_REMOVAL).toContain(
+    "Run hack down --recover to remove them again (data kept), then hack up."
+  );
+  // Another run's graph, or a running container, keeps the generic refusals.
+  await expectClosedRefusal(
+    verifyNativeResumedRetainedGraph({
+      runtime,
+      projectRoot: scope.projectRoot,
+      run,
+      invoke: async () => lostRemovalGraph("9".repeat(32)),
+    }),
+    "Native resumed retained graph differs; no graph restore was requested."
+  );
+  const running = lostRemovalGraph();
+  running.observations["container:web"] = { state: "running" };
+  await expectClosedRefusal(
+    confirmRunningRetainedGraph({
+      runtime,
+      projectRoot: scope.projectRoot,
+      run,
+      invoke: async () => running,
+      runtimePhase: "running",
+    }),
+    "Native project already has an owned run mapping that is not safely stopped; inspect it before starting another run."
   );
 });
 

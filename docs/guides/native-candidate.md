@@ -2876,14 +2876,24 @@ the Mac restarted before the pool went idle (HACK-2730). `runtime recover` recor
 that pool `recovered-unclean` with the boot it was running, and the retained-start
 check accepts it, as it accepts a boot whose engine failed after the boot was
 recorded (`stopped-after-engine-failure`). It does so only when the recorded provider
-is proven gone, the run's receipt is still that acknowledged stop (every container
-and network removed, volumes kept) and no owner, share, network or graph update is
-pending. The disk, root file, owner token and registry checks are the same as for a
-clean stop, and the restore after the next boot checks the volumes and the absence
-of the containers live. So the next `hack up` starts the pool and the run again,
-with no `runtime up` by hand. Nothing needs recovering in the run itself, so `hack
-down --recover` on that stopped pool changes nothing and says the runtime is not
-running; `hack up` is the command to run.
+is proven gone, the run's receipt is still that acknowledged stop (the engine
+acknowledged removing every container and network, volumes kept) and no owner,
+share, network or graph update is pending. The disk, root file, owner token and
+registry checks are the same as for a clean stop, and the restore after the next boot
+checks the volumes and the absence of the containers live. So the next `hack up`
+starts the pool and the run again, with no `runtime up` by hand. Nothing needs
+recovering in the run itself, so `hack down --recover` on that stopped pool changes
+nothing and says the runtime is not running; `hack up` is the command to run.
+
+The receipt records that the engine removed the containers, not that the removal
+reached the guest disk. A `hack down` now flushes the disk before it records the
+removal, but a receipt written by an older build carries no such proof. If the
+provider died before the removal reached the disk, the boot that `hack up` starts can
+list the run's containers again, stopped. `hack up` then refuses with nothing
+started and data kept, and says to run `hack down --recover`, which removes them
+again on the running pool, then `hack up`. An earlier `hack down --recover` of that
+kind that ended before it confirmed the removal is durable makes `hack up` refuse at
+once (`graph_lost_removal_pending`) and name the same two commands.
 
 A foreground `hack up` (or `hack restart`) watches its pool the same way
 (HACK-2096). When its provider VM dies or the pool stops under it, it prints which

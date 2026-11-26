@@ -44,7 +44,11 @@ import {
   withNativeRecoveryGuidance,
 } from "./native-project-recovery-guidance.ts";
 import { withNativeRemovalLock } from "./native-project-removal-lock.ts";
-import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
+import {
+  confirmedNativeRetainedGraph,
+  lostContainerRemovals,
+  lostRemovalPending,
+} from "./native-project-retained.ts";
 import {
   describeNativeRunEnvironmentChange,
   loadNativeProjectRun,
@@ -948,60 +952,6 @@ class ExitedPoolRecovered extends Error {
       "The native runtime's provider had exited and the pool was recovered, but this down still found it unavailable; nothing else was changed. Run hack down again."
     );
   }
-}
-
-/**
- * HACK-2096 (real VM, row 8): a stopped retained run whose receipt records
- * every container removed, while the engine still shows some of them, stopped
- * (`exited`) and none running. Seen after the provider was killed seconds
- * after a `hack down` removed the run's containers: the guest engine's removal
- * had not reached the storage disk, so the next boot listed the containers
- * again, as exited (137). Nothing is running, but `verify` needs every
- * container absent, so `hack down --recover` refused ("cleanup is
- * unconfirmed") and `hack up` refused the mapping. Only this exact shape is
- * repaired, by the runtime's own `graph cleanup` of the receipt's resources
- * (exact ids; named volumes and data kept, a container's anonymous volumes go
- * with it as in the original down); anything running, uncertain or unrecorded is not.
- * The run's owner retired its publication when that down finished, so the
- * runtime removes them under that retirement's lock, without an owner
- * (HACK-2719). A cleanup also flushes the guest disk before it records the
- * removal now, so a new down no longer leaves this shape behind.
- */
-function lostContainerRemovals(snapshot: unknown): boolean {
-  if (
-    !(
-      stoppedRetained(snapshot) &&
-      isRecord(snapshot) &&
-      snapshot.journal_incomplete === false &&
-      isRecord(snapshot.receipt) &&
-      isRecord(snapshot.receipt.resources) &&
-      isRecord(snapshot.observations)
-    )
-  ) {
-    return false;
-  }
-  const observations = snapshot.observations;
-  const containers = Object.values(snapshot.receipt.resources).filter(
-    (resource) => isRecord(resource) && resource.kind === "container"
-  );
-  const states = containers.map((resource) => {
-    if (!isRecord(resource) || resource.phase !== "absent") {
-      return "unrecorded";
-    }
-    const observation = observations[`container:${String(resource.key)}`];
-    return isRecord(observation) ? observation.state : undefined;
-  });
-  const settled = states.every(
-    (state) => state === "absent" || state === "exited"
-  );
-  // A repair that removed them but ended before its storage barrier confirmed
-  // (`lost_removal_pending`): run it again, so the stop becomes durable.
-  return settled && (states.includes("exited") || lostRemovalPending(snapshot));
-}
-
-/** A lost-removal repair whose storage barrier has not confirmed yet. */
-function lostRemovalPending(snapshot: unknown): boolean {
-  return isRecord(snapshot) && snapshot.lost_removal_pending === true;
 }
 
 /**

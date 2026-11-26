@@ -77,3 +77,57 @@ function observedAsRecorded(
     ? observed.state === "present" || observed.state === "absent"
     : observed.state === "absent";
 }
+
+/**
+ * HACK-2096 (real VM, row 8): a stopped retained run whose receipt records
+ * every container removed, while the engine still shows some of them, stopped
+ * (`exited`) and none running. Seen after the provider was killed seconds
+ * after a `hack down` removed the run's containers: the guest engine's removal
+ * had not reached the storage disk, so the next boot listed the containers
+ * again, as exited (137). Nothing is running, but `verify` needs every
+ * container absent, so `hack down --recover` refused ("cleanup is
+ * unconfirmed") and `hack up` refused the mapping. Only this exact shape is
+ * repaired, by the runtime's own `graph cleanup` of the receipt's resources
+ * (exact ids; named volumes and data kept, a container's anonymous volumes go
+ * with it as in the original down); anything running, uncertain or unrecorded is not.
+ * The run's owner retired its publication when that down finished, so the
+ * runtime removes them under that retirement's lock, without an owner
+ * (HACK-2719). A cleanup also flushes the guest disk before it records the
+ * removal now, so a new down no longer leaves this shape behind.
+ */
+export function lostContainerRemovals(snapshot: unknown): boolean {
+  if (
+    !(
+      isRecord(snapshot) &&
+      isRecord(snapshot.receipt) &&
+      snapshot.receipt.phase === "stopped-data-retained" &&
+      snapshot.journal_incomplete === false &&
+      isRecord(snapshot.receipt.resources) &&
+      isRecord(snapshot.observations)
+    )
+  ) {
+    return false;
+  }
+  const observations = snapshot.observations;
+  const containers = Object.values(snapshot.receipt.resources).filter(
+    (resource) => isRecord(resource) && resource.kind === "container"
+  );
+  const states = containers.map((resource) => {
+    if (!isRecord(resource) || resource.phase !== "absent") {
+      return "unrecorded";
+    }
+    const observation = observations[`container:${String(resource.key)}`];
+    return isRecord(observation) ? observation.state : undefined;
+  });
+  const settled = states.every(
+    (state) => state === "absent" || state === "exited"
+  );
+  // A repair that removed them but ended before its storage barrier confirmed
+  // (`lost_removal_pending`): run it again, so the stop becomes durable.
+  return settled && (states.includes("exited") || lostRemovalPending(snapshot));
+}
+
+/** A lost-removal repair whose storage barrier has not confirmed yet. */
+export function lostRemovalPending(snapshot: unknown): boolean {
+  return isRecord(snapshot) && snapshot.lost_removal_pending === true;
+}

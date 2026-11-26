@@ -221,13 +221,22 @@ const AFTER_ENGINE_LOSS: [&str; 2] = ["recovered-unclean", "stopped-after-engine
 /// retained while the pool kept running, then the provider died (killed, crashed, or the
 /// machine restarted) before the pool went idle, and `runtime recover` recorded the pool
 /// `recovered-unclean` with that boot's id. The receipt is still the acknowledged retained
-/// stop, which [`checked`] requires: every container and network of the run was removed, and
-/// a later engine changes the run's resources only through this run's own graph operations,
-/// which leave that receipt (or a pending journal beside it, also refused) first. So what an
-/// engine did after the stop did not touch this run, and what it did not finish writing
-/// before the provider ended is left to the storage journal, as after any unclean stop.
-/// Restore still checks the volumes' recorded identities and the containers' and networks'
-/// absence live, after the next boot.
+/// stop, which [`checked`] requires: the engine acknowledged removing every container and
+/// network of the run, and a later engine changes the run's resources only through this
+/// run's own graph operations, which leave that receipt (or a pending journal beside it,
+/// also refused) first. So what an engine did after the stop did not touch this run.
+///
+/// The receipt does not prove that the removal is durable. A cleanup now flushes the guest
+/// disk before it records the removal (HACK-2719), but a receipt written by an older build,
+/// or a lost-removal repair that ended before its storage barrier, does not carry that
+/// proof: the provider may have died before the removal reached the disk, and the next boot
+/// can list the run's containers again, stopped. [`checked`] refuses the unfinished repair
+/// (`graph_lost_removal_pending`). Otherwise the boot goes ahead, and the live checks after
+/// it (restore, and the CLI's confirmation of the resumed graph) find the containers
+/// present and refuse; the CLI names `hack down --recover`, which removes them again on
+/// the running pool with data kept, then `hack up`. Anything the engine did not finish
+/// writing is left to the storage journal, as after any unclean stop, and restore still
+/// checks the volumes' recorded identities.
 ///
 /// The recorded provider must be present and proven gone ([`checked`]): a record without one
 /// is not this shape. The guard's other identity checks (disks, rootfs, token, registry)
@@ -1123,9 +1132,10 @@ pub(in crate::provider::graph) mod tests {
     fn a_peer_projects_pool_change_is_a_changed_pool_that_a_new_selection_accepts() {
         // Another project's commands may change the shared pool without touching this
         // run: add its own project share (which stops an idle pool), change the network
-        // intent, the socket capacity or the translation setting. The retained start
-        // selects again and retries instead of refusing; its own request is still checked
-        // against the pool under the lease.
+        // intent or enable translation. The retained start selects again and retries
+        // instead of refusing; its own request is still checked against the pool under
+        // the lease. (Bridge capacity is not a peer change: an existing pool keeps its
+        // exact durable capacity, and a change needs the bridge registry rewritten.)
         for case in ["peer-share", "network", "emulation"] {
             let fixture = Fixture::new();
             share_run(&fixture);
@@ -1139,10 +1149,6 @@ pub(in crate::provider::graph) mod tests {
                     owner.additional_project_shares.push(peer);
                 }
                 "network" => owner.network = super::super::super::NetworkIntent::Internet,
-                "bridges" => {
-                    owner.application_bridge =
-                        Some(super::super::super::BridgeIntent::new(2).unwrap())
-                }
                 _ => owner.amd64_emulation = true,
             }
             owner.save(&fixture.candidate).unwrap();

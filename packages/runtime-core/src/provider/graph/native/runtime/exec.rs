@@ -86,7 +86,9 @@ pub(super) const OWNER_RUN_LEASE_BUSY: &str = "graph_authored_run_lease_busy";
 /// "unconfirmed".
 pub(super) const OWNER_COMMAND_NOT_STARTED: &str = "graph_authored_command_not_started";
 
-/// The owner's pre-effect wait code that `code` names, if it is one.
+/// The owner's pre-effect wait code that `code` names, if it is one. Only the
+/// macOS interactive requester reads it.
+#[cfg(target_os = "macos")]
 pub(in crate::provider::graph::native) fn owner_pre_effect_code(
     code: &str,
 ) -> Option<&'static str> {

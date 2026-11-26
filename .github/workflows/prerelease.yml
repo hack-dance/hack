@@ -159,10 +159,26 @@ jobs:
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
           version: "2026.9.12"
-          install_args: zig
+          install: false
           add_shims_to_path: false
           cache: false
           env: false
+      # HACK-2681: a community mirror that does not answer in time (release
+      # run 45667268962 timed out fetching a .minisig) fails one install;
+      # retry with a longer timeout so mise picks another mirror. mise still
+      # verifies the minisign signature. This is scripts/mise-install-retry.sh
+      # inlined, because source_revision may predate that script.
+      - name: Install pinned Zig through mise (retried)
+        timeout-minutes: 15
+        env:
+          MISE_HTTP_TIMEOUT: 90s
+        run: |
+          for attempt in 1 2 3 4; do
+            if mise install zig; then exit 0; fi
+            if [ "$attempt" -eq 4 ]; then echo "mise install zig failed 4 times" >&2; exit 1; fi
+            echo "mise install zig failed (attempt $attempt of 4); retrying in $((attempt * 15))s" >&2
+            sleep "$((attempt * 15))"
+          done
       - run: bun install --frozen-lockfile
       - name: Build and verify complete native bundle
         run: mise exec zig -- scripts/build-native-candidate.sh "$HACK_PRERELEASE_BUNDLE" "--version=$HACK_PRERELEASE_VERSION"

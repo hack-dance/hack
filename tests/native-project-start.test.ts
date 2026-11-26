@@ -5019,6 +5019,79 @@ test("lost shared HTTPS acquire reply retains intent and recovers only after gra
   }
 });
 
+test("a stop during a started return's HTTPS acquisition waits for it before cleanup (HACK-2707)", async () => {
+  // `hack down` right after `up -d`: the owner reaches its ready line, the
+  // frontend starts taking the shared HTTPS lease, and the stop ends the owner
+  // while that acquisition is still in flight (the shared owner is starting,
+  // its authority waiting for the lease the stop holds). Cleanup must wait for
+  // the acquisition to settle, then recover its intent, and only then
+  // acknowledge the lifetime. It must not report the refused acquire, which
+  // only says the graph is no longer ready, as an infrastructure failure.
+  for (const outcome of ["refused", "admitted"] as const) {
+    const { opts, events } = await httpsFixture();
+    let intent: ReturnType<typeof leaseIdentity> | undefined;
+    opts.dependencies.finalization = async (request) => {
+      const lifetime = await beginNativeProjectFinalization(request);
+      events.push(request.httpsLease ? "intent" : "lifetime");
+      return {
+        ...lifetime,
+        complete: async () => {
+          await lifetime.complete();
+          events.push("finalized");
+        },
+      };
+    };
+    opts.dependencies.https = async (selection) => {
+      // The shared owner takes a while to start (its authority waits out the
+      // stop's lease) before the intent and the acquire.
+      await Bun.sleep(150);
+      intent = leaseIdentity(selection);
+      await selection.onIntent?.(intent);
+      await Bun.sleep(50);
+      if (outcome === "refused") {
+        events.push("acquire-refused");
+        throw new Error("graph no longer ready");
+      }
+      events.push("acquire-admitted");
+      return {
+        identity: intent,
+        caPath: "/synthetic/root.crt",
+        httpsPort: 8443,
+        exited: new Promise(() => {}),
+        verifyHostname: async () => ({ statusCode: 200 }),
+        releaseAfterCleanup: async () => {
+          events.push("https-close");
+        },
+      };
+    };
+    opts.dependencies.recoverHttps = async ({ identity }) => {
+      if (!intent) {
+        throw new Error("missing acquire intent");
+      }
+      expect(identity).toEqual(intent);
+      events.push("recover-lease");
+    };
+    const progress: string[] = [];
+    expect(
+      await startNativeProject({
+        ...opts,
+        https: httpsSelection,
+        waitForReady: false,
+        onProgress: (event) => progress.push(event.phase),
+      })
+    ).toBe(0);
+    const settled =
+      outcome === "refused" ? "acquire-refused" : "acquire-admitted";
+    const cleanup = outcome === "refused" ? "recover-lease" : "https-close";
+    expect(events).toContain("intent");
+    expect(events.indexOf("intent")).toBeLessThan(events.indexOf(settled));
+    expect(events.indexOf(settled)).toBeLessThan(events.indexOf(cleanup));
+    expect(events.indexOf(cleanup)).toBeLessThan(events.indexOf("finalized"));
+    expect(events.filter((event) => event === cleanup)).toHaveLength(1);
+    expect(progress).not.toContain("routes-not-answering");
+  }
+});
+
 test("restart callback follows ready and acknowledgement follows all finalizers", async () => {
   const { opts, events } = await httpsFixture();
   opts.dependencies.finalization = async (request) => {

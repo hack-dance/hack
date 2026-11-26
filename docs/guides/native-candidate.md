@@ -3612,8 +3612,10 @@ A component acknowledgement is not application readiness, and this recovery does
 not diagnose or fix an upstream engine panic. Changed or incomplete evidence
 remains available for inspection; do not remove journals or ownership pins to retry.
 
-Native `hack exec` and `hack run` make this request once with a 180-second frontend
-budget before selecting their command or reading managed environment values.
+Native `hack exec` and `hack run` make this request once with a 200-second frontend
+budget before selecting their command or reading managed environment values. Both
+the request and the owner's answer first wait up to 15 seconds for a briefly held
+provider lease instead of refusing `provider_busy` at once.
 If refresh refuses, the frontend preserves only reviewed native error identifiers
 such as `provider_busy` or `graph_owner_recovery: graph_dependency_rebind_incomplete`.
 Subprocess text and unknown codes remain omitted. These diagnostics do not confirm
@@ -5144,7 +5146,14 @@ the current owned project/branch mapping, preserves binary stdout/stderr and the
 command exit code, and never falls back to Compose. With piped input/output or
 `HACK_NO_INTERACTIVE=1`, it uses finite exec with a 30-second observation budget;
 a timeout may leave the command running and is not
-retried. When fresh values are delivered through private stdin, output that is still arriving
+retried. A ready foreground owner holds the provider lease briefly and often, so exec,
+and the dependency refresh it sends first, wait up to 15 seconds for another holder
+to release that lease before refusing with `provider_busy` naming the holder. For
+compose-backed exec the 30-second budget starts after that wait; an authored project's
+exec and one-off `run` count the wait inside their own 30-second budget. A compose
+project's one-off `run` waits the same way before its job is reserved, within one
+15-second bound for its selection and admission. A pending
+Ctrl-C or `hack down` ends the wait at once without starting the command. When fresh values are delivered through private stdin, output that is still arriving
 or already queued when that budget ends is read to the end, so a command that finished on a
 busy host returns its exit code (see below). `--env` and `--profile` changes are refused. A command name such as `bun`
 uses the selected container's PATH; no host PATH or implicit shell is used. For
@@ -5244,11 +5253,38 @@ On the built current-branch runtime and CLI, exercise authored and adopted servi
 Linux PTY and fake-Engine tests do not qualify these real Engine/VM effects.
 
 
-Managed HTTPS authority startup uses the same five-second provider-lock admission
-budget as ordinary pool startup. This lets a brief concurrent graph inspection
-finish before admission. Pool identity, socket ownership and certificate admission
-are checked only after the lock is acquired; expiry refuses with `provider_busy`
-and no authority is published. Serving and cleanup are never replayed.
+Managed HTTPS authority startup waits up to 30 seconds for the provider lock, as
+owned cleanup does. A routed run started with `hack up -d` takes its shared HTTPS
+lease at the owner's ready line, which is exactly when that run's first `hack exec`
+or `hack run` and a `hack down` arrive; a `hack down` holds the lock for its whole
+graph stop. The wait ends early once the authority's owner is gone: before every
+attempt it reads its stdin FIFO without blocking and stops at end of file, on macOS
+as on Linux. Pool identity,
+socket ownership and certificate admission are checked only after the lock is
+acquired; expiry refuses with `provider_busy` and no authority is published.
+Serving and cleanup are never replayed.
+
+The shared owner's graph reads for a lease acquire or release, and its idle check
+before retiring, read under the provider lock too. Each waits out a holder for up
+to 15 seconds (one deadline per verification) instead of refusing at once, so a
+command or a stop during route warm-up no longer makes the acquire refuse (which
+stopped the whole run) or the release unconfirmed. Only `provider_busy` is
+retried; a holder that outlasts the wait is still refused. Every frontend that
+connects to a starting shared owner waits for its whole startup (about 55
+seconds; a recorded startup failure ends the wait at once), including a second
+project that found the owner already starting. A frontend's cleanup waits for an
+acquisition still in flight before it releases or recovers the lease, so a
+`hack down` during warm-up stops the run with confirmed cleanup.
+
+A graph stop can hold the provider lock longer than the authority's 30 seconds,
+for example for a service with a long `stop_grace_period`. The shared owner's
+startup then fails with `authority-ready: provider_busy`, having admitted no
+lease. When that run's lease is recovered (by its frontend after the graph
+stopped, or by `hack down`), the failed owner generation is retired: its
+owner directory, diagnostic included, moves beside a retired-owner record
+(`native-https/released-leases/<generation>/failed-owner`), the release is still verified
+against the stopped graph, and the next `up` starts a new shared owner. `down`
+does not fail and the next `up` needs no recovery because of it.
 
 An authority child that exits before readiness can supply a bounded structured
 native error code without exposing its stderr. Malformed, oversized or missing
@@ -5263,7 +5299,9 @@ reviewed startup stage and an allowlisted native error code; child output, paths
 and application values are omitted. If lease cleanup also fails, the original
 acquisition diagnostic remains visible alongside the unconfirmed cleanup status.
 This record is diagnostic evidence only: it does not acknowledge retirement or
-permit a replacement owner. A missing record (including a helper crash before
+permit a replacement owner. The one exception is the expired authority lease wait
+described above (`authority-ready: provider_busy` with child cleanup confirmed and
+no endpoint published), which a lease recovery retires. A missing record (including a helper crash before
 publication) leaves the cause unknown. Preserve the retained owner and finalization
 records for inspection; do not delete them to force another startup.
 

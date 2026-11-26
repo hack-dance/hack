@@ -185,6 +185,55 @@ test("down waits for the captured frontend after cleanup and lifecycle retiremen
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
 
+test("down follows the HTTPS lease a started return adds to its lifetime during the stop (HACK-2707)", async () => {
+  // `hack down` right after `up -d`: the frontend's HTTPS acquisition at the
+  // owner's ready line runs beside this stop, so its lease intent can reach the
+  // lifetime (version 2 to 3, same attempt) after down captured it. Down waits
+  // on the lifetime that now carries the lease instead of refusing.
+  const opts = await fixture();
+  const lifetime = await beginNativeProjectFinalization({
+    scope: opts.scope,
+    run,
+    httpsPort: null,
+  });
+  expect(lifetime.token.version).toBe(2);
+  let leased: Awaited<ReturnType<typeof beginNativeProjectFinalization>>;
+  let cleaned = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    after: async () => {
+      leased = await beginNativeProjectFinalization({
+        scope: opts.scope,
+        run,
+        httpsPort: 18_443,
+        httpsLease: {
+          version: 1,
+          ownerGeneration: "1".repeat(32),
+          leaseId: "2".repeat(32),
+          run: run.run,
+          attempt: lifetime.token.attempt,
+          owner: run.owner,
+          namespace: run.namespace,
+          planId: run.planId,
+        },
+      });
+      expect(leased.token.version).toBe(3);
+      setTimeout(() => void leased.complete(), 50);
+    },
+    invoke: async (request) => {
+      if (request.args[1] === "cleanup") {
+        cleaned = true;
+        return {};
+      }
+      return snapshot(cleaned);
+    },
+  });
+  expect(result.status).toBe("stopped");
+  expect(
+    await captureNativeProjectFinalization({ scope: opts.scope, run })
+  ).toMatchObject({ version: 3, attempt: lifetime.token.attempt });
+});
+
 test("missing frontend identity refuses before hooks or cleanup without leaking paths", async () => {
   const opts = await fixture();
   await rm(finalizationRoot(opts.scope), { recursive: true });

@@ -142,6 +142,9 @@ jobs:
       contents: read
     env:
       HACK_PRERELEASE_MISE_VERSION: "2026.11.14"
+      # From https://ziglang.org/download/index.json for Zig 0.15.2 on aarch64-macos.
+      HACK_PRERELEASE_ZIG_ARCHIVE: "zig-aarch64-macos-0.15.2.tar.xz"
+      HACK_PRERELEASE_ZIG_SHA256: "3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b"
     steps:
       - name: Select isolated build directories
         run: |
@@ -158,12 +161,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: aarch64-unknown-linux-musl
-      - name: Cache the mise Zig install
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - name: Restore the Zig release archive
+        id: zig-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         continue-on-error: true
         with:
-          path: ~/.local/share/mise/installs/zig
-          key: prerelease-zig-${{ runner.os }}-${{ runner.arch }}-${{ env.HACK_PRERELEASE_MISE_VERSION }}-${{ hashFiles('mise.toml') }}
+          path: ${{ runner.temp }}/${{ env.HACK_PRERELEASE_ZIG_ARCHIVE }}
+          key: prerelease-zig-archive-${{ runner.os }}-${{ runner.arch }}-${{ env.HACK_PRERELEASE_ZIG_SHA256 }}
       - name: Set up mise
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
@@ -173,19 +177,37 @@ jobs:
           add_shims_to_path: false
           cache: false
           env: false
-      # A restored pin needs no remote version lookup. On a miss, retry
-      # installs so mise can pick another community mirror. Keep this loop
-      # inline because source_revision may predate scripts/mise-install-retry.sh.
-      - name: Install or use cached Zig
+      # Keep the signed-install retry loop inline because source_revision
+      # may predate scripts/mise-install-retry.sh.
+      - name: Verify or install Zig
+        id: zig
         timeout-minutes: 15
+        shell: bash
         env:
           # Leave room for two stalled requests and their retries before the step limit.
           MISE_HTTP_TIMEOUT: "60s"
           MISE_HTTP_RETRIES: "4"
+          ZIG_ARCHIVE_CACHE_HIT: ${{ steps.zig-cache.outputs.cache-hit }}
         run: |
-          if ! MISE_OFFLINE=1 mise where zig >/dev/null; then
+          set -euo pipefail
+          version=$(mise config get --file mise.toml tools.zig)
+          archive="$RUNNER_TEMP/$HACK_PRERELEASE_ZIG_ARCHIVE"
+
+          verify_archive() {
+            [ -f "$1" ] && [ ! -L "$1" ] &&
+              printf '%s  %s\n' "$HACK_PRERELEASE_ZIG_SHA256" "$1" | shasum -a 256 --check --status
+          }
+
+          if [ "$ZIG_ARCHIVE_CACHE_HIT" = true ] &&
+            [ "$HACK_PRERELEASE_ZIG_ARCHIVE" = "zig-aarch64-macos-$version.tar.xz" ] &&
+            verify_archive "$archive"; then
+            zig_dir=$(mktemp -d "$RUNNER_TEMP/prerelease-zig.XXXXXX")
+            tar -xf "$archive" -C "$zig_dir" --strip-components 1
+          else
+            export MISE_DOWNLOADS_DIR="$RUNNER_TEMP/prerelease-zig-downloads"
+            export MISE_INSTALLS_DIR="$RUNNER_TEMP/prerelease-zig-installs"
             for attempt in 1 2 3 4; do
-              if mise install zig; then
+              if MISE_ALWAYS_KEEP_DOWNLOAD=1 mise install zig; then
                 break
               fi
               if [ "$attempt" -eq 4 ]; then
@@ -195,11 +217,25 @@ jobs:
               echo "mise install zig failed (attempt $attempt of 4); retrying in $((attempt * 15))s" >&2
               sleep "$((attempt * 15))"
             done
+            zig_dir="$(MISE_OFFLINE=1 mise where zig)/bin"
+            download="$MISE_DOWNLOADS_DIR/zig/$version/$HACK_PRERELEASE_ZIG_ARCHIVE"
+            if [ ! -e "$archive" ] && [ ! -L "$archive" ] &&
+              verify_archive "$download" && cp "$download" "$archive"; then
+              echo "archive-ready=true" >> "$GITHUB_OUTPUT"
+            fi
           fi
-          mise exec zig -- zig version
+          test "$("$zig_dir/zig" version)" = "$version"
+          echo "$zig_dir" >> "$GITHUB_PATH"
+      - name: Save the verified Zig release archive
+        if: steps.zig.outputs.archive-ready == 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/${{ env.HACK_PRERELEASE_ZIG_ARCHIVE }}
+          key: ${{ steps.zig-cache.outputs.cache-primary-key }}
       - run: bun install --frozen-lockfile
       - name: Build and verify complete native bundle
-        run: mise exec zig -- scripts/build-native-candidate.sh "$HACK_PRERELEASE_BUNDLE" "--version=$HACK_PRERELEASE_VERSION"
+        run: scripts/build-native-candidate.sh "$HACK_PRERELEASE_BUNDLE" "--version=$HACK_PRERELEASE_VERSION"
       # HACK-2263: with a fake stable `hack` first on PATH and a temp HOME,
       # the bundle's launcher must start the bundle's own hackd, and the CLI
       # and hackd must report this release version.

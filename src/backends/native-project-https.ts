@@ -1508,7 +1508,14 @@ export async function retireExitedNativeHttpsChildren(opts: {
       if (owner) {
         const ownerSocket = join(storage, OWNER_SOCKET);
         const current = await lstat(ownerSocket);
-        if (current.dev !== owner.dev || current.ino !== owner.ino) {
+        // The type and owner too: a replacement can reuse the freed inode
+        // number (ext4 does at once), so device and inode alone cannot tell.
+        if (
+          !current.isSocket() ||
+          current.uid !== owner.uid ||
+          current.dev !== owner.dev ||
+          current.ino !== owner.ino
+        ) {
           throw refused();
         }
         await unlink(ownerSocket);

@@ -490,6 +490,11 @@ mod tests {
     /// admin socket, and removes its socket and receipt, as a cooperative stop
     /// does. Before the fix the loop waited in `poll` with no timeout and Darwin
     /// never reported the closed FIFO, so it served forever.
+    // `serve_locked` records the authority's receipt with its own process
+    // identity, which only macOS can observe (`identity::observe`; the managed
+    // authority runs only beside the macOS VM). The serving loop itself is
+    // checked on every host by the `serving_loop_*` tests below.
+    #[cfg(target_os = "macos")]
     #[test]
     fn serving_authority_exits_soon_after_its_owner_fifo_closes() {
         let fixture = Fixture::new();
@@ -568,6 +573,11 @@ mod tests {
     /// an orphaned authority) ends serving too, and its Caddy goes with it, while
     /// the owner pipe stays open. It makes one attempt: here the owner itself
     /// stops its Caddy.
+    // `serve_locked` records the authority's receipt with its own process
+    // identity, which only macOS can observe (`identity::observe`; the managed
+    // authority runs only beside the macOS VM). The serving loop itself is
+    // checked on every host by the `serving_loop_*` tests below.
+    #[cfg(target_os = "macos")]
     #[test]
     fn cooperative_stop_also_stops_caddy() {
         use sha2::{Digest, Sha256};
@@ -690,5 +700,99 @@ mod tests {
         super::super::stop_caddy(&admin, patience);
         let elapsed = started.elapsed();
         assert!(elapsed < Duration::from_millis(3500), "silent: {elapsed:?}");
+    }
+
+    /// A listener for the serving loop alone, in a private short directory.
+    fn loop_listener(directory: &SocketDirectory) -> (PathBuf, std::os::unix::net::UnixListener) {
+        let path = directory.0.join("route.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        (path, listener)
+    }
+
+    /// HACK-2720 on every host: the serving loop with no clients, on a real
+    /// named FIFO, keeps serving while the owner holds its writer (past one
+    /// check interval) and ends within the bound once the writer closes, with
+    /// `OwnerGone`. Linux reports the hangup through `poll` at once; Darwin
+    /// reports nothing and the bounded wait plus the non-blocking read find it.
+    #[test]
+    fn serving_loop_exits_soon_after_its_owner_fifo_closes() {
+        let fixture = Fixture::new();
+        let candidate = fixture.candidate();
+        let directory = SocketDirectory::new("loop");
+        let (_path, listener) = loop_listener(&directory);
+        let (reader, writer) = owner_fifo(&fixture);
+        let (done, ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result =
+                super::super::serve_clients(&candidate, &listener, &"0".repeat(64), None, reader);
+            let _ = done.send(result);
+        });
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(
+            ended.try_recv().is_err(),
+            "the loop stopped while its owner held the pipe"
+        );
+        let closed = Instant::now();
+        unsafe { libc::close(writer) };
+        let result = ended
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the loop kept serving after its owner's pipe closed");
+        let after = closed.elapsed();
+        unsafe { libc::close(reader) };
+        assert!(
+            matches!(result, Ok(super::super::ServeEnd::OwnerGone)),
+            "{result:?}"
+        );
+        assert!(after < Duration::from_secs(2), "noticed after {after:?}");
+    }
+
+    /// The cooperative stop ends the serving loop on every host, with
+    /// `Stopped`, while the owner still holds its pipe; a stop naming another
+    /// receipt does not.
+    #[test]
+    fn serving_loop_ends_on_a_cooperative_stop_naming_its_receipt() {
+        use std::io::{Read, Write};
+        let fixture = Fixture::new();
+        let candidate = fixture.candidate();
+        let directory = SocketDirectory::new("loopstop");
+        let (path, listener) = loop_listener(&directory);
+        let (reader, writer) = owner_fifo(&fixture);
+        let fingerprint = "a".repeat(64);
+        let (done, ended) = std::sync::mpsc::channel();
+        let own = fingerprint.clone();
+        std::thread::spawn(move || {
+            let result = super::super::serve_clients(&candidate, &listener, &own, None, reader);
+            let _ = done.send(result);
+        });
+        let stop = |hash: &str| {
+            let mut client = std::os::unix::net::UnixStream::connect(&path).unwrap();
+            client
+                .write_all(
+                    format!("POST /stop?identity={hash} HTTP/1.1\r\nHost: local\r\n\r\n")
+                        .as_bytes(),
+                )
+                .unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut rest = Vec::new();
+            let _ = client.read_to_end(&mut rest);
+        };
+        stop(&"b".repeat(64));
+        assert!(
+            ended.recv_timeout(Duration::from_millis(500)).is_err(),
+            "a stop naming another receipt ended serving"
+        );
+        stop(&fingerprint);
+        let result = ended
+            .recv_timeout(Duration::from_secs(3))
+            .expect("the cooperative stop did not end serving");
+        unsafe { libc::close(writer) };
+        unsafe { libc::close(reader) };
+        assert!(
+            matches!(result, Ok(super::super::ServeEnd::Stopped)),
+            "{result:?}"
+        );
     }
 }

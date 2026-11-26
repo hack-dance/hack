@@ -3,7 +3,7 @@ pub(super) mod smolvm_cli;
 
 use super::admission_pool::{FreshCreate, StartPermit};
 use crate::CandidateError;
-use crate::provider::{NetworkIntent, ProjectShareIntent};
+use crate::provider::{NetworkIntent, ProjectShareIntent, identity::ProcessIdentity};
 use std::path::PathBuf;
 
 /// Creation inputs shared by ordinary pools and disposable prepared-base verifiers.
@@ -30,7 +30,10 @@ pub(super) struct MachineSpec {
 /// the separately admitted disposable verifier; constructing an adapter grants neither.
 pub(super) trait VmBackend {
     fn create(&self, spec: &MachineSpec, fresh: FreshCreate) -> Result<(), CandidateError>;
-    fn start(&self, permit: StartPermit) -> Result<(), CandidateError>;
+    /// Return the backend's recorded identity; the caller must independently verify it.
+    fn start(&self, permit: StartPermit) -> Result<ProcessIdentity, CandidateError>;
+    /// Read the current identity claim without starting or adopting a process.
+    fn recorded_process(&self) -> Result<ProcessIdentity, CandidateError>;
     /// Ask the backend to stop. The caller must still observe the retained process exit.
     fn stop(&self) -> Result<(), CandidateError>;
     /// Caller must establish the existing recovery/teardown authority before deletion.

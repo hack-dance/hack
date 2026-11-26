@@ -204,13 +204,16 @@ fn cold_boot_observation_includes_provider_start_and_its_early_errors() {
         .find("crate::timings::measure(crate::timings::Step::VmBoot")
         .unwrap();
     let provider = cold
-        .find("start_machine(&SmolvmCli::new(candidate, &owner), permit)?;")
+        .find("let observed = start_machine(&SmolvmCli::new(candidate, &owner), permit)?;")
         .unwrap();
+    let verification = cold.find("identity::verify(").unwrap();
+    let publication = cold.find("owner.process = Some(observed);").unwrap();
     let readiness = cold.find("finish_boot(candidate, &mut owner").unwrap();
     let cleanup = cold
         .find("cleanup.map_err(failed_boot_stop_error)?;")
         .unwrap();
     assert!(span < provider && provider < readiness && readiness < cleanup);
+    assert!(provider < verification && verification < publication && publication < readiness);
     assert!(cold.trim_end().ends_with("})\n}"));
 }
 

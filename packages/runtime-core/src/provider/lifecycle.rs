@@ -231,28 +231,7 @@ pub(super) fn recorded_process(
     candidate: &Candidate,
     owner: &Owner,
 ) -> Result<identity::ProcessIdentity, CandidateError> {
-    let text = provider_file(candidate, owner, "agent.pid")?;
-    let lines: Vec<_> = text.lines().collect();
-    let pid = lines.first().and_then(|s| s.parse::<i32>().ok());
-    let start = lines.get(1).and_then(|s| s.parse::<u64>().ok());
-    let (Some(pid), Some(start)) = (pid, start) else {
-        return Err(CandidateError::new(
-            "process_identity_unavailable",
-            "SmolVM PID record must include native start time.",
-        ));
-    };
-    if lines.len() != 2 || start == 0 {
-        return Err(CandidateError::new(
-            "process_identity_unavailable",
-            "Ambiguous SmolVM PID record.",
-        ));
-    }
-    Ok(identity::ProcessIdentity {
-        pid,
-        start_micros: start,
-        uid: unsafe { libc::geteuid() },
-        executable: binary(candidate),
-    })
+    SmolvmCli::new(candidate, owner).recorded_process()
 }
 pub(super) fn verify_live(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
     let recorded = owner.process.as_ref().ok_or_else(|| {
@@ -2137,8 +2116,7 @@ fn start_pool_observed(
     owner.process = None;
     phase(candidate, &mut owner, "booting")?;
     crate::timings::measure(crate::timings::Step::VmBoot, None, |_| {
-        start_machine(&SmolvmCli::new(candidate, &owner), permit)?;
-        let observed = recorded_process(candidate, &owner)?;
+        let observed = start_machine(&SmolvmCli::new(candidate, &owner), permit)?;
         identity::verify(
             &observed,
             &identity::observe(observed.pid)?,
@@ -2214,7 +2192,7 @@ fn create_machine(
 fn start_machine(
     backend: &impl VmBackend,
     permit: admission_pool::StartPermit,
-) -> Result<(), CandidateError> {
+) -> Result<identity::ProcessIdentity, CandidateError> {
     backend.start(permit).map_err(stalled_boot)
 }
 

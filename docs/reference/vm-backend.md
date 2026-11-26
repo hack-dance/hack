@@ -9,7 +9,8 @@ interchangeable.
 | Operation | Required input | Meaning of success |
 | --- | --- | --- |
 | `create` | `MachineSpec`, consumed `FreshCreate` | Provider accepted the machine definition; disk adoption remains with lifecycle. |
-| `start` | Consumed `StartPermit` | Provider command completed; process, disk, socket and guest observations remain necessary. |
+| `start` | Consumed `StartPermit` | Provider command completed and its recorded process identity was read; independent process, disk, socket and guest observations remain necessary. |
+| `recorded_process` | Bound machine | Backend returned its current identity claim; this does not prove the process is live or owned. |
 | `stop` | Bound machine | Stop request completed; lifecycle must still prove process exit and check disk holders. |
 | `delete_forced` | Bound machine after caller's teardown/recovery proof | Existing forced-delete command completed, without relaxing ownership checks. |
 | `enable_translation` | Bound machine after caller's host/config checks | Existing translation update completed. |
@@ -25,6 +26,12 @@ for a separate pair of tokens. Neither path introduces an extra probe or changes
 the engine volume/socket pair, translation, project shares, network and socket roles.
 Its regression checks the entire provider argument vector through the real helper.
 A signature regression checks token requirements on both the trait and implementation.
+
+The provider implementation reads and parses its PID record after a successful start.
+The controller independently observes and verifies the returned process identity before
+persisting it. Recovery and network checks use the same backend reader without starting
+a process. Missing or ambiguous records retain their existing refusal codes and messages;
+a successful start command followed by an unreadable record remains an uncertain outcome.
 
 Errors retain the existing `CandidateError` codes, messages and diagnostic metadata.
 Command execution keeps its closed environment, stdio behavior and 60-second bound.

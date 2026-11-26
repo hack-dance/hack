@@ -1,6 +1,6 @@
 //! Released provider command transport. Lifecycle policy stays with the caller.
 use super::{FreshCreate, MachineSpec, StartPermit, VmBackend};
-use crate::provider::{artifact, process, state::Owner};
+use crate::provider::{artifact, identity, process, state::Owner};
 use crate::{Candidate, CandidateError};
 use std::{path::Path, time::Duration};
 
@@ -27,8 +27,14 @@ impl VmBackend for SmolvmCli<'_> {
         self.invoke(&arguments.iter().map(String::as_str).collect::<Vec<_>>())
     }
 
-    fn start(&self, _permit: StartPermit) -> Result<(), CandidateError> {
-        self.invoke(&["machine", "start", "--name", &self.owner.machine])
+    fn start(&self, _permit: StartPermit) -> Result<identity::ProcessIdentity, CandidateError> {
+        self.invoke(&["machine", "start", "--name", &self.owner.machine])?;
+        self.recorded_process()
+    }
+
+    fn recorded_process(&self) -> Result<identity::ProcessIdentity, CandidateError> {
+        let text = super::super::provider_file(self.candidate, self.owner, "agent.pid")?;
+        parse_recorded_process(self.candidate, &text)
     }
 
     fn stop(&self) -> Result<(), CandidateError> {
@@ -54,6 +60,34 @@ impl VmBackend for SmolvmCli<'_> {
             "--rosetta",
         ])
     }
+}
+
+// A record is a claim from the provider, not independent proof of a live process.
+fn parse_recorded_process(
+    candidate: &Candidate,
+    text: &str,
+) -> Result<identity::ProcessIdentity, CandidateError> {
+    let lines: Vec<_> = text.lines().collect();
+    let pid = lines.first().and_then(|s| s.parse::<i32>().ok());
+    let start = lines.get(1).and_then(|s| s.parse::<u64>().ok());
+    let (Some(pid), Some(start)) = (pid, start) else {
+        return Err(CandidateError::new(
+            "process_identity_unavailable",
+            "SmolVM PID record must include native start time.",
+        ));
+    };
+    if lines.len() != 2 || start == 0 {
+        return Err(CandidateError::new(
+            "process_identity_unavailable",
+            "Ambiguous SmolVM PID record.",
+        ));
+    }
+    Ok(identity::ProcessIdentity {
+        pid,
+        start_micros: start,
+        uid: unsafe { libc::geteuid() },
+        executable: binary(candidate),
+    })
 }
 
 // BEGIN provider create arguments

@@ -27,8 +27,8 @@ use super::super::prepared_base::{self, Pins, PoolTarget, PublishRequest, Receip
 use super::super::prepared_store::{self, Entry, StoreLock, Verification};
 use super::super::{Profile, artifact, identity, prepared_inventory, prepared_start};
 use super::{
-    MachineSpec, Owner, SmolvmCli, VmBackend, agent, binary, guest, prepare_rootfs,
-    recorded_process, root, socket, state,
+    MachineSpec, Owner, SmolvmCli, VmBackend, agent, binary, guest, prepare_rootfs, root, socket,
+    state,
 };
 use crate::{Candidate, CandidateError};
 use serde::Serialize;
@@ -557,8 +557,7 @@ fn inspect(
     owner.created = true;
     owner.phase = "verifying".into();
     owner.save(verifier)?;
-    SmolvmCli::new(verifier, &owner).start(permit)?;
-    let observed = recorded_process(verifier, &owner)?;
+    let observed = SmolvmCli::new(verifier, &owner).start(permit)?;
     // SAFETY: geteuid has no preconditions and cannot fail.
     identity::verify(
         &observed,

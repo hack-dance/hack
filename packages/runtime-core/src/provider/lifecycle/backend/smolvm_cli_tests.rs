@@ -288,14 +288,47 @@ fn provider_command_turns_notifications_off_only_for_a_recorded_choice() {
 fn backend_effects_require_consumed_admission_tokens() {
     fn trait_signatures<B: VmBackend>() {
         let _: fn(&B, &MachineSpec, FreshCreate) -> Result<(), CandidateError> = B::create;
-        let _: fn(&B, StartPermit) -> Result<(), CandidateError> = B::start;
+        let _: fn(&B, StartPermit) -> Result<identity::ProcessIdentity, CandidateError> = B::start;
     }
     trait_signatures::<SmolvmCli<'_>>();
     fn implementation_signatures<'a>()
-    -> fn(&SmolvmCli<'a>, StartPermit) -> Result<(), CandidateError> {
+    -> fn(&SmolvmCli<'a>, StartPermit) -> Result<identity::ProcessIdentity, CandidateError> {
         let _: fn(&SmolvmCli<'a>, &MachineSpec, FreshCreate) -> Result<(), CandidateError> =
             SmolvmCli::<'a>::create;
         SmolvmCli::<'a>::start
     }
     let _ = implementation_signatures();
+}
+
+#[test]
+fn recorded_identity_preserves_native_start_time_and_provider_executable() {
+    let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+    for text in ["123\n456", "123\n456\n", "123\r\n456\r\n"] {
+        let recorded = parse_recorded_process(&candidate, text).unwrap();
+        assert_eq!(recorded.pid, 123);
+        assert_eq!(recorded.start_micros, 456);
+        assert_eq!(recorded.uid, unsafe { libc::geteuid() });
+        assert_eq!(recorded.executable, binary(&candidate));
+    }
+}
+
+#[test]
+fn invalid_identity_records_preserve_exact_refusals() {
+    let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+    for (records, message) in [
+        (
+            vec!["", "123", "pid\n456", "123\nstart", "2147483648\n456"],
+            "SmolVM PID record must include native start time.",
+        ),
+        (
+            vec!["123\n0", "123\n456\nextra", "123\n456\n\n"],
+            "Ambiguous SmolVM PID record.",
+        ),
+    ] {
+        for record in records {
+            let error = parse_recorded_process(&candidate, record).unwrap_err();
+            assert_eq!(error.code, "process_identity_unavailable");
+            assert_eq!(error.message, message);
+        }
+    }
 }

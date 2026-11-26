@@ -21,6 +21,7 @@ type ModelContract = {
       | "MetadataAliasing"
       | "PreReady"
       | "RetainedGuard"
+      | "ExecStopWait"
       | "ServingExit";
     readonly negative: boolean;
     readonly states?: number;
@@ -2225,6 +2226,75 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NeverAdmittedAfterWait",
         fields: ['cmd = "admitted"', 'lease = "command"', "elapsed = 1"],
+      },
+      {
+        // HACK-2729: `hack exec` in one project while another project's
+        // `hack down` holds the lease for about 31 s (one tick is one second).
+        // The requesting side waits 35 s for the refresh, then for the exec,
+        // and says "unconfirmed" only after it sent the command.
+        name: "exec-outlasts-stop",
+        module: "ExecStopWait",
+        negative: false,
+        states: 192,
+      },
+      {
+        // The reported failure: the 15 s wait expired during the stop and
+        // was reported as unconfirmed although nothing had been sent.
+        name: "old-exec-bound",
+        module: "ExecStopWait",
+        negative: true,
+        invariant: "UnconfirmedOnlyAfterSend",
+        fields: [
+          'phase = "refused"',
+          'report = "unconfirmed"',
+          "sent = FALSE",
+          "elapsed = 15",
+        ],
+      },
+      {
+        // An honest refusal alone is not the fix: at 15 s the exec still
+        // refuses while the stop runs.
+        name: "honest-old-bound",
+        module: "ExecStopWait",
+        negative: true,
+        invariant: "StopNeverRefuses",
+        fields: ['phase = "refused"', 'report = "nothing-ran"', "elapsed = 15"],
+      },
+      {
+        // The wait stays bounded: a stop past 35 s is refused, nothing sent.
+        name: "exec-past-bound",
+        module: "ExecStopWait",
+        negative: true,
+        invariant: "StopNeverRefuses",
+        fields: [
+          'phase = "refused"',
+          'report = "nothing-ran"',
+          "sent = FALSE",
+          "elapsed = 35",
+        ],
+      },
+      {
+        // ... and that refusal still says nothing ran.
+        name: "exec-past-bound-honest",
+        module: "ExecStopWait",
+        negative: false,
+        states: 214,
+      },
+      {
+        // The exec runs after the stop held the lease for all 31 s.
+        name: "exec-ran-after-stop",
+        module: "ExecStopWait",
+        negative: true,
+        invariant: "NeverRanAfterStop",
+        fields: ['report = "ran"', "sent = TRUE", "held = 31"],
+      },
+      {
+        // A reply lost after the send is still reported as unconfirmed.
+        name: "exec-unconfirmed-after-send",
+        module: "ExecStopWait",
+        negative: true,
+        invariant: "NeverUnconfirmed",
+        fields: ['report = "unconfirmed"', "sent = TRUE", 'phase = "done"'],
       },
     ],
   },

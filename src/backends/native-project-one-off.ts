@@ -167,7 +167,10 @@ export async function nativeProjectOneOff(opts: {
       process.stderr.write(`${line}\n`);
     },
   });
-  const refreshed = await refreshNativeProjectDependencies(opts);
+  const refreshed = await refreshNativeProjectDependencies({
+    ...opts,
+    command: "hack run",
+  });
   if (JSON.stringify(refreshed.mapping) !== JSON.stringify(mapping)) {
     throw refused();
   }

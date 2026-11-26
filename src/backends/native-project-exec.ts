@@ -3,6 +3,11 @@ import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { waitForNativeProjectReady } from "../lib/native-start-wait.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
+import {
+  isNativeCommandLeaseRefusal,
+  nativeCommandLeaseRefusal,
+  nativeCommandLeaseWaitReporter,
+} from "./native-command-lease.ts";
 import { prepareNativeExecEnvironment } from "./native-exec-environment.ts";
 import { resolveNativeStartTimeoutSeconds } from "./native-graph-start-budget.ts";
 import {
@@ -19,6 +24,13 @@ import {
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
+
+/**
+ * The `graph exec` request's bound: the runtime's 35 s lease wait, the 30 s
+ * exec, 20 s of output still arriving, the 5 s inspection grace and a 5 s
+ * margin.
+ */
+export const NATIVE_EXEC_REQUEST_TIMEOUT_MS = 95_000;
 
 function refused(): Error {
   return new ClosedCliError(
@@ -112,6 +124,29 @@ async function freshDelivery(opts: {
   );
   return { payload, extra, generation: selected.generation };
 }
+/**
+ * The `graph exec` request, with its own expired lease wait reported as a plain
+ * refusal (HACK-2729). The exec's lease is the first thing `graph exec` takes, so
+ * that refusal means nothing was started: it is not an uncertain outcome.
+ */
+function withExecLeaseRefusal(
+  invoke: typeof invokeNativeRuntime
+): typeof invokeNativeRuntime {
+  return async (request) => {
+    try {
+      return await invoke(request);
+    } catch (error) {
+      if (isNativeCommandLeaseRefusal(error)) {
+        throw nativeCommandLeaseRefusal({
+          nativeMessage: error.nativeMessage,
+          command: "hack exec",
+        });
+      }
+      throw error;
+    }
+  };
+}
+
 /** One bounded noninteractive command; fresh values use private stdin when a Compose source is supplied. */
 export async function nativeProjectExec(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -121,6 +156,8 @@ export async function nativeProjectExec(opts: {
   readonly workdir?: string;
   readonly composeFile?: string;
   readonly invoke?: typeof invokeNativeRuntime;
+  /** The lease-wait progress line; the CLI prints it once per command. */
+  readonly onLeaseWait?: (holder: string) => void;
 }) {
   if (!nativeAuthoredExecOptions(opts.service, opts.argv, opts.workdir)) {
     throw new ClosedCliError(
@@ -140,7 +177,16 @@ export async function nativeProjectExec(opts: {
       process.stderr.write(`${line}\n`);
     },
   });
-  const refreshed = await refreshNativeProjectDependencies(opts);
+  // Both requests that may wait for the lock (the refresh, then the exec) share
+  // one progress line (HACK-2729).
+  const onLeaseWait = nativeCommandLeaseWaitReporter({
+    given: opts.onLeaseWait,
+  });
+  const refreshed = await refreshNativeProjectDependencies({
+    ...opts,
+    command: "hack exec",
+    onLeaseWait,
+  });
   const before = await nativeProjectPs(opts);
   if (before.status === "provider_pin_changed") {
     throw new NativeRuntimeRequestError({
@@ -177,7 +223,7 @@ export async function nativeProjectExec(opts: {
   ) {
     throw refused();
   }
-  const invoke = opts.invoke ?? invokeNativeRuntime;
+  const invoke = withExecLeaseRefusal(opts.invoke ?? invokeNativeRuntime);
   const { payload, extra, generation } = opts.composeFile
     ? await freshDelivery({
         ...opts,
@@ -219,12 +265,14 @@ export async function nativeProjectExec(opts: {
     value = await invoke({
       runtime: opts.runtime,
       cwd: opts.scope.projectRoot,
-      // The runtime may first wait up to 15 s for a provider lease a ready owner holds
-      // briefly (HACK-2669). Its 30 s exec bound may then be followed by up to 20 s of
-      // reading output that is still arriving and a 5 s inspection grace (HACK-2357);
-      // do not kill it first.
-      timeoutMs: 75_000,
+      // The runtime may first wait up to 35 s for the provider lease, which a ready
+      // owner holds briefly (HACK-2669) and another project's stop holds for its
+      // whole stop (HACK-2729). Its 30 s exec bound may then be followed by up to
+      // 20 s of reading output that is still arriving and a 5 s inspection grace
+      // (HACK-2357); do not kill it first.
+      timeoutMs: NATIVE_EXEC_REQUEST_TIMEOUT_MS,
       serviceExecResponse: true,
+      onLeaseWait,
       privateInput: payload,
       args: [
         "graph",

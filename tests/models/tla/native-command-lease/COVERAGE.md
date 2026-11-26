@@ -26,9 +26,9 @@ nothing would hold Ctrl-C, `hack down` and the restart tick for up to 15 s
 
 | Call site | Runs in | Entry | Check | Budget |
 | --- | --- | --- | --- | --- |
-| `dependency_refresh::request` | requesting CLI | `Engine::connect_command` | none (Ctrl-C ends the process) | wait, then 5 s send and 175 s read; frontend 200 s |
+| `dependency_refresh::request` | requesting CLI | `Engine::connect_command_request` (35 s, HACK-2729) | none (Ctrl-C ends the process) | wait, then 5 s send and 175 s read; frontend 220 s |
 | `dependency_refresh::handle` | owner loop | `Engine::connect_command` | `signals.pending()`, client disconnect, the 170 s answer deadline | the wait counts inside the 170 s answer |
-| `service_exec` (compose finite exec) | CLI | `Engine::connect_command` | expiry of fresh per-command values (`managed.deadline()`), if any | exec timeout starts after acquisition; frontend 75 s |
+| `service_exec` (`graph exec`, finite exec) | requesting CLI | `Engine::connect_command_request` (35 s, HACK-2729) | expiry of fresh per-command values (`managed.deadline()`), if any | exec timeout starts after acquisition; frontend 95 s |
 | `service_exec::interactive` (compose) | CLI | `Engine::connect_command_until` | the frontend's `live` check | counts against the interactive deadline |
 | `native::runtime::exec::execute`, `exec::interactive`, `run::execute` (authored) | owner loop | `Engine::connect_command_until` | the owner's guard: signals, publication, pin (and client disconnect for interactive) | counts against the fixed 30 s budget |
 
@@ -37,7 +37,7 @@ native requester (`request_selected`) reads the owner's answer for a fixed
 40 s, so a wait outside the budget could outlast that read. After a full 15 s
 wait an authored exec or run has the remaining 15 s. The compose finite exec
 instead starts its own timeout after acquisition, and its frontend bound
-(75 s) covers the wait.
+(95 s since HACK-2729) covers the wait.
 
 Fresh per-command values for `hack exec` have a delivery lifetime that starts
 when the CLI receives them, before the lease wait. The wait refuses, before
@@ -67,6 +67,72 @@ signal before time passes. `Wait = FALSE` is the old single attempt.
 
 [State chart](command-lease.svg) ([source](command-lease.mmd)).
 
+## Exec beside another project's stop (HACK-2729)
+
+Project X ran `hack down`. Its `web` service ignores SIGTERM and has the 30 s
+stop grace, so X's owner held the provider lease for about 31 s. Project Y,
+ready and routed, ran `hack exec` during that stop. After 15.1 s the exec
+failed: "Native dependency refresh identity or outcome is unconfirmed ...
+provider_busy", with no progress line. Nothing had run: the refresh's
+requesting process never took the lease, so it never sent anything to Y's
+owner. The CLI mapped every refresh failure, this one included, to
+"unconfirmed".
+
+The requesting side now waits `COMMAND_REQUEST_LEASE_WAIT`, which is
+`START_LEASE_WAIT` (35 s, the stop grace limit plus 5 s), through
+`Engine::connect_command_request`. That covers the refresh selection
+(`dependency_refresh::requested_selection`) and `graph exec`
+(`service_exec`). Both run in a short-lived requesting process that holds
+nothing and serves no loop. The owner-side waits keep `COMMAND_LEASE_WAIT`
+(15 s), because they block the owner's only loop. The CLI asks for the
+lease-wait report on both requests (`onLeaseWait`) and prints one progress
+line per command. On expiry the requester's own refusal is a raw
+`provider_busy` with no cause: every owner refusal reaches it wrapped in
+`refused()`, and the exec's lease is the first thing `graph exec` takes. The
+CLI reports exactly that refusal as "nothing ran", with the holder and a
+retry (`native-command-lease.ts`). Everything else keeps its report,
+"unconfirmed" included, where the request was sent.
+
+`ExecStopWait.tla` models this. The stop holds the lease for at most
+`StopHold` ticks, one tick per second. Y's exec waits up to `Bound` ticks for
+the refresh, which only reads, then up to `Bound` ticks for the exec, which
+sends the command. After the send the reply may arrive or be lost.
+`ExpiryUnconfirmed = TRUE` is the old report of an expiry.
+
+| Config | Constants | Result | Shows |
+| --- | --- | --- | --- |
+| `exec-outlasts-stop` | `Bound = 35`, `StopHold = 31` | 192 distinct states, no error; `StopNeverRefuses`, `NoSendWhileHeld`, `UnconfirmedOnlyAfterSend`, `NothingRanMeansNothingSent` and `Settles` hold | The exec outlasts the 31 s stop and is never refused |
+| `old-exec-bound` | `Bound = 15`, `ExpiryUnconfirmed = TRUE` | `UnconfirmedOnlyAfterSend` violated: `phase = "refused"`, `report = "unconfirmed"`, `sent = FALSE`, `elapsed = 15` | The reported failure |
+| `honest-old-bound` | `Bound = 15` | `StopNeverRefuses` violated: `report = "nothing-ran"` at `elapsed = 15` | An honest refusal alone does not fix the wait |
+| `exec-past-bound` | `Bound = 35`, `StopHold = 40` | `StopNeverRefuses` violated: `report = "nothing-ran"`, `sent = FALSE` at `elapsed = 35` | The wait stays bounded |
+| `exec-past-bound-honest` | `Bound = 35`, `StopHold = 40` | 214 distinct states, no error; the report invariants and `Settles` hold | That refusal still says nothing ran |
+| `exec-ran-after-stop` | `Bound = 35`, `StopHold = 31` | `NeverRanAfterStop` violated: `report = "ran"`, `sent = TRUE`, `held = 31` | The exec runs after the full stop |
+| `exec-unconfirmed-after-send` | `Bound = 35`, `StopHold = 31` | `NeverUnconfirmed` violated: `report = "unconfirmed"`, `sent = TRUE` | A reply lost after the send is still unconfirmed |
+
+[State chart](exec-stop-wait.svg) ([source](exec-stop-wait.mmd), Pele 1.9.0,
+label check PASS).
+
+Tests:
+
+- `provider/engine/command_lease_tests.rs`: the constants (35 s is the
+  start's bound, the owner keeps 15 s, `command_lease_deadline` caps a far
+  deadline at each); scaled 50 times, a project stop held 600 ms is refused
+  at the owner bound with the exact project-stop message and waited out by
+  `connect_command_request`; a stop past the bound is refused with the raw,
+  uncaused `provider_busy`.
+- `dependency_refresh.rs` `owner_lease_tests`: the same for the refresh's
+  `requested_selection`.
+- `tests/native-command-lease.test.ts`, `tests/native-project-exec.test.ts`,
+  `tests/native-project-dependency-refresh.test.ts`: the progress line (once
+  across the refresh and the exec), the refusal for `hack exec` and `hack
+  run`, a wrapped or caused `provider_busy` that stays as it was, and the
+  frontend bounds.
+
+The model abstracts a second holder that arrives between the refresh and the
+exec (the exec's own wait covers it the same way), fresh per-command values
+whose 30 s lifetime can end the exec's wait first, and the owner-side waits
+of interactive `exec` and `hack run`, which keep 15 s.
+
 ## Code and tests
 
 - `provider/lifecycle.rs`: `COMMAND_LEASE_WAIT`.
@@ -78,9 +144,9 @@ signal before time passes. `Wait = FALSE` is the old single attempt.
   170 s deadline before its own lease wait, so it still answers inside the
   requester's 175 s read (a requester that gives up disconnects, and a
   disconnect cancels the rebind).
-- `src/backends/native-project-exec.ts` (75 s) and
-  `native-project-dependency-refresh.ts` (200 s): frontend bounds that cover
-  the added wait.
+- `src/backends/native-project-exec.ts` (95 s, was 75 s) and
+  `native-project-dependency-refresh.ts` (220 s, was 200 s): frontend bounds
+  that cover the added wait.
 - `provider/engine/command_lease_tests.rs`, on a real flock held by another
   thread: `Engine::connect` refuses `provider_busy` naming the holder;
   `Engine::connect_command` and `Engine::connect_command_until` wait and then

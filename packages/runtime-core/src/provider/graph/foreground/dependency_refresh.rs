@@ -7,17 +7,46 @@ use transport::DependencyRefreshRequest;
 /// Both the requesting command and the owner read the selection under the
 /// mutation lease. Either waits out a brief holder (the owner itself supervises
 /// restarts under it each second) instead of refusing `provider_busy` (HACK-2669),
-/// until `deadline` and for at most `COMMAND_LEASE_WAIT`. `check` runs before every
-/// attempt: the owner passes its signal and disconnect checks, so a shutdown
-/// signal is not held behind another command's lease.
+/// until `deadline`. The owner waits at most `COMMAND_LEASE_WAIT` on its only loop
+/// thread, and `check` runs before every attempt: the owner passes its signal and
+/// disconnect checks, so a shutdown signal is not held behind another command's
+/// lease.
 fn selection(
     candidate: &Candidate,
     run: &str,
     deadline: Instant,
     check: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<DependencyRefreshRequest, CandidateError> {
-    let engine = Engine::connect_command(candidate, deadline, check)?;
-    let (receipt, _) = super::super::load(candidate, &engine, run)?;
+    leased_selection(
+        candidate,
+        &Engine::connect_command(candidate, deadline, check)?,
+        run,
+    )
+}
+
+/// The requesting process's selection, before anything is sent to the owner. It
+/// waits at most `COMMAND_REQUEST_LEASE_WAIT`, so it outlasts another project's
+/// stop (HACK-2729). Its own `provider_busy` on expiry is the only `provider_busy`
+/// that `request` returns as is: every owner refusal is wrapped in `refused()`, so
+/// the CLI reads that code alone as "nothing was sent and nothing ran".
+fn requested_selection(
+    candidate: &Candidate,
+    run: &str,
+    deadline: Instant,
+) -> Result<DependencyRefreshRequest, CandidateError> {
+    leased_selection(
+        candidate,
+        &Engine::connect_command_request(candidate, deadline, &|| Ok(()))?,
+        run,
+    )
+}
+
+fn leased_selection(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    run: &str,
+) -> Result<DependencyRefreshRequest, CandidateError> {
+    let (receipt, _) = super::super::load(candidate, engine, run)?;
     if receipt.phase != "ready-observed" {
         return Err(refused());
     }
@@ -43,11 +72,10 @@ fn owner_lease_check(cancelled: &dyn Fn() -> bool) -> impl Fn() -> Result<(), Ca
 pub fn request(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
     // The requesting CLI process has no owner loop to keep responsive; an interrupt
     // ends the process, and the frontend bounds the whole request.
-    let selected = selection(
+    let selected = requested_selection(
         candidate,
         run,
-        Instant::now() + crate::provider::lifecycle::COMMAND_LEASE_WAIT,
-        &|| Ok(()),
+        Instant::now() + crate::provider::lifecycle::COMMAND_REQUEST_LEASE_WAIT,
     )?;
     let expected_plan = selected.plan.clone();
     let pin = transport::Pin::load(candidate, run)?;
@@ -362,8 +390,44 @@ mod automatic_tests {
 #[cfg(test)]
 mod owner_lease_tests {
     use super::*;
-    use crate::provider::engine::command_lease_tests::{hold_lease, running_pool};
+    use crate::provider::engine::command_lease_tests::{
+        PAST_ACQUISITION, PROJECT_STOP_REFUSAL, hold_lease, hold_lease_as_project_stop,
+        running_pool,
+    };
     use std::cell::Cell;
+
+    /// HACK-2729: the requesting side's selection, before anything is sent to the
+    /// owner, outlasts a project stop (scaled: 600 ms against a 700 ms bound), and a
+    /// stop past its bound is refused with the raw, uncaused `provider_busy` naming
+    /// the stop. That is the refusal the CLI reports as "nothing ran".
+    #[test]
+    fn the_requested_selection_waits_out_a_project_stop_and_refuses_one_past_its_bound() {
+        let (_home, candidate) = running_pool();
+        let run = "a".repeat(32);
+        let hold = Duration::from_millis(600);
+        let (_release, holder) = hold_lease_as_project_stop(&candidate, hold);
+        let started = Instant::now();
+        let after = requested_selection(&candidate, &run, started + Duration::from_millis(700))
+            .err()
+            .unwrap();
+        assert!(started.elapsed() >= hold - Duration::from_millis(50));
+        assert_eq!(after.code, PAST_ACQUISITION, "{}", after.message);
+        holder.join().unwrap();
+
+        let (release, holder) = hold_lease_as_project_stop(&candidate, Duration::from_secs(30));
+        let refused = requested_selection(
+            &candidate,
+            &run,
+            Instant::now() + Duration::from_millis(300),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(refused.code, "provider_busy");
+        assert_eq!(refused.message, PROJECT_STOP_REFUSAL);
+        assert!(refused.cause_code.is_none());
+        release.send(()).unwrap();
+        holder.join().unwrap();
+    }
 
     #[test]
     fn a_pending_owner_signal_ends_the_selection_lease_wait() {

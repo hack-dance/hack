@@ -248,6 +248,16 @@ fn failure(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("engine_protocol", message)
 }
 
+/// The end of a service command's lease wait: its caller's `deadline`, or `wait`
+/// after `now`, whichever comes first.
+pub(in crate::provider) fn command_lease_deadline(
+    now: Instant,
+    deadline: Instant,
+    wait: Duration,
+) -> Instant {
+    deadline.min(now + wait)
+}
+
 /// A bounded lease wait that ended before any attempt saw the lease busy.
 fn lease_expired() -> CandidateError {
     CandidateError::new(
@@ -634,7 +644,31 @@ impl<'a> Engine<'a> {
         deadline: Instant,
         check: &dyn Fn() -> Result<(), CandidateError>,
     ) -> Result<Self, CandidateError> {
-        let lease = deadline.min(Instant::now() + super::lifecycle::COMMAND_LEASE_WAIT);
+        let lease = command_lease_deadline(
+            Instant::now(),
+            deadline,
+            super::lifecycle::COMMAND_LEASE_WAIT,
+        );
+        Self::connect_for_start(candidate, ConnectionMode::Allocation, lease, check)
+    }
+
+    /// [`Self::connect_command`] for the requesting process of `hack exec` (its
+    /// dependency refresh and the exec itself), which waits for at most
+    /// [`COMMAND_REQUEST_LEASE_WAIT`](super::lifecycle::COMMAND_REQUEST_LEASE_WAIT)
+    /// so that it outlasts another project's stop (HACK-2729). That process holds
+    /// nothing and serves no loop, so the longer wait delays only this command.
+    /// Waiting admits nothing: on expiry its own `provider_busy` refusal (holder
+    /// named) means nothing was sent to the owner and no command ran.
+    pub(in crate::provider) fn connect_command_request(
+        candidate: &'a Candidate,
+        deadline: Instant,
+        check: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<Self, CandidateError> {
+        let lease = command_lease_deadline(
+            Instant::now(),
+            deadline,
+            super::lifecycle::COMMAND_REQUEST_LEASE_WAIT,
+        );
         Self::connect_for_start(candidate, ConnectionMode::Allocation, lease, check)
     }
 

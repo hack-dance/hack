@@ -382,8 +382,9 @@ pub(super) const STARTUP_LEASE_WAIT: Duration = Duration::from_secs(5);
 /// returns as soon as the lease is free. Waiting admits nothing; every check runs
 /// under the acquired lease. On expiry the refusal still names the holder, which is
 /// what a holder that keeps the lease longer (a stop with dependent services stopped
-/// in turn, another project's cold start) gets. `hack exec`, `ps` and `logs` keep
-/// their own waits ([`COMMAND_LEASE_WAIT`], none).
+/// in turn, another project's cold start) gets. `hack exec`'s requesting process
+/// waits as long ([`COMMAND_REQUEST_LEASE_WAIT`]); its owner-side waits keep
+/// [`COMMAND_LEASE_WAIT`], and `ps` and `logs` take no wait.
 pub(super) const START_LEASE_WAIT: Duration = Duration::from_secs(30 + 5);
 
 /// How long a one-shot service command (`hack exec`, and the dependency refresh that
@@ -396,7 +397,30 @@ pub(super) const START_LEASE_WAIT: Duration = Duration::from_secs(30 + 5);
 /// wait, inside their fixed 30 s budget. Every waiter passes its caller's check
 /// (owner signals, client disconnect, frontend liveness), which runs before each
 /// attempt, so an owner loop that waits still sees a shutdown signal.
+///
+/// This bound stays for the waits on an owner's only loop thread (the owner's
+/// answer to a refresh, `hack run`'s job, the authored `exec` inside its 30 s
+/// budget), where a longer wait would hold up that owner's `hack down` and
+/// restart ticks. The requesting process of `hack exec` waits
+/// [`COMMAND_REQUEST_LEASE_WAIT`] instead.
 pub(super) const COMMAND_LEASE_WAIT: Duration = Duration::from_secs(15);
+
+/// How long the requesting process of a one-shot service command waits for a
+/// provider lease another operation holds (HACK-2729): the dependency refresh that
+/// `hack exec` and `hack run` send first (`graph refresh-dependencies`, client
+/// side), and the exec itself (`graph exec`). Another project's `hack down` holds
+/// the lease for its whole graph stop, up to the 30 s per-service stop grace, so
+/// an exec in a ready project that gave up after [`COMMAND_LEASE_WAIT`] refused
+/// `provider_busy` while that stop still ran, with nothing sent to its owner.
+///
+/// It is [`START_LEASE_WAIT`] by definition, not a second number of the same
+/// size: both cover the same holder (a project stop: the grace limit plus 5 s),
+/// so a change to that limit moves both, and the CLI names one bound in the
+/// progress line. It is its own name because its callers differ: these waits run
+/// in a short-lived requesting process that holds nothing and blocks no other
+/// loop, so waiting longer costs only the command that waits. A brief holder
+/// still costs only its own hold, and an uncontended acquisition returns at once.
+pub(super) const COMMAND_REQUEST_LEASE_WAIT: Duration = START_LEASE_WAIT;
 
 /// How long the shared HTTPS owner's hostname authority waits for the provider lease
 /// at startup. The authority starts at a run's ready line after `hack up -d` returned,

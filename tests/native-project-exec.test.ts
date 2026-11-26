@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { nativeProjectExec } from "../src/backends/native-project-exec.ts";
 import { saveNativeProjectRun } from "../src/backends/native-project-run.ts";
+import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
@@ -478,4 +479,144 @@ test("exec names an inactive service before sending any command", async () => {
     "Native service extra is not active in this run; nothing was executed."
   );
   expect(calls).not.toContain("exec");
+});
+
+const PROJECT_STOP =
+  "Provider lease acquisition refused; recorded holder: project stop; no operation was admitted.";
+
+test("HACK-2729: an exec that waits out another project's stop prints one progress line", async () => {
+  const opts = await fixture();
+  const lines: string[] = [];
+  const calls: string[] = [];
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  let result: Awaited<ReturnType<typeof nativeProjectExec>>;
+  try {
+    result = await nativeProjectExec({
+      ...opts,
+      service: "web",
+      argv: ["true"],
+      invoke: async (request) => {
+        calls.push(String(request.args[1]));
+        if (request.args[1] === "status") {
+          expect(request.onLeaseWait).toBeUndefined();
+          return snapshot();
+        }
+        // Both lease-taking requests ask for the report and share one line.
+        expect(request.onLeaseWait).toBeInstanceOf(Function);
+        request.onLeaseWait?.("project-stop");
+        if (request.args[1] === "refresh-dependencies") {
+          expect(request.timeoutMs).toBe(220_000);
+          return refreshed();
+        }
+        expect(request.timeoutMs).toBe(95_000);
+        return {
+          exit_code: 0,
+          stdout_base64: "",
+          stderr_base64: "",
+          truncated: false,
+        };
+      },
+    });
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+  expect(result.exitCode).toBe(0);
+  expect(calls).toEqual([
+    "status",
+    "refresh-dependencies",
+    "status",
+    "exec",
+    "status",
+  ]);
+  expect(lines).toEqual([
+    "Waiting for the native runtime lock, held by a project stop. This command continues once it is released (up to 35 s).\n",
+  ]);
+});
+
+test("HACK-2729: a lock held past the bound refuses clearly before anything ran, never unconfirmed", async () => {
+  // At the refresh: nothing was sent to the owner, and exec was never requested.
+  const opts = await fixture();
+  const calls: string[] = [];
+  const busy = () =>
+    new NativeRuntimeRequestError({
+      message: "private stderr",
+      nativeCode: "provider_busy",
+      nativeMessage: PROJECT_STOP,
+    });
+  const expected = [
+    "hack exec could not acquire the native runtime lock (provider_busy); nothing ran.",
+    "Holder: project stop.",
+    "Retry hack exec once that project stop finishes.",
+  ].join("\n");
+  await expect(
+    nativeProjectExec({
+      ...opts,
+      service: "web",
+      argv: ["true"],
+      onLeaseWait: () => undefined,
+      invoke: async (request) => {
+        calls.push(String(request.args[1]));
+        if (request.args[1] === "status") {
+          return snapshot();
+        }
+        throw busy();
+      },
+    })
+  ).rejects.toThrow(expected);
+  expect(calls).toEqual(["status", "refresh-dependencies"]);
+
+  // At the exec's own lease, the first thing `graph exec` takes.
+  calls.length = 0;
+  let failure: unknown;
+  try {
+    await nativeProjectExec({
+      ...opts,
+      service: "web",
+      argv: ["true"],
+      onLeaseWait: () => undefined,
+      invoke: async (request) => {
+        calls.push(String(request.args[1]));
+        if (request.args[1] === "status") {
+          return snapshot();
+        }
+        if (request.args[1] === "refresh-dependencies") {
+          return refreshed();
+        }
+        throw busy();
+      },
+    });
+  } catch (error) {
+    failure = error;
+  }
+  expect(calls).toEqual(["status", "refresh-dependencies", "status", "exec"]);
+  expect((failure as Error).message).toBe(expected);
+  expect((failure as Error).message).not.toContain("unconfirmed");
+
+  // A provider_busy the runtime caused or wrapped is passed on unchanged.
+  const wrapped = new NativeRuntimeRequestError({
+    message: "Native runtime request failed (provider_busy: provider_state)",
+    nativeCode: "provider_busy",
+    nativeCauseCode: "provider_state",
+  });
+  await expect(
+    nativeProjectExec({
+      ...opts,
+      service: "web",
+      argv: ["true"],
+      onLeaseWait: () => undefined,
+      invoke: async (request) => {
+        if (request.args[1] === "status") {
+          return snapshot();
+        }
+        if (request.args[1] === "refresh-dependencies") {
+          return refreshed();
+        }
+        throw wrapped;
+      },
+    })
+  ).rejects.toBe(wrapped);
 });

@@ -132,9 +132,12 @@ Tests:
   at the owner bound with the exact project-stop message and waited out by
   `connect_command_request`; a stop past the bound is refused with the raw,
   uncaused `provider_busy`.
-- `dependency_refresh.rs` `owner_lease_tests`: the same for the refresh's
-  `requested_selection`, and the owner's selection refusal mapped to
-  `graph_dependency_refresh_lease_busy` while other codes are kept.
+- `dependency_refresh.rs` `owner_lease_tests`: the refresh's `requested_selection`
+  waits out a 600 ms stop with 500 ms of slack for scheduling, unlock, and
+  polling at up to 50 ms per interval (HACK-2741). A stop held past the
+  deadline yields the exact raw `provider_busy` with no cause. The owner's
+  selection refusal maps to `graph_dependency_refresh_lease_busy`, and other
+  codes are kept.
 - `tests/native-command-lease.test.ts`, `tests/native-project-exec.test.ts`,
   `tests/native-project-dependency-refresh.test.ts`: the progress line (once
   across the refresh and the exec), the refusal for `hack exec` and `hack

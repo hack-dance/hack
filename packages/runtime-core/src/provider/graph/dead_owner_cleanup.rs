@@ -3125,8 +3125,10 @@ mod tests {
         // neither a bridge slot nor a settled relay, and the CLI names no
         // `hack down --recover` for it.
         let fixture = super::super::retained_startup::tests::Fixture::new();
-        let provable =
-            |receipt: &Receipt| bridges::cleanup::relay_owner_provable(&fixture.candidate, receipt);
+        let token = Owner::load(&fixture.candidate).unwrap().token;
+        let provable = |receipt: &Receipt| {
+            bridges::cleanup::relay_owner_provable(&fixture.candidate, &token, receipt)
+        };
         let mut receipt = fixture.receipt();
         receipt.phase = "ready-observed".into();
         assert!(!provable(&receipt));
@@ -3143,20 +3145,26 @@ mod tests {
         // the relay startup; another run's slot or a foreign registry does not.
         let registry = fixture.candidate.state_root.join("run/bridge-assignments");
         state::private_directory(&registry).unwrap();
-        let store = |run: &str, version: u32| {
-            json!({"version":version,"owner":"o","next_launch_serial":0,"slots":{"1":{
+        let store = |run: &str, version: u32, owner: &str| {
+            json!({"version":version,"owner":owner,"next_launch_serial":0,"slots":{"1":{
                 "reservation":"r","run":run,"service":"web","generation":"g",
                 "container_id":"c","network_id":"n","boot_id":"b","phase":"reserved"}}})
         };
-        state::write(&registry.join("state.json"), &store(&receipt.run, 1)).unwrap();
+        let write = |value: serde_json::Value| {
+            state::write(&registry.join("state.json"), &value).unwrap();
+        };
+        write(store(&receipt.run, 1, &token));
         assert!(provable(&unsettled));
         assert_eq!(
             foreground_owner(&fixture.candidate, &fixture.run).unwrap()["cross_boot_relay"],
             true
         );
-        state::write(&registry.join("state.json"), &store(&"f".repeat(32), 1)).unwrap();
+        write(store(&"f".repeat(32), 1, &token));
         assert!(!provable(&unsettled));
-        state::write(&registry.join("state.json"), &store(&receipt.run, 2)).unwrap();
+        write(store(&receipt.run, 2, &token));
+        assert!(!provable(&unsettled));
+        // #1279 review: a registry another pool owner wrote is foreign.
+        write(store(&receipt.run, 1, &"9".repeat(32)));
         assert!(!provable(&unsettled));
     }
 

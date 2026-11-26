@@ -2126,7 +2126,7 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
         // published port and an unsettled relay startup is refused
         // (`relay_owner_refused`), so a caller names `hack down --recover` for
         // a live phase only with this. Selection only, like the fields around it.
-        "cross_boot_relay": bridges::cleanup::relay_owner_provable(candidate, &receipt),
+        "cross_boot_relay": bridges::cleanup::relay_owner_provable(candidate, &owner.token, &receipt),
         // A lost-removal repair whose storage barrier has not confirmed (HACK-2719),
         // read from its host marker: only `hack down --recover` on a running pool
         // finishes it, so a down finding the pool stopped starts it (HACK-2731).

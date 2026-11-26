@@ -2111,7 +2111,8 @@ export async function recordNativeLostRemoval(
   opts: NativeProjectRunScope & { readonly run: NativeLostRemovalRun }
 ): Promise<void> {
   const p = await paths(opts, true, "lost-removal");
-  const temp = join(p.root, `${randomUUID()}.tmp`);
+  // Named after the marker, so a removed mapping can sweep a leftover.
+  const temp = `${p.file}.${randomUUID()}.tmp`;
   try {
     await write(temp, lostRemovalMarker(opts.run));
     await rename(temp, p.file);
@@ -2133,20 +2134,36 @@ export async function nativeLostRemovalRecorded(
   }
 }
 
-/** Remove the lost-removal marker once a down verified the run stopped. */
+/**
+ * Remove the lost-removal marker once a down verified the run stopped, or once
+ * the run mapping it names is removed, with any temporary file an interrupted
+ * {@link recordNativeLostRemoval} left beside it.
+ */
 export async function clearNativeLostRemoval(
   opts: NativeProjectRunScope
 ): Promise<void> {
   const p = await paths(opts, false, "lost-removal");
-  try {
-    await unlink(p.file);
-  } catch (error) {
-    if (isRecord(error) && error.code === "ENOENT") {
-      return;
+  const prefix = `${basename(p.file)}.`;
+  const names = [
+    basename(p.file),
+    ...(await readdir(p.root)).filter(
+      (name) => name.startsWith(prefix) && name.endsWith(".tmp")
+    ),
+  ];
+  let removed = false;
+  for (const name of names) {
+    try {
+      await unlink(join(p.root, name));
+      removed = true;
+    } catch (error) {
+      if (!(isRecord(error) && error.code === "ENOENT")) {
+        throw error;
+      }
     }
-    throw error;
   }
-  await sync(p.root);
+  if (removed) {
+    await sync(p.root);
+  }
 }
 
 /** Establish excluded metadata before source identity is reviewed. */
@@ -2420,6 +2437,9 @@ export async function removeNativeProjectRun(
   } catch {
     throw refused();
   }
+  // The lost-removal marker names this mapping's run; it is advisory, so a
+  // marker that cannot be removed never refuses the removal (HACK-2731).
+  await clearNativeLostRemoval(opts).catch(() => undefined);
 }
 
 /** Record completion of down hooks as well as backend cleanup before a retry can resume. */

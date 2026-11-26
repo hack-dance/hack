@@ -63,6 +63,24 @@ export function nativeCrossBootRecoverable(selection: {
   );
 }
 
+/**
+ * Whether the cross-boot recovery refuses a live receipt only because it cannot
+ * prove the dead relay owner (`cross_boot_relay` false: no published port and
+ * an unsettled relay startup, HACK-2731). A receipt in any other phase is not
+ * refused for that reason: a ready-stage loss whose receipt is not live (a VM
+ * lost during the owner's own stop, `cleanup-intent` or `stopped-data-retained`)
+ * keeps the down advice, whose own paths handle that phase (#1279 review).
+ */
+export function nativeLiveRelayUnprovable(selection: {
+  readonly phase: string;
+  readonly crossBootRelay: boolean;
+}): boolean {
+  return (
+    NATIVE_RECOVERABLE_LIVE_PHASES.has(selection.phase) &&
+    !selection.crossBootRelay
+  );
+}
+
 const RECEIPT_SHA = /^[a-f0-9]{64}$/;
 const RECOVERY_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const FOREGROUND_STATES = new Set(["absent", "running", "exited", "uncertain"]);

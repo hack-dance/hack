@@ -8912,6 +8912,45 @@ test.each([
     }),
     expected: { stage: "ready", retirable: true },
   },
+  // #1279 review: a ready-stage loss whose receipt is not live (a VM lost
+  // during the owner's own stop) is not refused for its relay, so it keeps the
+  // down advice, whatever `cross_boot_relay` says.
+  {
+    name: "owner's stop, cleanup-intent with a dead-owner hint",
+    reply: foregroundOwnerReply({
+      phase: "cleanup-intent",
+      cross_boot_relay: true,
+      dead_owner_recovery: "d".repeat(64),
+    }),
+    expected: { stage: "ready", retirable: true },
+  },
+  {
+    name: "owner's stop, cleanup-intent, relay unprovable",
+    reply: foregroundOwnerReply({
+      phase: "cleanup-intent",
+      cross_boot_relay: false,
+    }),
+    expected: { stage: "ready", retirable: true },
+  },
+  {
+    name: "stopped retained",
+    reply: foregroundOwnerReply({
+      phase: "stopped-data-retained",
+      foreground: "absent",
+      cross_boot_relay: true,
+    }),
+    expected: { stage: "ready", retirable: true },
+  },
+  // A pending same-boot recovery is not a relay refusal either.
+  {
+    name: "same-boot recovery pending",
+    reply: foregroundOwnerReply({
+      phase: "ready-observed",
+      live_owner_recovery: "a".repeat(64),
+      cross_boot_relay: true,
+    }),
+    expected: { stage: "ready", retirable: true },
+  },
   // A failed or foreign read keeps the down advice a ready run always had.
   {
     name: "failed selection",
@@ -8943,6 +8982,56 @@ test.each([
     }) as unknown as Parameters<typeof nativeLostStartRetirable>[0]["invoke"],
   });
   expect(loss).toEqual(expected as NativeForegroundLossStage);
+});
+
+// A restart lost in its preflight has the ready stage (its old run is still
+// the live run) and goes through the same selection (#1279 review).
+test.each([
+  {
+    name: "relay unprovable",
+    selected: { phase: "ready-observed", cross_boot_relay: false },
+    retirable: false,
+  },
+  {
+    name: "relay provable",
+    selected: { phase: "ready-observed", cross_boot_relay: true },
+    retirable: true,
+  },
+  {
+    name: "cleanup-intent",
+    selected: { phase: "cleanup-intent", cross_boot_relay: false },
+    retirable: true,
+  },
+  {
+    name: "stopped retained",
+    selected: { phase: "stopped-data-retained", foreground: "absent" },
+    retirable: true,
+  },
+])("a restart lost in its preflight withholds the down only for an unprovable live relay ($name)", async ({
+  selected,
+  retirable,
+}) => {
+  const loss = restartPreflightLossStage({
+    cleanedRetry: false,
+    preparedRetry: false,
+  });
+  expect(loss).toEqual({ stage: "ready" });
+  const resolved = await nativeLostStartRetirable({
+    loss,
+    runtime: lostRuntime,
+    projectRoot: "/unused",
+    run: lostRun,
+    invoke: (async () =>
+      foregroundOwnerReply(selected)) as unknown as Parameters<
+      typeof nativeLostStartRetirable
+    >[0]["invoke"],
+  });
+  expect(resolved).toEqual({ stage: "ready", retirable });
+  const message = nativeForegroundPoolEndMessage(
+    { bootId: "b".repeat(32) },
+    resolved
+  );
+  expect(message.includes("Run hack down --recover")).toBe(retirable);
 });
 
 test("a ready run whose relay owner is unprovable is told no command", () => {

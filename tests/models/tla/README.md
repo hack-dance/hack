@@ -830,6 +830,12 @@ exit (`RouteProof = "exit"`, HACK-2711), which needs a settled relay startup
 `Unsettled` lets a relay startup be left unsettled when the VM dies after
 services were requested, and `LiveRelayAdvice` makes the message once ready
 check it, as `graph foreground-owner`'s `cross_boot_relay` lets the CLI do.
+Out of scope: once ready, the model's receipt is always the ready one. A VM lost
+during the owner's own stop (a Ctrl-C), with the receipt at `cleanup-intent` or
+`stopped-data-retained`, is not modelled. The CLI withholds the command there
+only for a live receipt whose relay is unprovable (`nativeLiveRelayUnprovable`);
+any other phase keeps the down advice, and the unit tests cover those phases
+(#1279 review).
 It refuses brought-back containers it
 does not remove. `hack up` refuses a pending restart and an unconfirmed
 cleanup; `hack restart` refuses while its lock is held and a stopped run with

@@ -2425,6 +2425,128 @@ test("down that starts a stopped pool to recover a dead owner's run runs no down
   expect(phases).toEqual([]);
 });
 
+// HACK-2715 review round 6: another project already started the pool again, so
+// this down never sees it stopped. The owner selection's dead-owner recovery
+// hint (given only for a run its boot evidence places in an earlier boot) still
+// tells it the run's boot ended, and no live-path down hook runs.
+test("down after another project restarted the pool runs no down hook when the selection has a dead-owner recovery hint", async () => {
+  const opts = await fixture();
+  const phases: string[] = [];
+  const calls: string[] = [];
+  let cleaned = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    hooks: {
+      configured: true,
+      run: async ({ phase }) => {
+        phases.push(phase);
+      },
+    },
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "foreground-owner") {
+        return {
+          ...ownerSelection("exited", "ready-observed"),
+          dead_owner_recovery: "7".repeat(64),
+        };
+      }
+      if (command === "cleanup") {
+        throw new NativeRuntimeRequestError({
+          message: "Native runtime request failed (graph_owner_recovery).",
+          nativeCode: "graph_owner_recovery",
+        });
+      }
+      if (command === "recover-cleanup") {
+        cleaned = true;
+        return { run: run.run, recovered: true, data_retained: true };
+      }
+      if (command === "retire-recovered-publisher") {
+        return { run: run.run, publisher_retired: true, data_retained: true };
+      }
+      return snapshot(cleaned);
+    },
+  });
+  expect(result).toMatchObject({ status: "stopped" });
+  expect(result).not.toHaveProperty("runtimeStarted");
+  expect(calls).not.toContain("up");
+  expect(calls).toContain("recover-cleanup");
+  expect(phases).toEqual([]);
+});
+
+// Without a hint (no boot evidence), the same down runs its hooks as before.
+test("down whose owner selection has no dead-owner recovery hint runs its down hooks", async () => {
+  const opts = await fixture();
+  const phases: string[] = [];
+  let cleaned = false;
+  await nativeProjectDown({
+    ...opts,
+    hooks: {
+      configured: true,
+      run: async ({ phase }) => {
+        phases.push(phase);
+      },
+    },
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      if (command === "foreground-owner") {
+        return ownerSelection("running", "ready-observed");
+      }
+      if (command === "cleanup") {
+        cleaned = true;
+        return { run: run.run, stopped: true, data_retained: true };
+      }
+      return snapshot(cleaned);
+    },
+  }).catch(() => undefined);
+  expect(phases[0]).toBe("before");
+});
+
+// Review round 6 (Low): after the pool boot ended, a `down.after` an earlier
+// healthy down left owed in the journal still runs once; only the live-path
+// hooks are skipped.
+test("down after the pool boot ended still runs a down.after an earlier down left owed", async () => {
+  const opts = await fixture();
+  const { replaceNativeDownHookRecord } = await import(
+    "../src/backends/native-project-down-hooks.ts"
+  );
+  expect(
+    await replaceNativeDownHookRecord(opts.scope, null, {
+      run: run.run,
+      generation: "e".repeat(32),
+      state: "after-owed",
+    })
+  ).toBe(true);
+  const phases: string[] = [];
+  let pool = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    hooks: {
+      configured: true,
+      run: async ({ phase }) => {
+        phases.push(phase);
+      },
+    },
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      if (command === "up") {
+        pool = true;
+        return { phase: "running" };
+      }
+      if (command === "foreground-owner") {
+        return ownerSelection("exited", "ready-observed");
+      }
+      if (!pool) {
+        throw poolStoppedError();
+      }
+      // An earlier healthy down already stopped the graph and owes its after.
+      return snapshot(true);
+    },
+  });
+  expect(result).toMatchObject({ status: "stopped", runtimeStarted: true });
+  expect(phases).toEqual(["after"]);
+});
+
 test("plain down on a stopped pool with a dead owner also starts the pool to recover", async () => {
   const opts = await fixture();
   const calls: string[] = [];

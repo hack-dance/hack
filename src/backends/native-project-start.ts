@@ -2516,7 +2516,7 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
  * named command works whichever project goes first.
  */
 export const NATIVE_EXITED_OWNER_RECOVERED_NOTE =
-  "The earlier owner of this run had exited (for example when the native runtime stopped under it), and its run was recovered with data retained; starting it again.";
+  "The earlier owner of this run had exited (for example when the native runtime stopped under it), so its services that were still running were stopped with data retained; starting them again.";
 
 /** The pool state `runtime status` reports for an owner-exited refusal: a
  * proven stopped pool, a running pool, or undefined when it cannot tell. */

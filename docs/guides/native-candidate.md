@@ -1010,9 +1010,18 @@ The command depends on the kind of run and on the phase its receipt was in:
 - A Compose run that was ready (or had every service started): `hack up` starts the
   pool again and recovers the run, data kept. If another project's command already
   started the pool again, `hack up` recovers the run in that running pool the same
-  way, so the order in which the projects come back does not matter. The `hack down`
-  that recovers such a run runs no `down.before` or `down.after` hook: its services
-  stopped with the pool boot.
+  way, so the order in which the projects come back does not matter. On a running
+  pool this also covers a run whose owner exited in the same boot: `hack up` stops
+  its services that are still running, with data kept, and starts them again, where
+  it used to refuse and name `hack down --recover`; it says so on one line. The
+  `hack down` that recovers a run after its pool boot ended runs no live `down.before`
+  or `down.after` hook, because its services stopped with that boot. It knows the boot
+  ended when it started the stopped pool or recovered an exited provider itself, or
+  when the runtime's owner selection carries a dead-owner recovery hint (boot evidence
+  places the run in an earlier boot), however the pool came back. Without such
+  evidence (no hint while the pool is not running, or a receipt with no boot
+  evidence) the hooks run as before. A `down.after` that an earlier down left owed in
+  the journal still runs once.
 - A Compose run caught in a start that failed or never finished (`failed-retained`,
   `preparing`) or in its owner's own stop (`cleanup-intent`): `hack up` does not
   recover it. Once its owner has exited, the explicit `graph recover-cleanup` described

@@ -82,6 +82,7 @@ import {
   type NativeHttpsLeaseIdentity,
   recoverNativeHttpsLease,
 } from "./native-https-owner.ts";
+import { readNativePoolRecord } from "./native-https-pool-boot.ts";
 import { reportNativeIgnoredSettingNotices } from "./native-ignored-setting-notices.ts";
 import {
   batchImageFailure,
@@ -265,7 +266,12 @@ import {
   type NativeServiceExit,
 } from "./native-service-exit-monitor.ts";
 import {
+  classifyNativeLostProvider,
   NATIVE_START_POOL_GRACE_MS,
+  type NativeForegroundLossStage,
+  type NativeStartPoolEnd,
+  nativeForegroundPoolEndMessage,
+  nativeLostVmCauseLine,
   watchNativeStartPool,
 } from "./native-start-pool-watch.ts";
 import { formatNativeStartupLogReport } from "./native-startup-logs.ts";
@@ -514,6 +520,8 @@ type Dependencies = {
   /** Whether the pool record proves the run's owner's boot ended (HACK-2572). */
   poolBootEnded: (home: string) => Promise<boolean>;
   watchPool: typeof watchNativeStartPool;
+  /** Whether a failed start lost its VM (HACK-2096); the pool record and the error. */
+  classifyLostProvider: typeof classifyNativeLostProvider;
   /** How long a start waits for such an owner to go (HACK-2572). */
   endedBootOwnerWaitMs: number;
 };
@@ -552,6 +560,7 @@ const DEFAULTS: Dependencies = {
   startupStatusIntervalMs: NATIVE_START_STATUS_INTERVAL_MS,
   poolBootEnded: nativePoolBootProvenEnded,
   watchPool: watchNativeStartPool,
+  classifyLostProvider: classifyNativeLostProvider,
   endedBootOwnerWaitMs: NATIVE_ENDED_BOOT_OWNER_WAIT_MS,
 };
 /**
@@ -2436,11 +2445,7 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
         cwd: opts.projectRoot,
         invoke: opts.invoke,
         signal: opts.signal,
-        notice: (line) => {
-          if (!reportNativeImageNotice(line)) {
-            opts.warn(line);
-          }
-        },
+        notice: imageNoticeOr(opts.warn),
       }))
     ) {
       return await selectNativeStartupRecoveringStoppedPool({
@@ -2497,6 +2502,65 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
     "The native runtime had stopped under this run. It was started and the run was recovered with data retained; starting it again."
   );
   return await opts.select();
+}
+/** Shown when `runtime recover` for an exited provider failed before `runtime up`. */
+export const NATIVE_EXITED_RUNTIME_RECOVERY_FAILED =
+  "The native runtime's provider looked exited, but recovering it failed; the original refusal follows.";
+
+/** A notice line: an image notice is reported as one, anything else is a warning. */
+function imageNoticeOr(warn: (line: string) => void): (line: string) => void {
+  return (line) => {
+    if (!reportNativeImageNotice(line)) {
+      warn(line);
+    }
+  };
+}
+
+/**
+ * `runtime up` that first recovers a pool whose provider exited while its
+ * record still says `running` (HACK-2579), once. Real-VM row 7 at c624229e:
+ * a fresh `hack up` (no retained run, so no retained preflight to trigger the
+ * recovery in `selectNativeStartupRecoveringStoppedPool`) after a lost VM got
+ * `process_identity_unavailable` from `runtime up` at once, so the `hack up`
+ * that the lost-VM message names failed. `recoverExitedNativeRuntime` acts only
+ * when `runtime status` reports `process-exited`, and `runtime recover` proves
+ * the recorded provider gone by its identity under the provider lease; any
+ * other refusal is left as it is. A start can recover twice, once in selection
+ * and once here, each at most once per start, so the recovery stays bounded.
+ */
+function runtimeUpRecoveringExitedProvider(opts: {
+  readonly invoke: typeof invokeNativeRuntime;
+  readonly warn: (line: string) => void;
+  readonly signal: AbortSignal;
+}): typeof invokeNativeRuntime {
+  return async (request) => {
+    try {
+      return await opts.invoke(request);
+    } catch (error) {
+      if (
+        !(
+          error instanceof NativeRuntimeRequestError &&
+          error.nativeCode === "process_identity_unavailable" &&
+          !opts.signal.aborted &&
+          (await recoverExitedNativeRuntime({
+            runtime: request.runtime,
+            cwd: request.cwd,
+            invoke: opts.invoke,
+            signal: opts.signal,
+            notice: imageNoticeOr(opts.warn),
+          }).catch(() => {
+            // The original refusal follows; say the recovery was tried.
+            opts.warn(NATIVE_EXITED_RUNTIME_RECOVERY_FAILED);
+            return false;
+          }))
+        )
+      ) {
+        throw error;
+      }
+      requireActiveStartup(opts.signal);
+      return await opts.invoke(request);
+    }
+  };
 }
 const NATIVE_FOREGROUND_OWNER_EXITED = "graph_foreground_owner_exited";
 /** Retained-preflight refusals a pool with an exited provider can give (HACK-2579). */
@@ -2814,9 +2878,28 @@ type NativeProjectStartOptions = {
    */
   readonly verifiedBuildImages?: ReadonlyMap<string, NativeVerifiedBuild>;
   readonly runtime: NativeRuntimeSelection;
-  /** Test seams for the pool watch: whether it runs, and how the start ends. */
+  /** Test seams for the pool watch: whether it runs (default on), and how the start ends. */
   readonly watchPool?: boolean;
   readonly exitOnPoolEnd?: () => void;
+  /**
+   * Runs once a start that lost its VM has finished its startup observation,
+   * just before it ends the process (HACK-2096). `hack restart` releases its
+   * operation lock here, which the process exit would otherwise leave held, so
+   * the pending restart stays resumable. Its failure never blocks the exit.
+   *
+   * The release does not wait for `up.after` commands still running (HACK-2096
+   * review, L8). They run without a cancel signal, in this process's group, so
+   * a stop during startup lets them settle; `process.exit` neither signals nor
+   * reaps them, and one can outlive this process until it ends or its next
+   * write hits the closed output pipe. That is accepted, not prevented: the
+   * hook acts on services of the lost VM, which are gone; a plain `hack up`
+   * lost at the same point leaves the same orphan with no lock at all; and
+   * holding the lock past the exit leaves it held for good,
+   * since no command removes it, so every later restart, filesystem recovery
+   * and data removal would refuse. Waiting for the hook instead would give up
+   * the bounded exit of a lost foreground start.
+   */
+  readonly beforeLostExit?: () => Promise<void>;
   readonly scope: NativeProjectRunScope;
   readonly composeFile: string;
   readonly targets?: readonly string[];
@@ -3436,7 +3519,38 @@ async function extendNativeProjectGraph({
 async function startNativeProjectAttempt(
   opts: NativeProjectStartOptions,
   observeStartup: () => ReturnType<typeof beginNativeProjectStartupObservation>,
-  watchAdmittedBoot: ((bootId: string) => void) | undefined
+  watchAdmittedBoot: ((bootId: string) => void) | undefined,
+  graph: {
+    /**
+     * The startup selection is known, before `runtime up`: `recorded` says
+     * whether a run record exists that `hack down --recover` finds (a resumed
+     * retained run, or a restart's old run). A fresh `up` has none until its
+     * mapping is saved (HACK-2096).
+     */
+    readonly onSelected?: (recorded: boolean) => void;
+    /**
+     * The first service of this run is being requested from the runtime. A
+     * run lost from here until `onReady` has no retirement yet (HACK-2714).
+     */
+    readonly onRequested?: () => void;
+    /**
+     * The runtime reported this run's graph ready (its receipt is
+     * `ready-observed`) and its run mapping is saved, before the rest of the
+     * frontend's readiness work (HTTPS, `up.after`, the caller's `onReady`). A
+     * run lost from here on is retired across boots by `hack down --recover`
+     * (HACK-2096). A fresh `up` that is ready but not yet mapped is still
+     * `requested`: `down` would find no run. So is a started return before
+     * its owner's ready line: it is mapped, but the runtime has not confirmed
+     * the start, and a loss there is HACK-2714's unadmitted owner.
+     */
+    readonly onReady?: () => void;
+    /**
+     * The graph is confirmed stopped (its receipt shows nothing running or
+     * reserved). From then on the start no longer needs its VM, and the pool
+     * may stop legitimately as idle (HACK-2096).
+     */
+    readonly onStopped?: () => void;
+  } = {}
 ): Promise<number> {
   const progress = progressReporter(opts.onProgress);
   const requestedProfiles = normalizeNativeProfiles(opts.profiles);
@@ -3481,6 +3595,7 @@ async function startNativeProjectAttempt(
       endedBootOwnerWaitMs: deps.endedBootOwnerWaitMs,
     });
   requireActiveStartup(opts.signal);
+  graph.onSelected?.(restore !== undefined);
   const runtimeMetadata = nativeRuntimeMetadataSelected({
     selection: opts.runtimeMetadata,
     restore,
@@ -3621,11 +3736,7 @@ async function startNativeProjectAttempt(
     signal: opts.signal,
     invoke: deps.invoke,
     // A detached owner hands the line to the launcher, as image notices do.
-    notice: (line) => {
-      if (!reportNativeImageNotice(line)) {
-        deps.warn(line);
-      }
-    },
+    notice: imageNoticeOr(deps.warn),
   });
   if (!extension) {
     await deps.prepareStorage(opts.scope);
@@ -3817,7 +3928,11 @@ async function startNativeProjectAttempt(
           args: ["runtime", "status", "--json"],
           signal: controller.signal,
         })
-      : await deps.invoke({
+      : await runtimeUpRecoveringExitedProvider({
+          invoke: deps.invoke,
+          warn: deps.warn,
+          signal: controller.signal,
+        })({
           runtime: opts.runtime,
           cwd: opts.scope.projectRoot,
           args: [
@@ -4360,6 +4475,9 @@ async function startNativeProjectAttempt(
           // checked and the run is reported ready.
           const allReady = async () => {
             if (mapped) {
+              // The owner's ready line of a started return: confirmed and
+              // mapped, so a loss from here is retired by `down --recover`.
+              graph.onReady?.();
               try {
                 await acquireHttps(
                   mapped.readyMapping,
@@ -4410,6 +4528,7 @@ async function startNativeProjectAttempt(
               planId: restore?.planId ?? review.planId,
             });
             servicesRequested = true;
+            graph.onRequested?.();
             reviewTiming?.();
             code = await deps.serve({
               runtime: opts.runtime,
@@ -4497,6 +4616,14 @@ async function startNativeProjectAttempt(
                 void startupStatus.stop();
                 const { readyMapping, persistedMapping } =
                   await ensureMapping();
+                // Ready and mapped: `down --recover` now finds this run. A
+                // started return is mapped here but not yet confirmed by the
+                // runtime (real VM row 2: a run lost then is
+                // `graph_foreground_owner_exited_unadmitted`, HACK-2714); it is
+                // ready only at the owner's ready line (`allReady`).
+                if (!returnAtStarted) {
+                  graph.onReady?.();
+                }
                 // The HTTPS owner admits a lease only under the provider lease, for a
                 // ready graph: a started return takes it at the owner's ready line.
                 if (!returnAtStarted) {
@@ -4626,6 +4753,9 @@ async function startNativeProjectAttempt(
                 processRefusals: nativeProcessRefusals,
               });
               graphCleanupConfirmed = settled.nothingReserved;
+              if (graphCleanupConfirmed) {
+                graph.onStopped?.();
+              }
               if (
                 graphCleanupConfirmed &&
                 controller.signal.aborted &&
@@ -4666,6 +4796,7 @@ async function startNativeProjectAttempt(
             });
             final = confirmed.final;
             graphCleanupConfirmed = true;
+            graph.onStopped?.();
             await retireRemovedMapping({
               final,
               mapping,
@@ -4865,20 +4996,48 @@ export async function startNativeProject(
   let stopPoolWatch: (() => void) | undefined;
   // Ready and not stopping: the start has nothing left to finish on its own.
   let serving = false;
-  // A detached start whose pool boot has ended releases its marker and exits,
+  // How far the start got, for the lost-VM message (HACK-2096): preparing
+  // (with or without a run record for `down --recover`), services requested,
+  // or ready and mapped.
+  let loss: NativeForegroundLossStage = {
+    stage: "preparing",
+    recorded: opts.restore !== undefined,
+  };
+  // The graph is confirmed stopped: the start is finishing (down.after, the
+  // finalization acknowledgement) and no longer needs its VM. The pool now
+  // counts as idle, so another project's up or a runtime down may stop it
+  // legitimately; that must not end this start as a lost VM (HACK-2096).
+  let graphStopped = false;
+  // A start whose pool boot has ended releases its marker and exits non-zero,
   // as a crash would, so the next up or down --recover need not wait for it
   // (HACK-2550). A ready one exits at once, a start still in progress after the
-  // grace. A foreground start stays with the user's terminal.
+  // grace. A foreground start does the same (HACK-2096): its graph owner cannot
+  // stop services in a lost VM, so waiting with the terminal never ended. It
+  // first names the lost VM and the one recovery command; a detached owner has
+  // no terminal, and its launcher has already returned.
+  const detached = isNativeDetachedOwnerProcess();
+  const warn = opts.dependencies?.warn ?? DEFAULTS.warn;
+  // The boot this attempt's runtime up confirmed: a start error after it may be
+  // the lost VM (see `lostVmFailure`).
+  let watchedBoot: string | undefined;
   const watchAdmittedBoot =
-    (opts.watchPool ?? isNativeDetachedOwnerProcess())
+    (opts.watchPool ?? true)
       ? (bootId: string) => {
+          watchedBoot = bootId;
           stopPoolWatch = (opts.dependencies?.watchPool ?? DEFAULTS.watchPool)({
             home: opts.runtime.home,
             bootId,
             graceMs: () => (serving ? 0 : NATIVE_START_POOL_GRACE_MS),
-            onEnded: async () => {
+            onEnded: async (end) => {
+              if (settled || graphStopped) {
+                return;
+              }
+              if (!detached) {
+                warn(nativeForegroundPoolEndMessage(end, loss));
+              }
               await finish?.();
               if (!settled) {
+                await opts.beforeLostExit?.().catch(() => undefined);
                 (opts.exitOnPoolEnd ?? (() => process.exit(1)))();
               }
             },
@@ -4892,8 +5051,13 @@ export async function startNativeProject(
         onProgress: (event) => {
           // A started return has released its launcher and saved its mapping:
           // like a ready one, it has nothing left to finish on its own.
+          // Its loss stage stays `requested` until the owner's ready line
+          // (`graph.onReady` from `allReady`): see the serve `onReady` handler.
           if (event.phase === "ready" || event.phase === "started") {
             serving = true;
+            if (event.phase === "ready") {
+              loss = { stage: "ready" };
+            }
           } else if (event.phase === "stopping" || event.phase === "stopped") {
             serving = false;
           }
@@ -4907,13 +5071,169 @@ export async function startNativeProject(
         finish = observation;
         return observation;
       },
-      watchAdmittedBoot
+      watchAdmittedBoot,
+      {
+        onSelected: (recorded) => {
+          loss = { stage: "preparing", recorded };
+        },
+        onRequested: () => {
+          loss = { stage: "requested" };
+        },
+        onReady: () => {
+          loss = { stage: "ready" };
+        },
+        onStopped: () => {
+          graphStopped = true;
+          stopPoolWatch?.();
+        },
+      }
     );
   } catch (error) {
-    throw withStartupLockBlocker(error);
+    // The start's own error path often reports a lost VM before the pool
+    // watch does (real VM: 0.13 to 1.6 s after the provider's death). It gets
+    // the same stage message, from the stage the graph reached.
+    const lost =
+      detached || graphStopped || watchedBoot === undefined
+        ? undefined
+        : await lostVmFailure({
+            error,
+            home: opts.runtime.home,
+            bootId: watchedBoot,
+            loss,
+            classify: opts.dependencies?.classifyLostProvider,
+          });
+    throw lost ?? withStartupLockBlocker(error);
   } finally {
     settled = true;
     stopPoolWatch?.();
     await finish?.();
+  }
+}
+
+/**
+ * A foreground start that failed because its VM was lost (HACK-2096): the stage
+ * message the pool watch would have printed, as the start's error, then the
+ * original error's message on one `(cause: …)` line so a misclassification can
+ * be diagnosed. The original error also stays as `cause`.
+ */
+export class NativeForegroundVmLostError extends ClosedCliError {
+  readonly end: NativeStartPoolEnd;
+  readonly loss: NativeForegroundLossStage;
+  constructor(opts: {
+    readonly end: NativeStartPoolEnd;
+    readonly loss: NativeForegroundLossStage;
+    readonly cause: unknown;
+  }) {
+    const cause = nativeLostVmCauseLine(opts.cause, {
+      dropRecoverAdvice: opts.loss.stage === "requested",
+    });
+    super(
+      [
+        nativeForegroundPoolEndMessage(opts.end, opts.loss),
+        ...(cause ? [cause] : []),
+      ].join("\n"),
+      { cause: opts.cause }
+    );
+    this.end = opts.end;
+    this.loss = opts.loss;
+  }
+}
+
+/**
+ * Route a failed foreground start through {@link classifyNativeLostProvider}:
+ * a lost VM becomes {@link NativeForegroundVmLostError} with the stage the
+ * graph reached; anything else (a cancellation included) is left as it is.
+ */
+async function lostVmFailure(opts: {
+  readonly error: unknown;
+  readonly home: string;
+  readonly bootId: string;
+  readonly loss: NativeForegroundLossStage;
+  readonly classify?: typeof classifyNativeLostProvider;
+}): Promise<NativeForegroundVmLostError | undefined> {
+  if (
+    opts.error instanceof NativeStartupCanceledError ||
+    opts.error instanceof NativeForegroundVmLostError
+  ) {
+    return undefined;
+  }
+  const end = await (opts.classify ?? classifyNativeLostProvider)({
+    error: opts.error,
+    home: opts.home,
+    bootId: opts.bootId,
+  }).catch(() => undefined);
+  return end
+    ? new NativeForegroundVmLostError({
+        end,
+        loss: opts.loss,
+        cause: opts.error,
+      })
+    : undefined;
+}
+
+/**
+ * The loss stage of a `hack restart` lost in its preflight (HACK-2096 real-VM
+ * row 6). An ordinary restart has saved no intent and stopped nothing yet: its
+ * old run is the live run, retired by `hack down --recover` like a ready one,
+ * and `hack up` then starts it. A retry of a `cleaned` restart has its old run
+ * stopped with its intent pending, which `down --recover` retires, as for a
+ * replacement lost while preparing. A retry of a `prepared` restart (the old
+ * run's stop unconfirmed) has no retirement that the down performs, so no
+ * command is named.
+ */
+export function restartPreflightLossStage(opts: {
+  readonly cleanedRetry: boolean;
+  readonly preparedRetry: boolean;
+}): NativeForegroundLossStage {
+  if (opts.cleanedRetry) {
+    return { stage: "preparing", recorded: true };
+  }
+  return opts.preparedRetry ? { stage: "requested" } : { stage: "ready" };
+}
+
+/**
+ * Run a foreground step outside `startNativeProject` that a lost VM can fail,
+ * and route its error through the same classification (HACK-2096 real-VM row
+ * 6: `hack restart`'s preflight pulls images before it saves its intent or
+ * stops anything, and a provider killed there printed the raw
+ * `process_identity_unavailable`). The boot is the pool record's running boot
+ * when the step begins; without one, or in a detached owner, or after a stop
+ * request, the error is left as it is. `loss` is what the step's caller knows.
+ */
+export async function routeNativeLostVm<T>(opts: {
+  readonly home: string;
+  readonly loss: NativeForegroundLossStage;
+  readonly signal?: AbortSignal;
+  readonly run: () => Promise<T>;
+  /** Test seams: the pool record read and the classification. */
+  readonly read?: (home: string) => Promise<unknown>;
+  readonly classify?: typeof classifyNativeLostProvider;
+}): Promise<T> {
+  const record = isNativeDetachedOwnerProcess()
+    ? undefined
+    : await (opts.read ?? readNativePoolRecord)(opts.home).catch(
+        () => undefined
+      );
+  const bootId =
+    isRecord(record) &&
+    record.phase === "running" &&
+    typeof record.guest_boot_id === "string" &&
+    record.guest_boot_id !== ""
+      ? record.guest_boot_id
+      : undefined;
+  try {
+    return await opts.run();
+  } catch (error) {
+    const lost =
+      bootId === undefined || opts.signal?.aborted
+        ? undefined
+        : await lostVmFailure({
+            error,
+            home: opts.home,
+            bootId,
+            loss: opts.loss,
+            classify: opts.classify,
+          });
+    throw lost ?? error;
   }
 }

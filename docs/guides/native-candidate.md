@@ -2816,6 +2816,74 @@ notices that its provider's process is gone and ends as for an ended boot, and
 with the recorded provider proven gone by its identity), say so in one line, and
 continue as after any pool stop (HACK-2579).
 
+A foreground `hack up` (or `hack restart`) watches its pool the same way
+(HACK-2096). When its provider VM dies or the pool stops under it, it prints which
+VM was lost (the provider's pid, or the boot that ended), that it ends with exit
+code 1, and what to run next, which depends on how far the start got:
+
+- Ready (the runtime reported the run's graph ready and the run mapping is
+  saved): `hack down --recover`, which retires the run with its data kept
+  (running `runtime recover` first when the provider exited), then `hack up`,
+  which starts it again.
+- Before any service was requested (while it resolved, reviewed, built or
+  pulled images, or selected the restore): for a run with a record (a resumed
+  stopped run, or a restart's old run), the same `hack down --recover`, then
+  `hack up`. A fresh `hack up` has no record yet, so the message names only
+  `hack up`.
+- After its services were requested and before it was ready and mapped: no
+  supported retirement yet (HACK-2714: `hack down --recover` and `hack up` refuse
+  it), so the message names neither command and says to keep the native home
+  for inspection. A plain `hack up` that returned at "Project started" is in
+  this stage until its services report ready: the runtime has not confirmed
+  that start yet.
+
+A `hack restart` lost while it checks and pulls the new images, before it
+stops anything, gets the ready-stage message: its old run is still the live
+run. The same sequence follows a lost `hack restart`: if its replacement was lost
+before the restart finished, its old run was already stopped, so `hack down
+--recover` also retires the pending restart (it says so in one line) and `hack
+up` resumes the retained data; a `hack restart` then would refuse, because
+nothing is running to restart. The replacement releases the restart's operation
+lock before it exits, so a later `hack restart` is never refused as "already
+owned". If that lock is still held when `hack down --recover` runs (by another
+restart, recovery or data removal), the down keeps the pending restart and names
+the lock in one line; if the pending restart cannot be read, the down still
+stops the run and says the restart was not retired. An `up.after` command still
+running when the VM is lost is not waited for: it can outlive the exit until it
+finishes.
+
+The start's own error often comes first: a runtime request, image preparation
+or the start's unwind fails within about a second of the provider's death
+(`process_identity_unavailable`). That error ends the start with the same
+message, chosen by how far the start got, not by which error fired, followed
+by the start's own error on one `(cause: …)` line. The pool record decides: a
+provider pid it names that is gone proves the loss in any phase, including a
+stop that died part way (`quiescing` or `stopping`); an error on a pool still
+recorded `running` with a live provider keeps its own message, even when it
+carries that code, because the runtime also reports it for failures on a
+healthy VM. A VM lost
+seconds after a `hack down` can also bring that down's removed containers back,
+stopped, on the next boot (the guest engine's removal had not reached its
+disk). Where the runtime can remove them without the run's foreground owner,
+`hack down --recover` removes them again, says so in one line, and then
+confirms the run stopped with its data kept; a plain `hack down` still refuses
+that state, and nothing is removed while any of them runs. A run whose cleanup
+goes through its foreground owner (a relay-enrolled run) cannot yet: the owner
+is gone, and the runtime has no owner-less removal that keeps data. `hack down
+--recover` then says so, names no command, and leaves the data and the home as
+they are for inspection; `hack up` refuses that run until the containers are
+gone. This is a runtime gap, not fixed here.
+
+The start exits within about a
+second once it is ready, or about 11 seconds later while it is still starting or
+stopping; earlier versions waited on the lost VM and never exited. Once the
+run's graph has stopped, the pool counts as idle and may stop under the start
+while it still runs `down.after` and its cleanup; that is not a lost VM, and the
+start finishes on its own. A lost-VM exit ends the process as a crash would: the
+run's receipt, finalization and recovery evidence stay for `hack down
+--recover`, and so does the advisory env fingerprint record (which `hack exec`
+uses to report stale env; the next `hack up` writes a new one).
+
 Each such recovery moves the run's earlier completed recovery record aside as history
 (`dead-owner-cleanup-retired-<digest>.json`; failed-start recoveries keep
 `interrupted-start-cleanup-retired-<selection>.json` the same way). A run keeps the

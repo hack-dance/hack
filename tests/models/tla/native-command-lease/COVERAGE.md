@@ -129,9 +129,9 @@ Tests:
 
 - `provider/engine/command_lease_tests.rs`: the constants (35 s is the
   start's bound, the owner keeps 15 s, `command_lease_deadline` caps a far
-  deadline at each); scaled 50 times, a project stop held 600 ms is refused
-  at the owner bound with the exact project-stop message and waited out by
-  `connect_command_request`; a stop past the bound is refused with the raw,
+  deadline at each). The scaled 300 ms owner wait refuses a 600 ms stop
+  with the exact project-stop message. `connect_command_request` waits it out
+  with 500 ms of polling slack. A stop past the deadline yields the raw,
   uncaused `provider_busy`.
 - `dependency_refresh.rs` `owner_lease_tests`: the refresh's `requested_selection`
   waits out a 600 ms stop with 500 ms of slack for scheduling, unlock, and
@@ -215,11 +215,12 @@ roles: `requester` is `phase = "refresh"`, `owner` is `phase = "exec"`.
 
 Tests:
 
-- `provider/engine/command_lease_tests.rs`, scaled 50 times: the requester's
-  wait outlasts a project stop held 600 ms and releases the lease; a stop past
-  its bound is refused with the raw, uncaused `provider_busy` naming the stop;
-  100 uncontended waits take well under a second, and on a home with no pool
-  the wait returns at once and creates no lock file; and the call site,
+- `provider/engine/command_lease_tests.rs`: the requester waits out a 600 ms
+  stop with the same 500 ms of polling slack as the Compose refresh fixture
+  (HACK-2751), then releases the lease for the next holder. A stop still
+  holding the lease at the deadline gets the raw, uncaused `provider_busy`
+  naming the stop. 100 uncontended waits take well under a second, and on a
+  home with no pool the wait returns at once and creates no lock file. The call site,
   `native::foreground::exec`, waits out the stop before it contacts the owner
   (this test fails when the wait is removed).
 - `native/runtime/exec_tests.rs`: only `provider_busy` maps to

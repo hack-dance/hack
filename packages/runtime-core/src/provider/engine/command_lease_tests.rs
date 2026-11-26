@@ -318,6 +318,10 @@ pub(in crate::provider) fn hold_lease_as_project_stop(
 pub(in crate::provider) const PROJECT_STOP_REFUSAL: &str =
     "Provider lease acquisition refused; recorded holder: project stop; no operation was admitted.";
 
+/// Scaling down the test's stop leaves the lease backoff capped at 50 ms. Allow
+/// ten such intervals for scheduling, unlocking and observing the release.
+pub(in crate::provider) const PROJECT_STOP_POLL_SLACK: Duration = Duration::from_millis(500);
+
 /// HACK-2729: the requesting process of `hack exec` (its dependency refresh and the
 /// exec) waits as long as a start does, which covers another project's stop; the
 /// owner-side waits, which run on an owner's only loop thread, keep 15 s.
@@ -348,10 +352,9 @@ fn the_requesting_side_of_exec_waits_as_long_as_a_start_and_the_owner_side_keeps
     assert_eq!(command_lease_deadline(now, near, COMMAND_LEASE_WAIT), near);
 }
 
-/// HACK-2729, scaled 50 times (15 s is 300 ms, 35 s is 700 ms): a project stop holds
-/// the lease for 600 ms. At the owner-side bound the wait refuses with the exact
-/// project-stop refusal the CLI reads; the requesting side's bound outlasts the
-/// stop and acquires right after it, before any check of its own.
+/// HACK-2729: the scaled owner-side bound of 300 ms refuses a 600 ms project
+/// stop with the exact message the CLI reads. The requester waits out the stop
+/// with enough slack for polling and proceeds to the post-acquisition check.
 #[test]
 fn a_requested_command_waits_out_a_project_stop_that_the_owner_bound_refuses() {
     let (_home, candidate) = running_pool();
@@ -369,7 +372,7 @@ fn a_requested_command_waits_out_a_project_stop_that_the_owner_bound_refuses() {
 
     let after = Engine::connect_command_request(
         &candidate,
-        Instant::now() + Duration::from_millis(700),
+        started + hold + PROJECT_STOP_POLL_SLACK,
         &|| Ok(()),
     )
     .err()
@@ -401,11 +404,10 @@ fn a_requested_command_refuses_a_stop_past_its_bound_naming_it() {
     holder.join().unwrap();
 }
 
-/// HACK-2739, scaled 50 times (35 s is 700 ms): the requesting process of an
-/// authored `hack exec` waits for a free lease before it sends anything to its
-/// owner. It outlasts a project stop held for 600 ms, then returns, having
-/// released the lease. It opens no engine connection, so unlike
-/// `connect_command_request` it reaches no post-acquisition check.
+/// HACK-2739: the requesting process of an authored `hack exec` waits for a
+/// free lease before it sends anything to its owner. It outlasts a project stop
+/// held for 600 ms, releases the lease and returns. The next holder can acquire
+/// it immediately.
 #[test]
 fn the_authored_exec_request_waits_out_a_project_stop_and_releases_the_lease() {
     use crate::provider::lifecycle::await_free_command_lease;
@@ -413,7 +415,7 @@ fn the_authored_exec_request_waits_out_a_project_stop_and_releases_the_lease() {
     let hold = Duration::from_millis(600);
     let (_release, holder) = hold_lease_as_project_stop(&candidate, hold);
     let started = Instant::now();
-    await_free_command_lease(&candidate, started + Duration::from_millis(700)).unwrap();
+    await_free_command_lease(&candidate, started + hold + PROJECT_STOP_POLL_SLACK).unwrap();
     assert!(
         started.elapsed() >= hold - Duration::from_millis(50),
         "returned before the stop released: {:?}",
@@ -433,13 +435,14 @@ fn the_authored_exec_request_refuses_a_stop_past_its_bound_naming_it() {
     let (_home, candidate) = running_pool();
     let (release, holder) = hold_lease_as_project_stop(&candidate, Duration::from_secs(30));
     let started = Instant::now();
-    let refused = await_free_command_lease(&candidate, started + Duration::from_millis(300))
+    let deadline = started + Duration::from_millis(300);
+    let refused = await_free_command_lease(&candidate, deadline)
         .err()
         .unwrap();
     assert_eq!(refused.code, "provider_busy");
     assert_eq!(refused.message, PROJECT_STOP_REFUSAL);
     assert!(refused.cause_code.is_none());
-    assert!(started.elapsed() >= Duration::from_millis(250));
+    assert!(Instant::now() >= deadline);
     assert!(started.elapsed() < Duration::from_secs(5));
     release.send(()).unwrap();
     holder.join().unwrap();

@@ -66,9 +66,13 @@ and take the same lease (dependency refresh, the exec or job itself), and when a
   nothing. The lease's recovery, which the frontend runs only after its graph
   owner has settled and `down` only after the stop, now retires that generation
   under the owner admission lock (`retireUnadmittedNativeHttpsOwner`): it writes
-  the retired-owner record, moves the diagnostic beside it, and removes the
-  owner root by identity. The release is then verified through the graph as for
-  any retired owner. Every other startup failure is still retained as before.
+  the retired-owner record, then moves the whole owner root beside it
+  (`released-leases/<generation>/failed-owner`) with one `rename`, so a crash
+  between the two steps leaves a root the next recovery matches and finishes.
+  The release is then verified through the graph as for any retired owner.
+  Every other startup failure is still retained as before. A connector whose
+  owner configuration is gone or replaced refuses at once instead of waiting
+  out the startup budget; only a missing endpoint is waited for.
 - Cleanup awaits the in-flight acquisition before it chooses between release and
   recovery, and starts none once the graph owner has exited. A refused acquire
   after the owner exited is the stop, not an infrastructure failure.
@@ -145,9 +149,10 @@ retained startup failure.
   owner FIFO's writer closes.
 - `tests/native-https-owner.test.ts`: a startup that admitted nothing is retired
   by its lease recovery (release still verified, evidence kept, repeatable) and
-  the next owner starts; one with unconfirmed child cleanup stays retained; a
-  second connector waits for a 16 s owner startup as the spawner does. The
-  first and last fail on the previous head.
+  the next owner starts; an interrupted retirement is finished by the next
+  recovery; one with unconfirmed child cleanup stays retained; a second
+  connector waits for a 16 s owner startup as the spawner does; a connector
+  whose owner configuration is gone or replaced refuses at once.
 - `engine/command_lease_tests.rs`: the shared owner's leased reads
   (`publication::inspect_claims`, `graph::inspect_bridges`) refuse
   `provider_busy` at once, naming the holder, which is the only refusal the

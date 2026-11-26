@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { lstat, mkdir, readdir, realpath, rmdir } from "node:fs/promises";
+import { lstat, mkdir, readdir, realpath, rename } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { ClosedCliError } from "../lib/cli-result.ts";
@@ -36,7 +36,6 @@ import {
   nativeHttpsReadRelease,
   nativeHttpsReadRetiredOwner,
   nativeHttpsRecordRetiredOwner,
-  nativeHttpsRemoveFile,
   nativeHttpsWriteNew,
 } from "./native-https-owner-storage.ts";
 import { nativeHttpsReleaseReplyError } from "./native-https-release-failure.ts";
@@ -284,16 +283,27 @@ export async function ensureNativeHttpsOwner(opts: {
 async function endpointFor(
   configuration: NativeHttpsOwnerConfiguration
 ): Promise<NativeHttpsOwnerEndpoint> {
+  // A missing configuration (or owner root) means this owner is gone, for
+  // example retired after its startup failed; it will never publish an
+  // endpoint. Refuse at once instead of letting the connect loop retry ENOENT
+  // for the whole startup budget. Only a missing endpoint is waited for.
+  const ownerGone = (error: unknown): never => {
+    if (isRecord(error) && error.code === "ENOENT") {
+      throw nativeHttpsOwnerRefused();
+    }
+    throw error;
+  };
   const current = await readNativeHttpsOwnerConfiguration(
     configuration.binding.runtime
-  );
+  ).catch(ownerGone);
   if (
     current.ownerGeneration !== configuration.ownerGeneration ||
     !sameBinding(current.binding, configuration.binding)
   ) {
     throw nativeHttpsOwnerRefused();
   }
-  const startupFailure = await readNativeHttpsStartupFailure(configuration);
+  const startupFailure =
+    await readNativeHttpsStartupFailure(configuration).catch(ownerGone);
   if (startupFailure) {
     throw startupFailure;
   }
@@ -730,9 +740,13 @@ function admittedNothing(
  * - Only `authority-ready: provider_busy` qualifies (see `admittedNothing`).
  *   Every other startup failure is still retained as evidence, unchanged.
  * - Under the owner admission lock (which also serializes a new owner's
- *   creation) it writes the retired-owner record, moves the diagnostic beside
- *   it as evidence, and removes the root by exact identity. Every step is
- *   repeatable, so an interrupted retirement resumes on the next recovery.
+ *   creation) it takes two durable steps: it writes the retired-owner record,
+ *   then moves the whole owner root, still its exact inode, beside that record
+ *   as evidence (`released-leases/<generation>/failed-owner`) with one
+ *   `rename`. A crash between the two leaves the root exactly as the failed
+ *   owner left it, so the next recovery matches it again and finishes; a crash
+ *   after the rename leaves nothing to resume. No state in between can make a
+ *   later `up` wait on a configuration whose failure record is gone.
  *
  * The caller's retired-owner branch then verifies this lease's release through
  * the graph (graph, bridges and publication claims), as for an idle-retired
@@ -772,8 +786,11 @@ async function retireUnadmittedNativeHttpsOwner(opts: {
   });
   try {
     // Everything again under admission: nothing can create or publish here now.
-    const configuration = await current();
-    if (!configuration) {
+    // The root's identity is taken first, so the rename below moves exactly
+    // the root whose contents were checked.
+    const rootIdentity = await lstat(root).catch(() => undefined);
+    const configuration = rootIdentity ? await current() : undefined;
+    if (!(rootIdentity && configuration)) {
       return;
     }
     // An endpoint was published: a client could have reached this owner.
@@ -784,12 +801,6 @@ async function retireUnadmittedNativeHttpsOwner(opts: {
     if ((await readdir(join(root, "leases"))).length !== 0) {
       return;
     }
-    const configurationFile = await nativeHttpsReadFile(
-      join(root, "configuration.json")
-    );
-    const failureFile = await nativeHttpsReadFile(
-      join(root, "startup-failure.json")
-    );
     const generation = configuration.ownerGeneration;
     try {
       await nativeHttpsReadRetiredOwner(home, generation);
@@ -804,24 +815,17 @@ async function retireUnadmittedNativeHttpsOwner(opts: {
       "native-https",
       "released-leases",
       generation,
-      "startup-failure.json"
+      "failed-owner"
     );
-    if (await nativeHttpsPathAbsent(evidence)) {
-      await nativeHttpsWriteNew(
-        evidence,
-        JSON.parse(failureFile.bytes.toString("utf8"))
-      );
+    // `rename` would replace an empty directory: refuse any existing entry.
+    if (!(await nativeHttpsPathAbsent(evidence))) {
+      throw nativeHttpsOwnerRefused();
     }
-    await nativeHttpsRemoveFile(
-      join(root, "startup-failure.json"),
-      failureFile.identity
-    );
-    await nativeHttpsRemoveFile(
-      join(root, "configuration.json"),
-      configurationFile.identity
-    );
-    await rmdir(join(root, "leases"));
-    await rmdir(root);
+    const before = await lstat(root);
+    if (before.dev !== rootIdentity.dev || before.ino !== rootIdentity.ino) {
+      throw nativeHttpsOwnerRefused();
+    }
+    await rename(root, evidence);
   } finally {
     await admission.release();
   }

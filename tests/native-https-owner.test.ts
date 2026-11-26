@@ -38,6 +38,7 @@ import {
   nativeHttpsReadRelease,
   nativeHttpsReadRetiredOwner,
   nativeHttpsRecordRelease,
+  nativeHttpsRecordRetiredOwner,
 } from "../src/backends/native-https-owner-storage.ts";
 import {
   type invokeNativeRuntime,
@@ -1293,19 +1294,20 @@ test("a startup that admitted nothing is retired by its lease recovery, and the 
   expect(
     await nativeHttpsReadRetiredOwner(f.home, configuration.ownerGeneration)
   ).toEqual(configuration);
-  // The diagnostic is kept beside the retired record as evidence.
+  // The whole failed owner root is kept beside the retired record as evidence.
+  const evidence = join(
+    f.home,
+    "native-https",
+    "released-leases",
+    configuration.ownerGeneration,
+    "failed-owner"
+  );
+  expect(await readFile(join(evidence, "startup-failure.json"), "utf8")).toBe(
+    recorded
+  );
   expect(
-    await readFile(
-      join(
-        f.home,
-        "native-https",
-        "released-leases",
-        configuration.ownerGeneration,
-        "startup-failure.json"
-      ),
-      "utf8"
-    )
-  ).toBe(recorded);
+    JSON.parse(await readFile(join(evidence, "configuration.json"), "utf8"))
+  ).toEqual(configuration);
   // Repeating the recovery (another lifetime of the same generation, or `down`
   // after the frontend) verifies again and changes nothing.
   await recoverNativeHttpsLease({
@@ -1320,6 +1322,91 @@ test("a startup that admitted nothing is retired by its lease recovery, and the 
     spawnOwner: async () => undefined,
   });
   expect(next.ownerGeneration).not.toBe(configuration.ownerGeneration);
+});
+
+/**
+ * The retirement has two durable steps: the retired-owner record, then one
+ * rename of the whole root. A crash at any point must leave a state the next
+ * recovery finishes, never a root whose failure record is gone (every later
+ * `up` would then wait for an endpoint that never comes).
+ */
+test("an interrupted retirement is finished by the next recovery", async () => {
+  const f = await fixture({ authorityBusy: "confirmed" });
+  await expect(f.start()).rejects.toThrow("authority-ready: provider_busy");
+  const configuration = await readNativeHttpsOwnerConfiguration(
+    f.binding.runtime
+  );
+  await f.helperExited();
+  const root = nativeHttpsOwnerRoot(f.home);
+  const identity = nativeHttpsLeaseIdentity(configuration, lease("b"));
+  let verified = 0;
+  const recover = () =>
+    recoverNativeHttpsLease({
+      runtime: f.binding.runtime,
+      identity,
+      verifyReleased: async () => {
+        verified += 1;
+      },
+    });
+  // Interrupted after step 1: the retired record exists, the root is intact.
+  await nativeHttpsRecordRetiredOwner(configuration);
+  expect(await readFile(join(root, "startup-failure.json"), "utf8")).toContain(
+    "authority-ready"
+  );
+  await recover();
+  expect(verified).toBe(1);
+  await expect(lstat(root)).rejects.toThrow("ENOENT");
+  const evidence = join(
+    f.home,
+    "native-https",
+    "released-leases",
+    configuration.ownerGeneration,
+    "failed-owner"
+  );
+  expect((await readdir(evidence)).sort()).toEqual([
+    "configuration.json",
+    "leases",
+    "startup-failure.json",
+  ]);
+  // Interrupted after step 2 (the rename): nothing is left to resume.
+  await recover();
+  expect(verified).toBe(2);
+  const next = await ensureNativeHttpsOwner({
+    binding: f.binding,
+    spawnOwner: async () => undefined,
+  });
+  expect(next.ownerGeneration).not.toBe(configuration.ownerGeneration);
+});
+
+/**
+ * A connector that read a configuration must not wait out the whole startup
+ * budget once that owner is gone (retired, or replaced by a new generation):
+ * it will never publish an endpoint. Only a missing endpoint is waited for.
+ */
+test("a connector refuses at once when its owner's configuration is gone or replaced", async () => {
+  const f = await fixture();
+  const stub = { spawnOwner: async () => undefined };
+  const configuration = await ensureNativeHttpsOwner({
+    binding: f.binding,
+    ...stub,
+  });
+  const root = nativeHttpsOwnerRoot(f.home);
+  await rm(root, { recursive: true });
+  let started = performance.now();
+  await expect(connectNativeHttpsOwner(configuration)).rejects.toThrow(
+    "Shared native HTTPS ownership is unavailable"
+  );
+  expect(performance.now() - started).toBeLessThan(2000);
+  const replacement = await ensureNativeHttpsOwner({
+    binding: f.binding,
+    ...stub,
+  });
+  expect(replacement.ownerGeneration).not.toBe(configuration.ownerGeneration);
+  started = performance.now();
+  await expect(connectNativeHttpsOwner(configuration)).rejects.toThrow(
+    "Shared native HTTPS ownership is unavailable"
+  );
+  expect(performance.now() - started).toBeLessThan(2000);
 });
 
 test("a startup failure with unconfirmed child cleanup stays retained and refuses recovery", async () => {

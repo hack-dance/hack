@@ -5169,7 +5169,8 @@ for example for a service with a long `stop_grace_period`. The shared owner's
 startup then fails with `authority-ready: provider_busy`, having admitted no
 lease. When that run's lease is recovered (by its frontend after the graph
 stopped, or by `hack down`), the failed owner generation is retired: its
-diagnostic moves beside a retired-owner record, the release is still verified
+owner directory, diagnostic included, moves beside a retired-owner record
+(`native-https/released-leases/<generation>/failed-owner`), the release is still verified
 against the stopped graph, and the next `up` starts a new shared owner. `down`
 does not fail and the next `up` needs no recovery because of it.
 

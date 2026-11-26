@@ -1018,7 +1018,20 @@ bound.
 
 When two projects start on a stopped pool at the same time, the first boots it. The
 second waits for the lease and, once it holds it, finds the pool running and joins
-it, as it would have if it had started later.
+it, as it would have if it had started later. This holds for retained runs too (a
+project stopped with `hack down` and started again, HACK-2732). The retained-start
+check reads the pool only under the lease, so it waits out the first project's boot
+instead of refusing it. A start whose check saw the pool stopped, before the other
+project booted it, gets `graph_retained_pool_changed` from `runtime up`: the run, its
+data and its pool's identity (owner token, machine, HOME alias, disks, root files,
+profile, layout and this project's own share) are unchanged, and only the pool's boot
+changed. Another project's change to the pool counts the same way: adding its own
+project share (which stops an idle pool), or changing the network intent, socket
+capacity or translation setting. `hack up` then checks the run once more and repeats
+`runtime up` once, which joins the running pool; it prints no extra line. If the pool
+changed again in between, the start stops with that code, nothing started and data
+kept, and says to retry `hack up` (or `hack up -d`). A replaced owner, token or disk,
+or a change to this project's own share, still refuses with `graph_retained_startup`.
 
 While a start waits, it keeps its project's run lock. A `hack down` of the same
 project during that wait is refused `provider_busy` for up to 35 seconds. Run it
@@ -2856,6 +2869,31 @@ notices that its provider's process is gone and ends as for an ended boot, and
 `hack up` and `hack down` run `runtime recover` first (under the provider lease,
 with the recorded provider proven gone by its identity), say so in one line, and
 continue as after any pool stop (HACK-2579).
+
+This also covers a run that `hack down` had already stopped with its data kept
+while the pool kept running, when the provider dies afterwards: killed, crashed, or
+the Mac restarted before the pool went idle (HACK-2730). `runtime recover` records
+that pool `recovered-unclean` with the boot it was running, and the retained-start
+check accepts it, as it accepts a boot whose engine failed after the boot was
+recorded (`stopped-after-engine-failure`). It does so only when the recorded provider
+is proven gone, the run's receipt is still that acknowledged stop (the engine
+acknowledged removing every container and network, volumes kept) and no owner,
+share, network or graph update is pending. The disk, root file, owner token and
+registry checks are the same as for a clean stop, and the restore after the next boot
+checks the volumes and the absence of the containers live. So the next `hack up`
+starts the pool and the run again, with no `runtime up` by hand. Nothing needs
+recovering in the run itself, so `hack down --recover` on that stopped pool changes
+nothing and says the runtime is not running; `hack up` is the command to run.
+
+The receipt records that the engine removed the containers, not that the removal
+reached the guest disk. A `hack down` now flushes the disk before it records the
+removal, but a receipt written by an older build carries no such proof. If the
+provider died before the removal reached the disk, the boot that `hack up` starts can
+list the run's containers again, stopped. `hack up` then refuses with nothing
+started and data kept, and says to run `hack down --recover`, which removes them
+again on the running pool, then `hack up`. An earlier `hack down --recover` of that
+kind that ended before it confirmed the removal is durable makes `hack up` refuse at
+once (`graph_lost_removal_pending`) and name the same two commands.
 
 A foreground `hack up` (or `hack restart`) watches its pool the same way
 (HACK-2096). When its provider VM dies or the pool stops under it, it prints which

@@ -7999,6 +7999,79 @@ test("up on a pool whose provider exited under a running record recovers it with
   ).toHaveLength(1);
 });
 
+// HACK-2732: two projects' `hack up -d` on a stopped pool. This start's
+// preflight selected the stopped pool; the other start booted it before this
+// one's `runtime up` held the startup lease.
+async function changedPoolFixture(refusals: readonly string[]) {
+  const { opts, events, saved } = await retainedFinalizationFixture();
+  await acknowledgeRetainedFrontend(opts.scope, saved);
+  const invoke = opts.dependencies.invoke!;
+  const selections: string[] = [];
+  let peerBooted = false;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "retained-preflight") {
+      events.push(
+        `graph retained-preflight ${peerBooted ? "running" : "stopped"}`
+      );
+      return {
+        ...retainedPreflight(saved, peerBooted ? "running" : "stopped"),
+        selection: (peerBooted ? "8" : "7").repeat(64),
+      };
+    }
+    if (request.args[0] === "runtime" && request.args[1] === "up") {
+      const at = request.args.indexOf("--expect-retained-selection");
+      selections.push(request.args[at + 1] ?? "");
+      const refusal = refusals[selections.length - 1];
+      if (refusal) {
+        peerBooted = true;
+        events.push(`runtime up ${refusal}`);
+        throw new NativeRuntimeRequestError({
+          nativeCode: refusal,
+          message: `Native runtime request failed (${refusal}).`,
+        });
+      }
+    }
+    return await invoke(request);
+  };
+  return { opts, events, selections };
+}
+
+test("a retained start whose pool another start booted takes its selection again and joins the running pool (HACK-2732)", async () => {
+  const { opts, events, selections } = await changedPoolFixture([
+    "graph_retained_pool_changed",
+  ]);
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(selections).toEqual(["7".repeat(64), "8".repeat(64)]);
+  const at = events.indexOf("runtime up graph_retained_pool_changed");
+  expect(events.slice(at, at + 4)).toEqual([
+    "runtime up graph_retained_pool_changed",
+    "graph retained-preflight running",
+    "graph inspect",
+    "runtime up",
+  ]);
+  expect(events.indexOf("graph retained-preflight stopped")).toBeLessThan(at);
+  expect(events).toContain("save");
+});
+
+test("a retained start retries a changed pool once, and never another refusal (HACK-2732)", async () => {
+  for (const refusals of [
+    ["graph_retained_pool_changed", "graph_retained_pool_changed"],
+    // A replaced owner, token or disk.
+    ["graph_retained_startup"],
+  ]) {
+    const { opts, events, selections } = await changedPoolFixture(refusals);
+    const error = await startNativeProject(opts).catch(
+      (caught: unknown) => caught
+    );
+    expect(String(error)).toContain(refusals.at(-1) ?? "");
+    expect(selections).toHaveLength(refusals.length);
+    expect(
+      events.filter((event) => event.startsWith("graph retained-preflight"))
+    ).toHaveLength(refusals.length);
+    expect(events).not.toContain("save");
+  }
+});
+
 test.each([
   { routed: true },
   { routed: false },

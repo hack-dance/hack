@@ -50,7 +50,79 @@ boot. `NeverExpired` checks only the first, and is a reachability control.
 | `peer-boot-refused` | `ResumeRunning = FALSE` | `StopNeverRefuses` violated: `waiter = "refused"`, `pool = "running"` | The review finding: a boot that waited out a peer's boot refused under the lease |
 | `peer-boot-resumed` | `ResumeRunning = TRUE` | `NeverResumed` violated: `waiter = "resumed"`, `pool = "running"` | The resume after a peer's boot is reachable |
 
-[State chart](lease-wait.svg) ([source](lease-wait.mmd)).
+## Retained starts across a peer's boot (HACK-2732)
+
+`RetainedGuard.tla` adds the retained-start guard to the peer-boot case.
+Retained starts of two projects (`a`, `b`), or three, share one stopped pool. Each takes a
+selection in its preflight (`graph retained-preflight`), then sends
+`runtime up` bound to it. A start holds the startup lease for its whole boot.
+The selection is the pool's stable identity (`token`) plus what boots, stops
+and other projects rewrite (`boots`, the phase, `peer`). `PeerChange` is
+another project's change outside these runs' identity, under its own lease:
+its own share added (which stops an idle pool), or a network or capacity
+change. `Eligible` is `checked`: a booting pool is not
+eligible, and a replaced owner's token does not match the run's receipt.
+
+On the real VM, the second start failed in about 2 s with
+`graph_retained_startup`. Its guard read the pool before the lease, so it saw
+the first start's boot in progress (`booting`, or the `owner.pending` of a
+record write), or a selection the boot had made stale. Now the guard reads
+eligibility and compares the selection only under the lease
+(`GuardUnderLease`). A selection that is stale only by the pool's boots, with
+the same token and receipt, is `graph_retained_pool_changed`. The CLI then
+selects again and retries `runtime up` once (`JoinChanged`), which joins the
+running pool. A second change after that retry is reported as it comes,
+with the next step named (`Retry hack up (or hack up -d).`), not retried
+again: `retained-guard-changed-twice` reaches it, and
+`retained-guard-peer-changes` shows it is the only refusal besides a
+replaced owner.
+
+| Config | Constants | Result | Shows |
+| --- | --- | --- | --- |
+| `retained-guard` | `GuardUnderLease`, `JoinChanged` | 22 distinct states, no error; `NoRefusal`, `OneBoot`, `StartsOnItsPool` and `Settles` hold | Both starts reach the pool: one boots it, the other joins |
+| `retained-guard-before-lease` | `GuardUnderLease = FALSE` | `NoRefusal` violated: one start `booting`, the other `refused`, `pool = "booting"` | The reported refusal: the preflight read the pool mid-boot |
+| `retained-guard-no-join` | `JoinChanged = FALSE` | `NoRefusal` violated: one start `booted`, the other `refused`, `pool = "running"` | Under the lease alone, the stale selection still refuses (also the #1272 `resume_leased` path) |
+| `retained-guard-replaced` | `Replace = TRUE` | 38 distinct states, no error; `OneBoot`, `StartsOnItsPool` and `Settles` hold | A replaced owner never starts, even with the retry |
+| `retained-guard-replaced-refuses` | `Replace = TRUE` | `NoRefusal` violated with `token = 1` | ... and it is refused, not joined |
+| `retained-guard-three` | three starts | 167 distinct states, no error; `NoRefusal`, `OneBoot`, `StartsOnItsPool` and `Settles` hold | One start boots the pool, two select again and join |
+| `retained-guard-peer-changes` | `PeerChanges = 2`, `Replace = TRUE` | 761 distinct states, no error; `RefusedOnlyAfterRetry`, `OneBoot`, `StartsOnItsPool` and `Settles` hold | A refusal only for a replaced owner, or after the one retry met another change |
+| `retained-guard-changed-twice` | `PeerChanges = 2` | `NoRefusal` violated: `peer = 2`, the start `refused` after its retry | The second change is reachable and reported, not retried without bound |
+| `retained-guard-rejoins` | as `retained-guard` | `NeverJoinedAfterRetry` violated: `retried` and `joined` for the same start | The retry, then the join, is reachable |
+
+The model abstracts the lease wait itself (`LeaseWait` covers it), the CLI's
+graph confirmation on a running pool, the early leased check in
+`Guard::acquire` (the same check under a brief lease, so a stale selection
+refuses before any admission work), and the other identity fields, which
+the token stands for (the disks, root files and this run's own share refuse
+the same way; other projects' shares, the network and capacity are
+`PeerChange`).
+
+Code and tests:
+
+- `graph/retained_startup.rs`: `selection` (stable half, then whole-record
+  half), `Guard::verify` (takes the startup lease and checks its path), and
+  `preflight` (lease first, then `checked`). Tests:
+  `preflight_and_the_guard_wait_out_a_peer_boot_instead_of_refusing_it` (the
+  unleased read refuses the booting pool, as in `retained-guard-before-lease`;
+  the leased read waits it out),
+  `a_start_selected_before_a_peer_boot_refuses_as_a_changed_pool_and_its_new_selection_holds`,
+  `a_peer_projects_pool_change_is_a_changed_pool_that_a_new_selection_accepts`,
+  `a_changed_identity_of_this_runs_pool_still_refuses_and_is_never_a_changed_pool`
+  and `preflight_selection_and_held_guard_refuse_a_valid_replacement_owner_before_up`.
+- `provider/lifecycle.rs`, `lifecycle/running_start.rs`: every retained check
+  after `Guard::acquire` receives the lease the start holds, including the
+  `resume_leased` closure.
+- `src/backends/native-project-retained-startup.ts`:
+  `runtimeUpJoiningChangedPool` and `reselectNativeRetainedStartup`. Tests in
+  `tests/native-project-retained-startup.test.ts` and
+  `tests/native-project-start.test.ts` (`HACK-2732`: one retry that joins, a
+  second changed pool, reported with `NATIVE_RETAINED_POOL_CHANGED_AGAIN`,
+  and a replaced owner refuse).
+- `graph/unadmitted_owner/tests.rs`:
+  `an_owner_on_a_pool_whose_provider_was_lost_is_retired_only_with_its_provider_gone`
+  (`down --recover`'s retirement shares `checked`).
+
+[State chart](lease-wait.svg) ([PNG](lease-wait.png), [source](lease-wait.mmd)).
 
 ## Code and tests
 

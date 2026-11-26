@@ -1599,10 +1599,12 @@ fn start_pool_observed(
     if start.amd64_emulation {
         require_host_translation()?;
     }
+    // The guard retires the run's publication now and checks eligibility under a brief
+    // startup lease; each later check below runs under this start's own lease (HACK-2732).
     #[cfg(target_os = "macos")]
     let retained_guard = retained
         .map(|(run, selection)| {
-            super::graph::retained_startup::Guard::acquire(candidate, run, Some(selection))
+            super::graph::retained_startup::Guard::acquire(candidate, run, selection)
         })
         .transpose()?;
     #[cfg(not(target_os = "macos"))]
@@ -1685,10 +1687,10 @@ fn start_pool_observed(
     // the named fast path instead of the admission windows below (`running_start`).
     if let Some(running) = running_start::select(candidate, profile)? {
         return crate::timings::measure(crate::timings::Step::VmReattach, None, |_| {
-            running_start::resume(candidate, running, &request, || {
+            running_start::resume(candidate, running, &request, |_lease| {
                 #[cfg(target_os = "macos")]
                 if let Some(guard) = &retained_guard {
-                    guard.verify(candidate)?;
+                    guard.verify(candidate, _lease)?;
                 }
                 Ok(())
             })
@@ -1765,10 +1767,10 @@ fn start_pool_observed(
         LeasedBoot::Boot(lock, leased) => (lock, leased),
         LeasedBoot::Running(lock, running) => {
             return crate::timings::measure(crate::timings::Step::VmReattach, None, |_| {
-                running_start::resume_leased(candidate, running, &request, &lock, || {
+                running_start::resume_leased(candidate, running, &request, &lock, |_lease| {
                     #[cfg(target_os = "macos")]
                     if let Some(guard) = &retained_guard {
-                        guard.verify(candidate)?;
+                        guard.verify(candidate, _lease)?;
                     }
                     Ok(())
                 })
@@ -1827,7 +1829,7 @@ fn start_pool_observed(
     let settled = admission_pool::settle(candidate, &mut admission_owner, &lock, &mut samples)?;
     #[cfg(target_os = "macos")]
     if let Some(guard) = &retained_guard {
-        guard.verify(candidate)?;
+        guard.verify(candidate, &lock)?;
     }
     super::network_update::require_complete(candidate)?;
     super::share_update::require_complete(candidate)?;
@@ -1921,7 +1923,7 @@ fn start_pool_observed(
             }
             #[cfg(target_os = "macos")]
             if let Some(guard) = &retained_guard {
-                guard.verify(candidate)?;
+                guard.verify(candidate, &lock)?;
             }
             verify_live(candidate, &owner)?;
             audit_boot(candidate, &owner)?;
@@ -2035,7 +2037,7 @@ fn start_pool_observed(
     }
     #[cfg(target_os = "macos")]
     if let Some(guard) = &retained_guard {
-        guard.verify(candidate)?;
+        guard.verify(candidate, &lock)?;
     }
     // The last check before `machine start` releases the VM lock to the provider.
     let permit = boot.release(candidate, &lock)?;

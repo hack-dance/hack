@@ -179,10 +179,11 @@ jobs:
       - name: Install or use cached Zig
         timeout-minutes: 15
         env:
-          MISE_HTTP_TIMEOUT: "90s"
+          # Leave room for two stalled requests and their retries before the step limit.
+          MISE_HTTP_TIMEOUT: "60s"
           MISE_HTTP_RETRIES: "4"
         run: |
-          if ! mise where zig >/dev/null; then
+          if ! MISE_OFFLINE=1 mise where zig >/dev/null; then
             for attempt in 1 2 3 4; do
               if mise install zig; then
                 break

@@ -1963,7 +1963,7 @@ test("macOS prerelease installs Zig even when its cache is unavailable", async (
   expect(steps[cacheIndex]?.["continue-on-error"]).toBe(true);
   expect(steps[cacheIndex]?.with?.["fail-on-cache-miss"]).toBeUndefined();
   expect(steps[miseIndex]?.with?.install).toBe(false);
-  expect(steps[zigIndex]?.run).toContain("if ! mise where zig");
+  expect(steps[zigIndex]?.run).toContain("if ! MISE_OFFLINE=1 mise where zig");
   expect(steps[zigIndex]?.if).toBeUndefined();
   expect(steps[zigIndex]?.["continue-on-error"]).toBeUndefined();
 });

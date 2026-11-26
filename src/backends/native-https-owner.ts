@@ -5,6 +5,7 @@ import { connect, type Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { syncDirectory } from "./native-https-empty-owner-recovery.ts";
 import { acquireNativeHttpsOwnerAdmission } from "./native-https-owner-admission.ts";
 import {
   decodeNativeHttpsOwnerFrame,
@@ -746,7 +747,11 @@ function admittedNothing(
  *   `rename`. A crash between the two leaves the root exactly as the failed
  *   owner left it, so the next recovery matches it again and finishes; a crash
  *   after the rename leaves nothing to resume. No state in between can make a
- *   later `up` wait on a configuration whose failure record is gone.
+ *   later `up` wait on a configuration whose failure record is gone. Both
+ *   steps sync their directories, so the record is durable before the rename.
+ *   A process killed while it holds the admission lock leaves that lock
+ *   behind, so recovery fails closed until it is reviewed, the same as for
+ *   every other holder of that lock.
  *
  * The caller's retired-owner branch then verifies this lease's release through
  * the graph (graph, bridges and publication claims), as for an idle-retired
@@ -810,13 +815,13 @@ async function retireUnadmittedNativeHttpsOwner(opts: {
       }
       await nativeHttpsRecordRetiredOwner(configuration);
     }
-    const evidence = join(
-      home,
-      "native-https",
-      "released-leases",
-      generation,
-      "failed-owner"
-    );
+    const released = join(home, "native-https", "released-leases");
+    // The record must be durable before the rename can be: otherwise a power
+    // loss could keep the rename but not the record, and recovery would then
+    // fail closed on a moved root with no retired owner.
+    await syncDirectory(join(released, generation));
+    await syncDirectory(released);
+    const evidence = join(released, generation, "failed-owner");
     // `rename` would replace an empty directory: refuse any existing entry.
     if (!(await nativeHttpsPathAbsent(evidence))) {
       throw nativeHttpsOwnerRefused();
@@ -826,6 +831,8 @@ async function retireUnadmittedNativeHttpsOwner(opts: {
       throw nativeHttpsOwnerRefused();
     }
     await rename(root, evidence);
+    await syncDirectory(join(released, generation));
+    await syncDirectory(dirname(root));
   } finally {
     await admission.release();
   }

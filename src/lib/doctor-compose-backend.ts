@@ -33,8 +33,9 @@ export type ComposeBackendReport = {
  * refuses the project; on the Compose backend it is informational, because
  * the project already runs where those features are supported. A basic build
  * is not a Compose-backend feature, but native image-project `up` refuses it
- * while `HACK_NATIVE_BUILDS=1` is not set (HACK-1907), so on the native backend
- * it is a warning too; with native builds enabled the reading reports none.
+ * while `HACK_NATIVE_BUILDS=0` turns native builds off (HACK-1907), so on the
+ * native backend it is a warning too; with builds on (the default, HACK-2532) the
+ * reading reports none.
  * Each warning names the next step: the Compose backend selection, the
  * documented `isolatedNetworks` adaptation for an external network, or the
  * authored native format for a build.
@@ -69,7 +70,7 @@ export function composeBackendCheckResult(
       return {
         name: COMPOSE_BACKEND_CHECK,
         status: "warn",
-        message: `No Compose-only features found, but native image-project up refuses this project's basic Compose build while HACK_NATIVE_BUILDS is not set. ${basicBuildNextStep(undefined, opts.projectRoot)}, or run it on the Compose backend: ${composeBackendCommand(["up", ...projectSelectorArgs(opts)])}.`,
+        message: `No Compose-only features found, but native image-project up refuses this project's basic Compose build while HACK_NATIVE_BUILDS=0 turns native builds off. ${basicBuildNextStep(undefined, opts.projectRoot)}, or run it on the Compose backend: ${composeBackendCommand(["up", ...projectSelectorArgs(opts)])}.`,
         composeBackend,
       };
     }
@@ -77,7 +78,7 @@ export function composeBackendCheckResult(
       return {
         name: COMPOSE_BACKEND_CHECK,
         status: "ok",
-        message: `No Compose-only features found; the basic Compose build runs on the Compose backend. Native image-project up refuses it while HACK_NATIVE_BUILDS is not set: ${basicBuildNextStep(undefined, opts.projectRoot)}.`,
+        message: `No Compose-only features found; the basic Compose build runs on the Compose backend. Native image-project up refuses it while HACK_NATIVE_BUILDS=0 turns native builds off: ${basicBuildNextStep(undefined, opts.projectRoot)}.`,
         composeBackend,
       };
     }

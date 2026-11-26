@@ -91,34 +91,68 @@ export async function preflightComposeEngine(opts: {
       redactValues,
     });
   }
-  const compose = await runDocker(deps, [
+  return await preflightComposePlugin({ deps, redactValues });
+}
+
+/** What {@link inspectComposePlugin} found. */
+export type ComposePluginInspection =
+  | { readonly ok: true; readonly version: string }
+  | { readonly ok: false; readonly error: HackCliError };
+
+/**
+ * Check 3 alone: whether `docker compose version` succeeds. `hack global
+ * install` and `hack global up` run it once the engine answers, before they
+ * start the proxy with Compose, and `hack doctor` reports it (HACK-2673). A
+ * failure names the plugin and how to install it (`E_DOCKER_UNAVAILABLE`),
+ * unless the Docker client says the engine is unreachable or denied.
+ */
+export async function inspectComposePlugin(opts: {
+  readonly deps: Pick<ComposeEnginePreflightDeps, "run">;
+  /** Values that must never appear in a quoted engine line. */
+  readonly redactValues?: Iterable<string>;
+}): Promise<ComposePluginInspection> {
+  const compose = await runDocker(opts.deps, [
     "docker",
     "compose",
     "version",
     "--short",
   ]);
   if (compose === null) {
-    return noDockerError();
+    return { ok: false, error: noDockerError() };
   }
-  if (compose.exitCode !== 0) {
-    return (
+  if (compose.exitCode === 0) {
+    return { ok: true, version: compose.stdout.trim() };
+  }
+  return {
+    ok: false,
+    error:
       dockerEngineFailureError({
         result: compose,
         command: "docker compose version",
-        redactValues,
-      }) ??
-      new HackCliError({
-        code: "E_DOCKER_UNAVAILABLE",
-        message: NO_COMPOSE_MESSAGE,
-        startBlocker: {
-          thing: "docker compose",
-          problem:
-            "v2 plugin missing · install docker-compose-v2 or docker-compose-plugin on debian or ubuntu",
-        },
-      })
-    );
-  }
-  return null;
+        redactValues: [...(opts.redactValues ?? [])],
+      }) ?? noComposePluginError(),
+  };
+}
+
+/** {@link inspectComposePlugin} as a refusal: the error, or null to continue. */
+export async function preflightComposePlugin(opts: {
+  readonly deps: Pick<ComposeEnginePreflightDeps, "run">;
+  readonly redactValues?: Iterable<string>;
+}): Promise<HackCliError | null> {
+  const inspection = await inspectComposePlugin(opts);
+  return inspection.ok ? null : inspection.error;
+}
+
+function noComposePluginError(): HackCliError {
+  return new HackCliError({
+    code: "E_DOCKER_UNAVAILABLE",
+    message: NO_COMPOSE_MESSAGE,
+    startBlocker: {
+      thing: "docker compose",
+      problem:
+        "v2 plugin missing · install docker-compose-v2 or docker-compose-plugin on debian or ubuntu",
+    },
+  });
 }
 
 /**

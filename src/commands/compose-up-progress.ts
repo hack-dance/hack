@@ -1,3 +1,4 @@
+import type { ComposeStartupPhase } from "../lib/compose-startup-budget.ts";
 import type { ProjectLifecycleCommand } from "../lib/project.ts";
 import { resolveLifecycleCommandServiceName } from "../lib/project-lifecycle-controller.ts";
 import { createTextOutput, formatDuration } from "../ui/text-output.ts";
@@ -51,9 +52,30 @@ export function createComposeUpProgress(opts: {
     }));
   const row = createTextOutput().stepRows([
     ...hookLabels("before", opts.before),
+    { name: "images" },
     ...opts.services.map((detail) => ({ name: "services", detail })),
     ...hookLabels("after", opts.after),
   ]);
+  // The Compose client's own lines are captured (HACK-2542), so its two
+  // detached phases show a transient wait here and the images phase closes
+  // with one row when the start phase begins.
+  // Invariant: while `phaseLabel` is set the wait is shown, except during a
+  // `notice` or `quiet` call, which clears it first and shows it again after,
+  // so Hack's own stderr lines never land on the wait's unterminated line.
+  let clearPhase: (() => void) | undefined;
+  let phaseLabel: string | undefined;
+  let imagesStartedAt: number | undefined;
+  const hide = () => {
+    clearPhase?.();
+    clearPhase = undefined;
+  };
+  const show = () => {
+    clearPhase = phaseLabel === undefined ? undefined : pending(phaseLabel);
+  };
+  const settle = () => {
+    hide();
+    phaseLabel = undefined;
+  };
   const hook =
     (name: "before" | "after"): HookCompletion =>
     (detail, result, durationMs) =>
@@ -68,6 +90,47 @@ export function createComposeUpProgress(opts: {
       pending(`before ${service}`)) satisfies HookStart,
     afterStart: ((service) => pending(`after ${service}`)) satisfies HookStart,
     serviceWait: () => pending("services"),
+    /** The backend began a detached phase. */
+    phase(phase: ComposeStartupPhase): void {
+      settle();
+      if (phase === "images") {
+        imagesStartedAt = performance.now();
+        phaseLabel = "images";
+        show();
+        return;
+      }
+      if (imagesStartedAt !== undefined) {
+        row({
+          name: "images",
+          status: "ok",
+          result: `ready · ${formatDuration(performance.now() - imagesStartedAt)}`,
+        });
+        imagesStartedAt = undefined;
+      }
+      phaseLabel = "services";
+      show();
+    },
+    /**
+     * One line of Hack's own on stderr during a detached phase (dependency
+     * cache progress, a startup notice): the wait is cleared first and shown
+     * again after it.
+     */
+    notice(line: string): void {
+      hide();
+      process.stderr.write(line.endsWith("\n") ? line : `${line}\n`);
+      show();
+    },
+    /** Run work that may log (for example `beforeCreate`) with the wait hidden. */
+    async quiet<T>(work: () => Promise<T>): Promise<T> {
+      hide();
+      try {
+        return await work();
+      } finally {
+        show();
+      }
+    },
+    /** Compose returned or threw: drop any transient phase wait. */
+    settle,
     before: hook("before"),
     after: hook("after"),
     services(state: {

@@ -5180,7 +5180,9 @@ with no clients, so after the shared owner is killed (for example `kill -9`) the
 authority stops serving within about 2 seconds, on macOS as on Linux. Whenever it
 stops serving it asks its Caddy to stop through Caddy's own admin socket (a
 graceful stop with a 1 second grace period, never a signal), then removes its
-socket and receipt as a cooperative stop does. When the run's lease is then
+socket and receipt as a cooperative stop does. When its owner is gone it keeps
+trying for up to 2 seconds while Caddy's session directory exists, so a Caddy
+that was still starting when its owner was killed is stopped too. When the run's lease is then
 recovered (by its frontend or by `hack down`), the exited owner generation is
 retired: recovery proves, under the owner admission lock, that the owner had
 published its endpoint, that its control socket refuses connections, that no
@@ -5191,7 +5193,18 @@ its check) is stopped only through the runtime's cooperative stop, and only when
 the dead owner's receipt names its exact socket, receipt hash and process;
 anything else, or an HTTPS port that stays in use, is refused with a next step
 (run `hack down` again shortly, or stop that process yourself) and every record
-is kept. Otherwise the receipt, the dead challenge socket and the empty owner
+is kept; the message says whether the authority was already stopped. Records
+that do not match (a malformed receipt, a non-empty owner lock) are refused
+the same way and kept as evidence. The owner process is checked once more
+before anything is removed. Retirement holds the owner admission lock, so
+another command that waits for it may be told to retry in a few seconds.
+The run's frontend does this itself once its owner connection has closed,
+instead of sending its release to the closed connection (which waited out a
+120 second timer while `hack down` waited for it, printing nothing). The
+retirement is bounded: up to 5 seconds for the admission lock, then at most
+about 30 seconds of process, pool and child checks; it usually takes a second
+or two. A `hack down` still waiting for its run's frontend after 5 seconds
+says so in one line. Otherwise the receipt, the dead challenge socket and the empty owner
 lock are removed, the owner directory moves beside a retired-owner record
 (`native-https/released-leases/<generation>/exited-owner`), the release is still
 verified against the stopped graph, `hack down` exits 0 and the next `up -d`

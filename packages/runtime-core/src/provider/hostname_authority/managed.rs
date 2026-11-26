@@ -440,9 +440,12 @@ mod tests {
     /// A stand-in for the owner's Caddy admin socket: returns the one request it
     /// receives (empty if none arrives) and answers as Caddy does before it exits.
     fn caddy_admin(directory: &SocketDirectory) -> (PathBuf, std::thread::JoinHandle<Vec<u8>>) {
+        caddy_admin_in(&directory.0)
+    }
+    fn caddy_admin_in(directory: &Path) -> (PathBuf, std::thread::JoinHandle<Vec<u8>>) {
         use std::io::{Read, Write};
         use std::os::unix::fs::PermissionsExt;
-        let path = directory.0.join("admin.sock");
+        let path = directory.join("admin.sock");
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -549,7 +552,9 @@ mod tests {
         let session = SocketDirectory::new("open");
         let (admin, caddy) = caddy_admin(&session);
         fs::set_permissions(&session.0, fs::Permissions::from_mode(0o755)).unwrap();
-        super::super::stop_caddy(&admin);
+        let started = Instant::now();
+        super::super::stop_caddy(&admin, Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_millis(500));
         fs::set_permissions(&session.0, fs::Permissions::from_mode(0o700)).unwrap();
         // The stand-in is still waiting: end it with a request of our own,
         // kept open until the stand-in has read it.
@@ -557,5 +562,133 @@ mod tests {
         std::io::Write::write_all(&mut probe, b"GET / HTTP/1.1\r\n\r\n").unwrap();
         assert!(caddy.join().unwrap().starts_with(b"GET / "));
         drop(probe);
+    }
+
+    /// The cooperative stop (`stop-hostname-authority`, which recovery uses for
+    /// an orphaned authority) ends serving too, and its Caddy goes with it, while
+    /// the owner pipe stays open. It makes one attempt: here the owner itself
+    /// stops its Caddy.
+    #[test]
+    fn cooperative_stop_also_stops_caddy() {
+        use sha2::{Digest, Sha256};
+        use std::io::{Read, Write};
+        let fixture = Fixture::new();
+        let candidate = fixture.candidate();
+        let sockets = SocketDirectory::new("coop");
+        let socket = sockets.0.join("route.sock");
+        let receipt = sockets.0.join("route.sock.identity");
+        let session = SocketDirectory::new("coopcaddy");
+        let (admin, caddy) = caddy_admin(&session);
+        let (reader, writer) = owner_fifo(&fixture);
+        let (done, ended) = std::sync::mpsc::channel();
+        let (served, admin_path) = (socket.clone(), admin.clone());
+        std::thread::spawn(move || {
+            let result = super::super::serve_locked(
+                &candidate,
+                &served,
+                None,
+                None,
+                reader,
+                Some(admin_path.as_path()),
+            );
+            let _ = done.send(result);
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !receipt.exists() {
+            assert!(Instant::now() < deadline, "the authority never served");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let hash = format!(
+            "{:x}",
+            crate::Hex(Sha256::digest(fs::read(&receipt).unwrap()))
+        );
+        let mut client = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        client
+            .write_all(
+                format!("POST /stop?identity={hash} HTTP/1.1\r\nHost: local\r\n\r\n").as_bytes(),
+            )
+            .unwrap();
+        let result = ended
+            .recv_timeout(Duration::from_secs(3))
+            .expect("the cooperative stop did not end serving");
+        let mut rest = Vec::new();
+        let _ = client.read_to_end(&mut rest);
+        unsafe { libc::close(writer) };
+        unsafe { libc::close(reader) };
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            caddy
+                .join()
+                .unwrap()
+                .starts_with(b"POST /stop HTTP/1.1\r\n")
+        );
+        assert!(!socket.exists() && !receipt.exists());
+    }
+
+    /// #1271 review, M1: an owner killed after it spawned Caddy but before Caddy
+    /// bound its admin socket. With patience the stop waits for the socket to
+    /// appear in the session directory, then stops that Caddy.
+    #[test]
+    fn caddy_still_starting_is_stopped_once_its_admin_socket_appears() {
+        let session = SocketDirectory::new("late");
+        let admin = session.0.join("admin.sock");
+        let directory = session.0.clone();
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            caddy_admin_in(&directory).1
+        });
+        let started = Instant::now();
+        super::super::stop_caddy(&admin, Duration::from_secs(2));
+        let elapsed = started.elapsed();
+        let request = late.join().unwrap().join().unwrap();
+        assert!(elapsed >= Duration::from_millis(400), "{elapsed:?}");
+        assert!(
+            request.starts_with(b"POST /stop HTTP/1.1\r\n"),
+            "{:?}",
+            String::from_utf8_lossy(&request)
+        );
+    }
+
+    /// Every way the admin socket can fail to answer ends within its bound: a
+    /// missing socket (with and without patience), one that refuses connections,
+    /// and one that accepts but never answers.
+    #[test]
+    fn caddy_stop_is_bounded_when_its_admin_socket_is_missing_refusing_or_silent() {
+        use std::os::unix::fs::PermissionsExt;
+        let patience = Duration::from_secs(2);
+        let missing = SocketDirectory::new("missing");
+        let admin = missing.0.join("admin.sock");
+        let started = Instant::now();
+        super::super::stop_caddy(&admin, Duration::ZERO);
+        assert!(started.elapsed() < Duration::from_millis(200));
+        let started = Instant::now();
+        super::super::stop_caddy(&admin, patience);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(1900) && elapsed < Duration::from_millis(2600),
+            "missing: {elapsed:?}"
+        );
+
+        let refusing = SocketDirectory::new("refusing");
+        let admin = refusing.0.join("admin.sock");
+        // Dropping a listener leaves its socket file, which then refuses.
+        drop(std::os::unix::net::UnixListener::bind(&admin).unwrap());
+        fs::set_permissions(&admin, fs::Permissions::from_mode(0o600)).unwrap();
+        let started = Instant::now();
+        super::super::stop_caddy(&admin, patience);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(1900) && elapsed < Duration::from_millis(2600),
+            "refusing: {elapsed:?}"
+        );
+
+        let silent = SocketDirectory::new("silent");
+        let admin = silent.0.join("admin.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&admin).unwrap();
+        fs::set_permissions(&admin, fs::Permissions::from_mode(0o600)).unwrap();
+        let started = Instant::now();
+        super::super::stop_caddy(&admin, patience);
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_millis(3500), "silent: {elapsed:?}");
     }
 }

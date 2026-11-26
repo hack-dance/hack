@@ -412,6 +412,12 @@ export async function requestNativeHttpsOwner(
   socket: Socket,
   value: unknown
 ): Promise<unknown> {
+  // A connection that already closed never emits `close` again: without this
+  // the request waited out its whole 120 s timer. A `hack down` after the
+  // owner was killed waited that long for the frontend's release (HACK-2720).
+  if (socket.destroyed || !socket.writable) {
+    throw nativeHttpsOwnerRefused();
+  }
   return await new Promise((resolve, reject) => {
     let bytes = Buffer.alloc(0);
     const finish = (error?: Error, reply?: unknown) => {
@@ -519,10 +525,12 @@ export async function acquireNativeHttpsLease(
   } catch (startupFailure) {
     throw new NativeHttpsLeaseAcquisitionError(intended, { startupFailure });
   }
+  let ownerClosed = false;
   const exited = new Promise<{ component: string; code: number }>((resolve) => {
-    socket.once("close", () =>
-      resolve({ component: "shared-https-owner", code: 1 })
-    );
+    socket.once("close", () => {
+      ownerClosed = true;
+      resolve({ component: "shared-https-owner", code: 1 });
+    });
   });
   try {
     const reply = await requestNativeHttpsOwner(socket, {
@@ -576,7 +584,15 @@ export async function acquireNativeHttpsLease(
         if (released) {
           return;
         }
-        await release(socket, selected);
+        await releaseNativeHttpsLeaseAfterCleanup({
+          ownerClosed: ownerClosed || socket.destroyed,
+          release: () => release(socket, selected),
+          recover: () =>
+            recoverNativeHttpsLease({
+              runtime: opts.runtime,
+              identity: selected,
+            }),
+        });
         released = true;
         socket.end();
       },
@@ -586,6 +602,26 @@ export async function acquireNativeHttpsLease(
     socket.destroy();
     throw new NativeHttpsLeaseAcquisitionError(intended);
   }
+}
+
+/**
+ * A frontend's lease release after its graph cleanup. Through its owner
+ * connection while that is open; once the owner closed it (the owner exited,
+ * for example killed), through lease recovery, which retires an exited owner
+ * after its proofs (HACK-2720). Before this the frontend wrote its release to
+ * the closed connection and waited out the request's 120 s timer, so the
+ * `hack down` that waited for it hung, then refused.
+ */
+export async function releaseNativeHttpsLeaseAfterCleanup(opts: {
+  readonly ownerClosed: boolean;
+  readonly release: () => Promise<void>;
+  readonly recover: () => Promise<void>;
+}): Promise<void> {
+  if (opts.ownerClosed) {
+    await opts.recover();
+    return;
+  }
+  await opts.release();
 }
 
 async function hasActiveNativeHttpsLease(
@@ -852,10 +888,15 @@ export interface ExitedNativeHttpsOwnerInspection {
   readonly ownerRunning: (opts: {
     readonly configurationPath: string;
   }) => Promise<boolean>;
-  /** Retire the exited owner's child pair and receipts, or refuse. */
+  /**
+   * Retire the exited owner's child pair and receipts, or refuse. It calls
+   * `beforeRemoval` after the children are proven gone and before it removes
+   * anything.
+   */
   readonly retireChildren: (opts: {
     readonly runtime: NativeRuntimeSelection;
     readonly httpsPort: number;
+    readonly beforeRemoval: () => Promise<void>;
   }) => Promise<void>;
 }
 
@@ -865,7 +906,7 @@ const exitedOwnerInspection: ExitedNativeHttpsOwnerInspection = {
       runtime,
       cwd: runtime.home,
       args: ["runtime", "status", "--json"],
-      timeoutMs: 30_000,
+      timeoutMs: 5000,
     });
     return isRecord(status) &&
       status.phase === "running" &&
@@ -928,8 +969,8 @@ async function controlSocketDead(
  *
  * - this generation published its endpoint (it ran), and its control socket is
  *   gone or refuses connections;
- * - no process runs this generation's exact owner invocation, checked again at
- *   the effect boundary;
+ * - no process runs this generation's exact owner invocation, checked again
+ *   after the children are proven gone and before anything is removed;
  * - the pool still runs the boot this owner was bound to (an owner of an ended
  *   boot is the previous-boot archive's, not this);
  * - its children are gone or stopped by identity, and their receipts retired
@@ -950,7 +991,6 @@ async function retireExitedNativeHttpsOwner(opts: {
   const inspection = { ...exitedOwnerInspection, ...opts.inspection };
   const home = opts.runtime.home;
   const root = nativeHttpsOwnerRoot(home);
-  const configurationPath = join(root, "configuration.json");
   const selected = async () => {
     try {
       const configuration = await readNativeHttpsOwnerConfiguration(
@@ -980,15 +1020,34 @@ async function retireExitedNativeHttpsOwner(opts: {
   if (!(await selected())) {
     return false;
   }
+  // Bounded throughout, so the `hack down` waiting for this frontend ends
+  // within about 35 s: up to 5 s for admission, then under it two process
+  // inventories (5 s each), the pool status (5 s) and the children step (15 s,
+  // `NATIVE_HTTPS_EXITED_CHILD_BUDGET_MS`). It usually takes a second or two.
   const admission = await acquireNativeHttpsOwnerAdmission({
     home,
-    waitMs: 15_000,
+    waitMs: 5000,
   });
   try {
     const rootIdentity = await lstat(root).catch(() => undefined);
     const configuration = rootIdentity ? await selected() : undefined;
+    // The owner was spawned with the configuration path under its binding's
+    // home (`ensureNativeHttpsOwner`). That home must be this canonical home,
+    // so the process check below looks for exactly the path a live owner of
+    // this generation runs with, never a symlinked spelling of it.
+    const ownerHome = configuration?.binding.runtime.home;
     if (
       !(rootIdentity && configuration) ||
+      ownerHome !== home ||
+      (await realpath(home)) !== home
+    ) {
+      return false;
+    }
+    const configurationPath = join(
+      nativeHttpsOwnerRoot(ownerHome),
+      "configuration.json"
+    );
+    if (
       (await inspection.ownerRunning({ configurationPath })) ||
       (await inspection.poolBoot(opts.runtime).catch(() => undefined)) !==
         configuration.binding.pool.bootId
@@ -998,10 +1057,13 @@ async function retireExitedNativeHttpsOwner(opts: {
     await inspection.retireChildren({
       runtime: opts.runtime,
       httpsPort: configuration.binding.httpsPort,
+      beforeRemoval: async () => {
+        // Again at the effect boundary, before any record is removed.
+        if (await inspection.ownerRunning({ configurationPath })) {
+          throw nativeHttpsOwnerRefused();
+        }
+      },
     });
-    if (await inspection.ownerRunning({ configurationPath })) {
-      throw nativeHttpsOwnerRefused();
-    }
     const generation = configuration.ownerGeneration;
     try {
       await nativeHttpsReadRetiredOwner(home, generation);

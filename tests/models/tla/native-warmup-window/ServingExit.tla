@@ -17,8 +17,14 @@
 (* it stops serving; recovery retires an owner that exited while serving,    *)
 (* after it proves the owner process gone, waits for the children, and stops *)
 (* an orphaned authority only cooperatively, by its exact identity.          *)
+(*                                                                           *)
+(* Two more constants exist only so the safety invariants can fail: with     *)
+(* SpuriousEof the pipe check may report end of file while the owner still  *)
+(* holds its writer (a check that confused EAGAIN or an error with EOF), and *)
+(* with ProveOwnerGone = FALSE recovery skips its owner-process proof.        *)
 EXTENDS Naturals
-CONSTANTS PipeCheck, StopsCaddy, RetireExited, Deadline
+CONSTANTS PipeCheck, StopsCaddy, RetireExited, Deadline, SpuriousEof,
+          ProveOwnerGone
 VARIABLES owner, authority, caddy, since, records, down, up
 vars == <<owner, authority, caddy, since, records, down, up>>
 
@@ -41,7 +47,8 @@ Tick == /\ owner = "killed" /\ authority = "serving"
 
 \* The serving loop reads end of file on its owner pipe and stops serving,
 \* stopping its Caddy on the way out (StopsCaddy) and removing its socket.
-Notice == /\ owner = "killed" /\ authority = "serving" /\ PipeCheck
+Notice == /\ (owner = "killed" \/ SpuriousEof) /\ authority = "serving"
+          /\ PipeCheck
           /\ authority' = "exited"
           /\ caddy' = IF StopsCaddy THEN "stopped" ELSE caddy
           /\ UNCHANGED <<owner, since, records, down, up>>
@@ -52,7 +59,7 @@ Notice == /\ owner = "killed" /\ authority = "serving" /\ PipeCheck
 (* wait is stopped cooperatively by its exact identity, and that stop takes *)
 (* its Caddy with it (StopsCaddy). It retires the owner's records only when *)
 (* both children are gone; otherwise it refuses with a next step.           *)
-Down == /\ owner = "killed" /\ down = "idle"
+Down == /\ (owner = "killed" \/ ~ProveOwnerGone) /\ down = "idle"
         /\ IF RetireExited
              THEN LET c == IF authority = "serving" /\ StopsCaddy
                              THEN "stopped" ELSE caddy

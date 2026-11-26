@@ -1351,8 +1351,157 @@ test("a receipt whose owner still answers is never retired", async () => {
       exitWaitMs: 50,
       invoke: f.invoke,
     }),
-    "ownership verification failed"
+    "owner.sock) still answers, so its owner may still run. Nothing was stopped"
   );
   expect(f.calls).toEqual([]);
+  expect(await f.leftovers()).toEqual(ALL_LEFT);
+});
+
+test("a refusal after the orphaned authority was stopped says so, and keeps every record", async () => {
+  const f = await exitedOwnerFixture();
+  const error = await expectClosedRefusal(
+    retireExitedNativeHttpsChildren({
+      runtime: f.runtime,
+      httpsPort: 19_443,
+      checkPort: async () => {
+        throw new Error("in use");
+      },
+      exitWaitMs: 50,
+      invoke: f.invoke,
+    }),
+    "HTTPS port 19443 is still in use"
+  );
+  expect(error.message).toContain(
+    "hostname authority was stopped through its cooperative stop; nothing else was stopped"
+  );
+  expect(error.message).not.toContain("Nothing was stopped");
+  expect(f.effects().map((args) => args[1])).toEqual([
+    "stop-hostname-authority",
+  ]);
+  expect(await f.leftovers()).toEqual(ALL_LEFT);
+});
+
+test("an authority stop that times out is refused with a next step", async () => {
+  const f = await exitedOwnerFixture();
+  await expectClosedRefusal(
+    retireExitedNativeHttpsChildren({
+      runtime: f.runtime,
+      httpsPort: 19_443,
+      checkPort: async () => {},
+      exitWaitMs: 50,
+      invoke: async (request) => {
+        if (request.args[1] === "stop-hostname-authority") {
+          throw new Error("timed out");
+        }
+        return await f.invoke(request);
+      },
+    }),
+    "cooperative stop did not confirm its exit (it may have timed out). Nothing was stopped and the retained records were kept. Run hack down again"
+  );
+  expect(await f.leftovers()).toEqual(ALL_LEFT);
+});
+
+test("every runtime call of the children step stays inside its budget", async () => {
+  const f = await exitedOwnerFixture();
+  const timeouts: number[] = [];
+  await retireExitedNativeHttpsChildren({
+    runtime: f.runtime,
+    httpsPort: 19_443,
+    checkPort: async () => {},
+    exitWaitMs: 50,
+    budgetMs: 2000,
+    invoke: async (request) => {
+      timeouts.push(request.timeoutMs ?? Number.POSITIVE_INFINITY);
+      return await f.invoke(request);
+    },
+  });
+  expect(timeouts.length).toBeGreaterThan(1);
+  expect(Math.max(...timeouts)).toBeLessThanOrEqual(2000);
+  // An exhausted budget refuses before any further call.
+  const g = await exitedOwnerFixture();
+  await expectClosedRefusal(
+    retireExitedNativeHttpsChildren({
+      runtime: g.runtime,
+      httpsPort: 19_443,
+      checkPort: async () => {},
+      exitWaitMs: 5000,
+      budgetMs: 150,
+      invoke: g.invoke,
+    }),
+    "Run hack down again"
+  );
+  expect(g.effects()).toEqual([]);
+  expect(await g.leftovers()).toEqual(ALL_LEFT);
+});
+
+test("malformed or mismatched records are refused with a next step that keeps them", async () => {
+  const cases: Array<{
+    readonly name: string;
+    readonly change: (storage: string) => void;
+    readonly text: string;
+  }> = [
+    {
+      name: "receipt",
+      change: (storage) =>
+        writeFileSync(join(storage, "active-owner.json"), "{", {
+          mode: 0o600,
+        }),
+      text: "receipt (active-owner.json) is unreadable or malformed",
+    },
+    {
+      name: "lock",
+      change: (storage) =>
+        writeFileSync(join(storage, "owner.lock", "stray"), "x", {
+          mode: 0o600,
+        }),
+      text: "owner lock (owner.lock) is not empty",
+    },
+  ];
+  for (const item of cases) {
+    const f = await exitedOwnerFixture();
+    item.change(join(f.runtime.home, "native-https"));
+    const error = await expectClosedRefusal(
+      retireExitedNativeHttpsChildren({
+        runtime: f.runtime,
+        httpsPort: 19_443,
+        checkPort: async () => {},
+        exitWaitMs: 50,
+        invoke: f.invoke,
+      }),
+      item.text
+    );
+    expect(error.message).toContain("keep its records");
+    expect(f.calls).toEqual([]);
+    expect(await f.leftovers()).toEqual(ALL_LEFT);
+  }
+  const port = await exitedOwnerFixture();
+  await expectClosedRefusal(
+    retireExitedNativeHttpsChildren({
+      runtime: port.runtime,
+      httpsPort: 19_444,
+      checkPort: async () => {},
+      exitWaitMs: 50,
+      invoke: port.invoke,
+    }),
+    "receipt names HTTPS port 19443, not 19444"
+  );
+  expect(await port.leftovers()).toEqual(ALL_LEFT);
+});
+
+test("nothing is removed when the caller's last check before removal refuses", async () => {
+  const f = await exitedOwnerFixture();
+  f.setState("gone");
+  await expect(
+    retireExitedNativeHttpsChildren({
+      runtime: f.runtime,
+      httpsPort: 19_443,
+      checkPort: async () => {},
+      exitWaitMs: 50,
+      invoke: f.invoke,
+      beforeRemoval: async () => {
+        throw new Error("owner running again");
+      },
+    })
+  ).rejects.toThrow("owner running again");
   expect(await f.leftovers()).toEqual(ALL_LEFT);
 });

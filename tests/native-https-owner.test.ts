@@ -21,6 +21,7 @@ import {
   type NativeHttpsSpawnedOwner,
   readNativeHttpsOwnerConfiguration,
   recoverNativeHttpsLease,
+  releaseNativeHttpsLeaseAfterCleanup,
   requestNativeHttpsOwner,
 } from "../src/backends/native-https-owner.ts";
 import {
@@ -1650,7 +1651,8 @@ describe("a shared owner that exited while serving", () => {
         },
         exitedOwner: {
           poolBoot: async () => f.binding.pool.bootId,
-          retireChildren: async (opts) => {
+          retireChildren: async ({ beforeRemoval, ...opts }) => {
+            await beforeRemoval();
             children.push(opts);
           },
           ...exitedOwner,
@@ -1712,12 +1714,80 @@ describe("a shared owner that exited while serving", () => {
     expect(next.ownerGeneration).not.toBe(generation);
   }, 25_000);
 
+  /**
+   * The VM row at 52d10ea4: after the kill, the frontend's release went to its
+   * closed owner connection and waited out the request's 120 s timer, so the
+   * `hack down` waiting for that frontend hung. A closed connection now
+   * refuses at once, and the frontend's cleanup recovers instead.
+   */
+  test("a request on the killed owner's closed connection refuses at once", async () => {
+    const f = await fixture();
+    const started = await f.start();
+    const identity = await f.acquire(
+      started.socket,
+      started.configuration.ownerGeneration,
+      "b"
+    );
+    const closed = new Promise((resolveClosed) =>
+      started.socket.once("close", resolveClosed)
+    );
+    process.kill(started.pid, "SIGKILL");
+    await closed;
+    const begun = performance.now();
+    await expect(
+      requestNativeHttpsOwner(started.socket, {
+        version: 1,
+        operation: "release",
+        identity,
+      })
+    ).rejects.toThrow("ownership is unavailable or unconfirmed");
+    expect(performance.now() - begun).toBeLessThan(1000);
+  }, 25_000);
+
+  test("the frontend's cleanup recovers a lease whose owner connection closed, and releases otherwise", async () => {
+    const calls: string[] = [];
+    const record = (name: string) => async () => {
+      calls.push(name);
+    };
+    await releaseNativeHttpsLeaseAfterCleanup({
+      ownerClosed: true,
+      release: record("release"),
+      recover: record("recover"),
+    });
+    await releaseNativeHttpsLeaseAfterCleanup({
+      ownerClosed: false,
+      release: record("release"),
+      recover: record("recover"),
+    });
+    expect(calls).toEqual(["recover", "release"]);
+  });
+
   test("is left alone while its exact owner invocation still runs", async () => {
     const { children, verified, recover, retained } = await killedOwner();
     const before = await retained();
     await expect(recover({ ownerRunning: async () => true })).rejects.toThrow(
       "ownership is unavailable or unconfirmed"
     );
+    expect(children).toEqual([]);
+    expect(verified).toEqual([]);
+    expect(await retained()).toEqual(before);
+  }, 25_000);
+
+  test("is left alone when its owner invocation reappears before anything is removed", async () => {
+    const { children, verified, recover, retained } = await killedOwner();
+    const before = await retained();
+    const checks: string[] = [];
+    await expect(
+      recover({
+        // Gone at the first check, running again at the effect boundary.
+        ownerRunning: async ({ configurationPath }) => {
+          checks.push(configurationPath);
+          return checks.length > 1;
+        },
+      })
+    ).rejects.toThrow("ownership is unavailable or unconfirmed");
+    // The second check ran inside the children's retirement, before removal.
+    expect(checks).toHaveLength(2);
     expect(children).toEqual([]);
     expect(verified).toEqual([]);
     expect(await retained()).toEqual(before);
@@ -1759,22 +1829,30 @@ describe("a shared owner that exited while serving", () => {
       started.configuration.ownerGeneration,
       "b"
     );
-    const children: unknown[] = [];
-    // Its graph is not clean, so the live owner refuses the release itself.
+    const observed: string[] = [];
+    // Its graph is not clean, so the live owner refuses the release itself,
+    // through its own release path: the exited-owner branch never takes over.
     await expect(
       recoverNativeHttpsLease({
         runtime: f.binding.runtime,
         identity,
         exitedOwner: {
-          poolBoot: async () => f.binding.pool.bootId,
-          ownerRunning: async () => false,
-          retireChildren: async (opts) => {
-            children.push(opts);
+          poolBoot: async () => {
+            observed.push("poolBoot");
+            return f.binding.pool.bootId;
+          },
+          ownerRunning: async () => {
+            observed.push("ownerRunning");
+            return false;
+          },
+          retireChildren: async () => {
+            observed.push("retireChildren");
           },
         },
       })
-    ).rejects.toThrow();
-    expect(children).toEqual([]);
+    ).rejects.toThrow("graph-verification");
+    // A live control socket ends the branch before any process check.
+    expect(observed).toEqual([]);
     expect(
       await readFile(
         join(

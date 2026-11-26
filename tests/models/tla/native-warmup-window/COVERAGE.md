@@ -202,12 +202,30 @@ was left behind.
   (`released-leases/<generation>/exited-owner`). Each lease's release is still
   verified through the graph.
 
+- **`hack down` hung after the kill (VM row at 52d10ea4).** The authority and
+  Caddy were gone 1.56 s after the kill, but the next `hack down` printed
+  nothing for 120 s and `up -d` then refused `E_RECOVERY_REQUIRED`. `down`
+  stopped the graph in 9 s, then waited for the run's detached frontend to
+  acknowledge its cleanup, and that frontend sent its lease release to the owner
+  connection that had closed at the kill. `requestNativeHttpsOwner` listens for
+  `close`, which a closed socket never emits again, so it waited out its
+  120 s timer. A closed connection now refuses at once, the frontend's cleanup
+  recovers the lease instead (`releaseNativeHttpsLeaseAfterCleanup`), the
+  retirement is bounded (5 s admission wait, 5 s pool status, a 15 s budget for
+  the children step, about 35 s at worst), and a `down` still waiting after
+  5 s says what it waits for.
+
 `ServingExit.tla` (same directory) models this: the ready owner, its authority
 and Caddy, a kill, ticks of one second while the authority still serves, the
 authority's notice, `hack down` at any time after the kill (also before the
 authority noticed), and the next `up`. `PipeCheck = FALSE` is the old serving
 loop, `StopsCaddy = FALSE` an authority that leaves Caddy running,
-`RetireExited = FALSE` the old recovery.
+`RetireExited = FALSE` the old recovery. `SpuriousEof` (a pipe check that
+reports end of file while the owner still holds its writer) and
+`ProveOwnerGone = FALSE` (recovery without its owner-process proof) exist so
+`NoFalseExit` and `NoLiveRetire` have controls that fail: in the fixed
+configuration they hold because the check reads only real end of file and the
+recovery proves the owner gone, which the controls remove.
 
 | Config | Result | Shows |
 | --- | --- | --- |
@@ -215,6 +233,8 @@ loop, `StopsCaddy = FALSE` an authority that leaves Caddy running,
 | `serving-exit-old` (`PipeCheck`, `StopsCaddy`, `RetireExited` all FALSE) | `NoticedInTime` violated: `authority = "serving"`, `owner = "killed"`, `since = 3` | The real-VM row: the authority serves on after its owner was killed |
 | `serving-exit-caddy-left` (`StopsCaddy = FALSE`) | `DownConfirms` violated: `caddy = "running"`, `down = "refused"` | Without Caddy's stop, `down` cannot prove the children gone |
 | `serving-exit-retained` (`RetireExited = FALSE`) | `NoRecoveryRequired` violated: `up = "recoveryRequired"`, `records = "held"`, `down = "refused"` | `down` failed and the next `up` refused `E_RECOVERY_REQUIRED` |
+| `serving-exit-spurious-eof` (`SpuriousEof = TRUE`) | `NoFalseExit` violated: `owner = "ready"`, `authority = "exited"` | A check that misreads its pipe stops a healthy owner's children |
+| `serving-exit-unproven` (`ProveOwnerGone = FALSE`) | `NoLiveRetire` violated: `owner = "ready"`, `records = "retired"` | Recovery without the owner-process proof retires a live owner |
 | `serving-exit-recovered` | `NeverStartedAfterKill` violated: `up = "started"`, `records = "retired"` | Reachability: a killed owner is recovered and the next `up` starts |
 
 [State chart](serving-exit.svg) ([source](serving-exit.mmd)).
@@ -228,18 +248,30 @@ Tests:
   fails on macOS with the old loop (timed out, still serving).
   `caddy_is_stopped_only_through_a_private_admin_socket`: a socket in a
   directory others can enter gets nothing.
+  `cooperative_stop_also_stops_caddy`: the cooperative stop ends serving and
+  stops Caddy while the owner pipe stays open.
+  `caddy_still_starting_is_stopped_once_its_admin_socket_appears` (#1271
+  review): an owner killed before its Caddy bound the admin socket; the
+  authority keeps trying for up to 2 s while the session directory exists.
+  `caddy_stop_is_bounded_when_its_admin_socket_is_missing_refusing_or_silent`.
 - `tests/native-https-owner.test.ts` ("a shared owner that exited while
   serving"): the real owner process is killed with `SIGKILL`; the production
   owner-invocation check sees it alive and then gone; the lease recovery
   retires it (evidence kept, release verified, repeatable) and the next owner
-  starts. A still-running invocation, an ended pool boot, children not proven
-  gone, or a live owner leave every record and refuse as before.
+  starts. A still-running invocation (also one that reappears at the second
+  check, which runs before anything is removed), an ended pool boot, children
+  not proven gone, or a live owner (refused by its own release path) leave
+  every record and refuse as before.
 - `tests/native-project-https.test.ts`: the authority gets the admin socket and
   Caddy `grace_period 1s`; an exited owner's records are retired once its
   authority exits on its own; an orphaned authority is stopped only through the
   cooperative stop, with its exact socket and hash; a dead authority is
   recovered by its hash; an authority the receipt does not name, a held port,
   and a receipt whose owner still answers are refused with every record kept.
+  Every refusal names a next step and says what was stopped: one after the
+  orphaned authority was stopped says so; a stop that times out, a malformed
+  receipt, a non-empty owner lock and a port mismatch each have their own
+  message; a failed last check before removal removes nothing.
 
 Not modelled or tested: the real Caddy and runtime binaries, the 5 s wait
 against a slow machine, and a Caddy whose authority was killed too (recovery

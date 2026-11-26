@@ -208,33 +208,61 @@ pub(crate) fn caddy_admin_path(path: &Path) -> Result<(), CandidateError> {
     Ok(())
 }
 
+/// How long an authority whose owner is gone keeps trying to reach a Caddy
+/// that has not bound its admin socket yet (#1271 review, M1).
+const CADDY_STOP_PATIENCE: Duration = Duration::from_millis(2000);
+
+/// Why serving ended.
+#[derive(Debug, PartialEq, Eq)]
+enum ServeEnd {
+    /// End of file on the owner pipe: the owner exited or was killed.
+    OwnerGone,
+    /// A cooperative stop named this authority's receipt.
+    Stopped,
+}
+
 /// Ask the owner's Caddy to stop through its private admin socket (HACK-2720).
 /// Caddy routes every request through this authority (`forward_auth` and the
 /// on-demand TLS permission), so it is useless once the authority has gone, and
 /// an owner killed outright never stops it: it kept the HTTPS port and answered
 /// 403. This is Caddy's own graceful stop (`POST /stop`), never a signal, and only
 /// to a socket this user owns, mode 0600, in a private directory: the session
-/// directory the owner created for that Caddy. A missing or refusing socket means
-/// Caddy has not started or is already gone. Every step is bounded and the
-/// outcome is not trusted: recovery proves the port free separately.
-fn stop_caddy(admin: &Path) {
+/// directory the owner created for that Caddy. A missing session directory means
+/// that Caddy's owner already cleaned up.
+///
+/// `patience` covers an owner killed after it spawned Caddy but before Caddy
+/// bound its admin socket: while the session directory stays and the socket is
+/// missing or refuses connections, the attempt is repeated until `patience`
+/// runs out. With no patience (a cooperative stop, where the owner itself stops
+/// Caddy) one attempt is made. Every step is bounded and the outcome is not
+/// trusted: recovery proves the port free separately.
+fn stop_caddy(admin: &Path, patience: Duration) {
     let Some(parent) = admin.parent() else {
         return;
     };
-    if state::check_private_directory(parent).is_err() {
-        return;
-    }
-    let Ok(metadata) = fs::symlink_metadata(admin) else {
-        return;
-    };
-    if !metadata.file_type().is_socket()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o077 != 0
-    {
-        return;
-    }
-    let Ok(mut stream) = UnixStream::connect(admin) else {
-        return;
+    let deadline = Instant::now() + patience;
+    let mut stream = loop {
+        if state::check_private_directory(parent).is_err() {
+            return;
+        }
+        let attempt = match fs::symlink_metadata(admin) {
+            Ok(metadata)
+                if !metadata.file_type().is_socket()
+                    || metadata.uid() != unsafe { libc::geteuid() }
+                    || metadata.mode() & 0o077 != 0 =>
+            {
+                return;
+            }
+            Ok(_) => UnixStream::connect(admin).ok(),
+            Err(_) => None,
+        };
+        if let Some(stream) = attempt {
+            break stream;
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     };
     let _ = stream.set_write_timeout(Some(CADDY_STOP_IO));
     let _ = stream.set_read_timeout(Some(CADDY_STOP_IO));
@@ -295,12 +323,18 @@ fn serve_locked(
     drop(startup_lock);
     let served = serve_clients(candidate, &listener, &fingerprint, budget, input);
     // Caddy goes with its authority, on every way out of serving; the socket
-    // and its receipt go when `owned` drops, after this.
+    // and its receipt go when `owned` drops, after this. Only an owner that is
+    // gone may have left a Caddy still starting.
     if let Some(admin) = caddy_admin {
-        stop_caddy(admin);
+        let patience = if matches!(served, Ok(ServeEnd::OwnerGone)) {
+            CADDY_STOP_PATIENCE
+        } else {
+            Duration::ZERO
+        };
+        stop_caddy(admin, patience);
     }
     drop(owned);
-    served
+    served.map(|_| ())
 }
 
 /// Serve until the owner is gone, a stop names this authority's receipt, or the
@@ -316,7 +350,7 @@ fn serve_clients(
     fingerprint: &str,
     mut budget: Option<certificates::Budget>,
     input: libc::c_int,
-) -> Result<(), CandidateError> {
+) -> Result<ServeEnd, CandidateError> {
     let mut clients: Vec<Client> = Vec::new();
     println!("ready");
     std::io::stdout().flush().map_err(state::io)?;
@@ -366,7 +400,7 @@ fn serve_clients(
         // Input is only an owner-lifetime pipe; payload is never a command and
         // is discarded. End of file is the owner's exit.
         if managed::owner_pipe_open(input).is_err() {
-            return Ok(());
+            return Ok(ServeEnd::OwnerGone);
         }
         for index in (0..clients.len()).rev() {
             let events = fds[index + 2].revents;
@@ -389,7 +423,7 @@ fn serve_clients(
                                 && parse_request(&c.request, RequestMode::Stop)
                                     .is_ok_and(|(hash, _)| hash == fingerprint)
                             {
-                                return Ok(());
+                                return Ok(ServeEnd::Stopped);
                             }
                             c.response = Some(if end + 4 == c.request.len() {
                                 answer(candidate, &c.request, &mut budget)

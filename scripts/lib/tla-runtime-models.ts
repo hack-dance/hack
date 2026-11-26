@@ -2174,6 +2174,24 @@ const contracts: readonly ModelContract[] = [
         ],
       },
       {
+        // A pipe check that reports end of file while the owner still holds
+        // its writer stops a healthy owner's children: NoFalseExit can fail.
+        name: "serving-exit-spurious-eof",
+        module: "ServingExit",
+        negative: true,
+        invariant: "NoFalseExit",
+        fields: ['owner = "ready"', 'authority = "exited"'],
+      },
+      {
+        // Recovery without its owner-process proof retires a live owner's
+        // records: NoLiveRetire can fail.
+        name: "serving-exit-unproven",
+        module: "ServingExit",
+        negative: true,
+        invariant: "NoLiveRetire",
+        fields: ['owner = "ready"', 'records = "retired"'],
+      },
+      {
         // Reachability: a killed owner is recovered and the next `up` starts.
         name: "serving-exit-recovered",
         module: "ServingExit",

@@ -5145,7 +5145,9 @@ Managed HTTPS authority startup waits up to 30 seconds for the provider lock, as
 owned cleanup does. A routed run started with `hack up -d` takes its shared HTTPS
 lease at the owner's ready line, which is exactly when that run's first `hack exec`
 or `hack run` and a `hack down` arrive; a `hack down` holds the lock for its whole
-graph stop. The wait ends early once the authority's owner exits. Pool identity,
+graph stop. The wait ends early once the authority's owner is gone: before every
+attempt it reads its stdin FIFO without blocking and stops at end of file, on macOS
+as on Linux. Pool identity,
 socket ownership and certificate admission are checked only after the lock is
 acquired; expiry refuses with `provider_busy` and no authority is published.
 Serving and cleanup are never replayed.
@@ -5155,10 +5157,21 @@ before retiring, read under the provider lock too. Each waits out a holder for u
 to 15 seconds (one deadline per verification) instead of refusing at once, so a
 command or a stop during route warm-up no longer makes the acquire refuse (which
 stopped the whole run) or the release unconfirmed. Only `provider_busy` is
-retried; a holder that outlasts the wait is still refused. The frontend that
-spawned the shared owner waits for its whole startup, and its cleanup waits for an
+retried; a holder that outlasts the wait is still refused. Every frontend that
+connects to a starting shared owner waits for its whole startup (about 55
+seconds; a recorded startup failure ends the wait at once), including a second
+project that found the owner already starting. A frontend's cleanup waits for an
 acquisition still in flight before it releases or recovers the lease, so a
 `hack down` during warm-up stops the run with confirmed cleanup.
+
+A graph stop can hold the provider lock longer than the authority's 30 seconds,
+for example for a service with a long `stop_grace_period`. The shared owner's
+startup then fails with `authority-ready: provider_busy`, having admitted no
+lease. When that run's lease is recovered (by its frontend after the graph
+stopped, or by `hack down`), the failed owner generation is retired: its
+diagnostic moves beside a retired-owner record, the release is still verified
+against the stopped graph, and the next `up` starts a new shared owner. `down`
+does not fail and the next `up` needs no recovery because of it.
 
 An authority child that exits before readiness can supply a bounded structured
 native error code without exposing its stderr. Malformed, oversized or missing
@@ -5173,7 +5186,9 @@ reviewed startup stage and an allowlisted native error code; child output, paths
 and application values are omitted. If lease cleanup also fails, the original
 acquisition diagnostic remains visible alongside the unconfirmed cleanup status.
 This record is diagnostic evidence only: it does not acknowledge retirement or
-permit a replacement owner. A missing record (including a helper crash before
+permit a replacement owner. The one exception is the expired authority lease wait
+described above (`authority-ready: provider_busy` with child cleanup confirmed and
+no endpoint published), which a lease recovery retires. A missing record (including a helper crash before
 publication) leaves the cause unknown. Preserve the retained owner and finalization
 records for inspection; do not delete them to force another startup.
 

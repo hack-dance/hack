@@ -229,7 +229,10 @@ export async function nativeProjectOneOff(opts: {
     value = await invoke({
       runtime: opts.runtime,
       cwd: opts.scope.projectRoot,
-      timeoutMs: 330_000,
+      // The owner may first wait up to 15 s for a briefly held provider lease
+      // (HACK-2669), then runs the job for up to 300 s and reads its output
+      // for up to 20 s; do not kill the request first.
+      timeoutMs: 345_000,
       serviceExecResponse: true,
       privateInput: payload,
       args: [

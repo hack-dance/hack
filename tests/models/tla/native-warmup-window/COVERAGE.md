@@ -51,10 +51,24 @@ and take the same lease (dependency refresh, the exec or job itself), and when a
   through `withNativeProviderBusyWait`. The owner's SIGTERM or SIGINT aborts the
   wait. A holder that outlasts it is still refused, with the holder's refusal.
 - Step 1 waits as long as owned cleanup does, 30 s
-  (`AUTHORITY_STARTUP_LEASE_WAIT`), and stops waiting once its owner's stdin pipe
-  closes. The TypeScript budgets follow: authority and Caddy readiness 40 s, and
-  the frontend that spawned the owner waits 55 s for its endpoint, ending early
-  once that process exits (other callers keep 15 s).
+  (`AUTHORITY_STARTUP_LEASE_WAIT`), and stops waiting once its owner is gone:
+  before every attempt one non-blocking `read` of its stdin FIFO sees end of
+  file (Darwin's `poll` reports nothing on a named FIFO whose writer closed, so
+  the first version of this check never fired on macOS). The TypeScript budgets
+  follow: authority and Caddy readiness 40 s, and every connector waits 55 s for
+  the owner's endpoint (`NATIVE_HTTPS_OWNER_STARTUP_WAIT_MS`), not only the one
+  that spawned it, which also stops once that process exits. A recorded startup
+  failure still ends every wait at once.
+- A stop can hold the lease far longer than 30 s (its stop budget reaches
+  540 s, for example `stop_grace_period: 40s`). When the authority gives up
+  behind it (`authority-ready: provider_busy`, child cleanup confirmed, no
+  endpoint ever published, no lease file), that owner generation admitted
+  nothing. The lease's recovery, which the frontend runs only after its graph
+  owner has settled and `down` only after the stop, now retires that generation
+  under the owner admission lock (`retireUnadmittedNativeHttpsOwner`): it writes
+  the retired-owner record, moves the diagnostic beside it, and removes the
+  owner root by identity. The release is then verified through the graph as for
+  any retired owner. Every other startup failure is still retained as before.
 - Cleanup awaits the in-flight acquisition before it chooses between release and
   recovery, and starts none once the graph owner has exited. A refused acquire
   after the owner exited is the stop, not an infrastructure failure.
@@ -75,16 +89,20 @@ shared HTTPS acquisition (`pending`, `authority`, `verify`) with its cleanup
 while someone holds the lease, and a step's wait counts across holders (one
 shared deadline). A step that gives up while the run is ready tears the run down
 (`torn`). A startup failure or an unsettled acquisition at cleanup leaves the
-lifetime `unconfirmed`. `VerifyWait = 0` is the old single read,
-`AuthorityWait = 1` the old 5 s (shorter than a stop), `Await = FALSE` the old
-cleanup.
+lifetime `unconfirmed`, unless `Retire` holds: then cleanup retires the failed
+generation and verifies the release (`releasing`) like any other.
+`VerifyWait = 0` is the old single read, `AuthorityWait = 1` the old 5 s
+(shorter than a stop), `Await = FALSE` the old cleanup, `Retire = FALSE` the
+retained startup failure.
 
 | Config | Result | Shows |
 | --- | --- | --- |
 | `positive` (`VerifyWait = 2`, `AuthorityWait = 5`, `CmdHold = 1`, `StopHold = 3`, await) | 272 distinct states, no error; `WarmupSettles` and `StopSettles` hold under weak fairness | A brief holder never tears the run down (`NoTeardownByBriefHolder`); a stop during warm-up always ends confirmed (`NoRecoveryRequired`); cleanup is never acknowledged while an acquisition can still land (`NoAcquisitionAfterCleanup`) |
 | `negative` (`VerifyWait = 0`) | `NoTeardownByBriefHolder` violated: `torn = TRUE`, `https = "refused"`, `lease = "cmd"` | Rows 1, 3, 4 and HACK-2709 |
 | `nonblocking-release` (`VerifyWait = 0`) | `NoRecoveryRequired` violated: `fin = "unconfirmed"`, `https = "retained"`, `lease = "cmd"` | HACK-2708 |
-| `short-authority-wait` (`AuthorityWait = 1`) | `NoRecoveryRequired` violated: `fin = "unconfirmed"`, `https = "startupFailed"` | HACK-2707, the authority half |
+| `short-authority-wait` (`AuthorityWait = 1`, `Retire = FALSE`) | `NoRecoveryRequired` violated: `fin = "unconfirmed"`, `https = "startupFailed"` | HACK-2707, the authority half |
+| `long-stop` (`StopHold = 7 > AuthorityWait = 5`, retire) | 510 distinct states, no error; every invariant and both properties hold | The outcome no longer depends on the stop's length (#1260 review, M3) |
+| `long-stop-retained` (`StopHold = 7`, `Retire = FALSE`) | `NoRecoveryRequired` violated: `run = "stopped"`, `torn = FALSE`, `fin = "unconfirmed"`, `https = "startupFailed"` | The previous head: a stop longer than the authority's wait still needed recovery |
 | `cleanup-before-settled` (no await) | `NoRecoveryRequired` violated: `fin = "unconfirmed"`, `https = "authority"` | HACK-2707, the cleanup half |
 | `acquire-after-cleanup` (no await) | `NoAcquisitionAfterCleanup` violated: `fin = "confirmed"`, `https = "pending"` | The same omission acknowledged a lifetime whose acquisition had not even recorded its intent |
 | `long-holder` (`CmdHold = 3 > VerifyWait`) | `NoTeardownByBriefHolder` violated: `torn = TRUE`, `https = "refused"`, `lease = "cmd"` | The waits stay bounded: a holder that keeps the lease longer is still refused |
@@ -101,7 +119,8 @@ cleanup.
   `AUTHORITY_STARTUP_LEASE_WAIT`; `provider/hostname_authority/managed.rs`: the
   wait and its owner-pipe check.
 - `src/backends/native-project-https.ts` and `native-https-owner.ts`: the child
-  startup and connect budgets, and the spawned owner's exit.
+  startup and connect budgets, the spawned owner's exit, and
+  `retireUnadmittedNativeHttpsOwner` inside `recoverNativeHttpsLease`.
 - `src/backends/native-project-start.ts`: `readyIngress` and `serveSettled`.
 - `src/backends/native-project-down.ts`: `wait` follows a lease added during
   the stop.
@@ -120,7 +139,15 @@ cleanup.
 - `hostname_authority::managed` tests, on a real flock held by another thread:
   the production wait outlasts a holder longer than the ordinary 5 s, then
   reloads the pool as before; the owner check ends the wait in under 2 s; the
-  pipe check treats end of file as the owner's exit.
+  pipe check treats end of file as the owner's exit, on an anonymous pipe and
+  on a real named FIFO (`owner_fifo_end_of_file_is_the_owners_exit`, which fails
+  with the old `poll` check on macOS); the startup wait ends at once when the
+  owner FIFO's writer closes.
+- `tests/native-https-owner.test.ts`: a startup that admitted nothing is retired
+  by its lease recovery (release still verified, evidence kept, repeatable) and
+  the next owner starts; one with unconfirmed child cleanup stays retained; a
+  second connector waits for a 16 s owner startup as the spawner does. The
+  first and last fail on the previous head.
 - `engine/command_lease_tests.rs`: the shared owner's leased reads
   (`publication::inspect_claims`, `graph::inspect_bridges`) refuse
   `provider_busy` at once, naming the holder, which is the only refusal the
@@ -128,8 +155,17 @@ cleanup.
 
 ## Not modelled
 
-Several commands in sequence (the real reads share one 15 s deadline, so many
-back-to-back holders can still exhaust it), lock fairness between waiters, the
+- Several connectors sharing one owner (#1260 review, M2). The model has one
+  acquisition; the fix is a budget (every connector waits the whole startup),
+  checked by the two-connector test rather than by states.
+- The repeating restart tick and several holders sharing one 15 s deadline. The
+  model has one brief holder. Its time abstraction lets a holder always take the
+  lease before a waiter, so a holder that returns again and again would exhaust
+  any bound, which the real tick (a few milliseconds once a second against a
+  50 ms poll) does not. The real reads still share one 15 s deadline, so many
+  back-to-back holders can exhaust it, and the refusal then names the last one.
+
+Also not modelled: lock fairness between waiters, the
 route checks after admission, Caddy, the shared owner serving several runs, OS
 scheduling, and the VM. The compose one-off path has no dedicated test: building
 a `HostRelayRuntime` and a `Managed` value needs the launcher input path. Only

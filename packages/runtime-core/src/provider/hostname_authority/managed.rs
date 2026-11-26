@@ -47,16 +47,31 @@ fn owner_gone() -> CandidateError {
     )
 }
 
-/// The managed authority's owner keeps the write end of its stdin pipe for the
+/// The managed authority's owner keeps the write end of its stdin FIFO for the
 /// authority's whole lifetime (see `serve_locked`), so end of file means the
-/// owner is gone and a startup that still waits for the lease stops waiting.
-/// Only a pipe is that channel: any other stdin is left for `serve_locked` to
-/// refuse after acquisition, exactly as before. Payload is never a command and
-/// is discarded, as `serve_locked` does.
+/// owner is gone (it exited, was killed, or closed its end) and a startup that
+/// still waits for the lease stops waiting. Only a FIFO is that channel: any
+/// other stdin is left for `serve_locked` to refuse after acquisition, exactly as
+/// before. Payload is never a command and is discarded, as `serve_locked` does.
 fn owner_present() -> Result<(), CandidateError> {
     owner_pipe_open(0)
 }
 
+/// One non-blocking `read` tells the three cases apart on every FIFO: 0 is end
+/// of file (no writer left), `EAGAIN` is a live writer with nothing to say, and
+/// bytes are payload from a live writer. `poll` cannot be used for this: on a
+/// named FIFO Darwin's `poll` reports neither `POLLIN` nor `POLLHUP` after the
+/// last writer closes (it returns 0 with `revents` 0), so a killed owner went
+/// unnoticed and the authority waited out its whole lease wait, then served an
+/// orphaned socket. Production stdin is exactly such a named FIFO
+/// (`spawnNativeHttpsChild` opens it with `exec ... < "$fifo"`). `getppid` was not
+/// chosen: it misses an owner that closes its end without exiting, and depends on
+/// the shell exec'ing the runtime; `kqueue` is Darwin-only.
+///
+/// The open file description is this process's own (the shell opened it and
+/// exec'd), so setting `O_NONBLOCK` for the one read affects no other reader. The
+/// previous flags are restored before returning, because `serve_locked` reads
+/// the same descriptor after its own `poll`.
 fn owner_pipe_open(fd: libc::c_int) -> Result<(), CandidateError> {
     let mut input = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(fd, input.as_mut_ptr()) } != 0 {
@@ -66,19 +81,24 @@ fn owner_pipe_open(fd: libc::c_int) -> Result<(), CandidateError> {
     if input.st_mode & libc::S_IFMT != libc::S_IFIFO {
         return Ok(());
     }
-    let mut ready = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    if unsafe { libc::poll(&mut ready, 1, 0) } <= 0 || ready.revents == 0 {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Ok(());
+    }
+    if flags & libc::O_NONBLOCK == 0
+        && unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+    {
         return Ok(());
     }
     let mut bytes = [0u8; 64];
-    if unsafe { libc::read(fd, bytes.as_mut_ptr().cast(), bytes.len()) } <= 0 {
-        return Err(owner_gone());
+    let read = unsafe { libc::read(fd, bytes.as_mut_ptr().cast(), bytes.len()) };
+    if flags & libc::O_NONBLOCK == 0 {
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
     }
-    Ok(())
+    // Only end of file is the owner's exit. `EAGAIN` is a live writer; any
+    // other error (such as `EINTR`) proves nothing, and the next attempt checks
+    // again.
+    if read == 0 { Err(owner_gone()) } else { Ok(()) }
 }
 
 fn serve_with_startup_wait(
@@ -302,5 +322,80 @@ mod tests {
         assert!(idle.is_ok());
         assert!(payload.is_ok());
         assert!(matches!(closed, Err(e) if e.code == "provider_acquisition_cancelled"));
+    }
+
+    /// A named FIFO opened the way `spawnNativeHttpsChild` opens the
+    /// authority's stdin: a reader exists before the writer opens, and the
+    /// authority's end is a blocking read end. Returns (reader, writer).
+    fn owner_fifo(fixture: &Fixture) -> (libc::c_int, libc::c_int) {
+        let path = fixture.0.join("owner-stdin");
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let reader = unsafe { libc::open(name.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+        assert!(reader >= 0);
+        let writer = unsafe { libc::open(name.as_ptr(), libc::O_WRONLY) };
+        assert!(writer >= 0);
+        let flags = unsafe { libc::fcntl(reader, libc::F_GETFL) };
+        assert_eq!(
+            unsafe { libc::fcntl(reader, libc::F_SETFL, flags & !libc::O_NONBLOCK) },
+            0
+        );
+        (reader, writer)
+    }
+
+    /// Production stdin is a named FIFO, not an anonymous pipe. On Darwin `poll`
+    /// reports nothing on a named FIFO whose writer has closed (`revents` 0), so
+    /// the old `poll`-based check never saw a killed owner (#1260 review, M1).
+    /// The check must see end of file there too, leave a blocking descriptor
+    /// blocking for `serve_locked`, and treat a live writer as present.
+    #[test]
+    fn owner_fifo_end_of_file_is_the_owners_exit() {
+        let fixture = Fixture::new();
+        let (reader, writer) = owner_fifo(&fixture);
+        let blocking = unsafe { libc::fcntl(reader, libc::F_GETFL) };
+        assert!(owner_pipe_open(reader).is_ok(), "a live writer is present");
+        assert_eq!(unsafe { libc::fcntl(reader, libc::F_GETFL) }, blocking);
+        assert_eq!(unsafe { libc::write(writer, b"x".as_ptr().cast(), 1) }, 1);
+        assert!(owner_pipe_open(reader).is_ok(), "payload is discarded");
+        unsafe { libc::close(writer) };
+        let closed = owner_pipe_open(reader);
+        assert_eq!(unsafe { libc::fcntl(reader, libc::F_GETFL) }, blocking);
+        unsafe { libc::close(reader) };
+        assert!(
+            matches!(&closed, Err(e) if e.code == "provider_acquisition_cancelled"),
+            "{closed:?}"
+        );
+    }
+
+    /// The whole startup wait, with the production owner check reading a real
+    /// named FIFO whose writer goes away while the lease is held: the wait ends
+    /// at once instead of running to its 30 s bound and then serving.
+    #[test]
+    fn authority_startup_wait_ends_when_the_owner_fifo_closes() {
+        let fixture = Fixture::new();
+        let candidate = fixture.candidate();
+        let root = candidate.state_root.join("run/smolvm");
+        let _held = state::Lock::acquire(&root).unwrap();
+        let (reader, writer) = owner_fifo(&fixture);
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            unsafe { libc::close(writer) };
+        });
+        let start = Instant::now();
+        let result = serve_with_startup_wait(
+            &candidate,
+            None,
+            lifecycle::AUTHORITY_STARTUP_LEASE_WAIT,
+            &|| owner_pipe_open(reader),
+        );
+        closer.join().unwrap();
+        unsafe { libc::close(reader) };
+        assert!(start.elapsed() >= Duration::from_millis(100));
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(
+            matches!(&result, Err(e) if e.code == "provider_acquisition_cancelled"),
+            "{result:?}"
+        );
+        assert!(!root.join("owner.json").exists());
     }
 }

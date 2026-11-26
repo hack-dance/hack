@@ -17,11 +17,16 @@
 (*                                                                           *)
 (* Old behaviour: VerifyWait = 0 (one nonblocking read), AuthorityWait = 1   *)
 (* (5 s, shorter than a stop), Await = FALSE (cleanup did not wait for an    *)
-(* acquisition still in flight, nor did a late acquisition stop after it).   *)
+(* acquisition still in flight, nor did a late acquisition stop after it),   *)
+(* Retire = FALSE (a startup failure always stayed retained).                *)
 (* Fix: the reads wait out contention (15 s), the authority waits as long as *)
-(* owned cleanup does (30 s), and cleanup awaits the in-flight acquisition.  *)
+(* owned cleanup does (30 s), cleanup awaits the in-flight acquisition, and  *)
+(* recovery retires an owner generation whose startup admitted nothing, then *)
+(* verifies the release through the retired record (Retire). The last one   *)
+(* makes the outcome independent of the stop's length: a stop can hold the   *)
+(* lease far longer than any authority wait (StopHold > AuthorityWait).      *)
 EXTENDS Naturals
-CONSTANTS VerifyWait, AuthorityWait, CmdHold, StopHold, Await
+CONSTANTS VerifyWait, AuthorityWait, CmdHold, StopHold, Await, Retire
 VARIABLES run, lease, held, https, waited, cmd, torn, fin, refusedSeen
 vars == <<run, lease, held, https, waited, cmd, torn, fin, refusedSeen>>
 
@@ -91,13 +96,18 @@ StopDone == /\ lease = "stop"
 
 (* The frontend's cleanup after the graph stopped. With Await it first lets *)
 (* the acquisition settle. An admitted or refused lease is released (a      *)
-(* verified release); no intent needs nothing; an owner still starting or   *)
-(* one whose startup failed leaves nothing to release or recover.           *)
+(* verified release); no intent needs nothing; an owner still starting      *)
+(* leaves nothing to release or recover. A startup failure admitted nothing *)
+(* (the authority's lease wait expired): with Retire, recovery retires that *)
+(* owner generation and verifies the release through the retired record,    *)
+(* which reads under the lease like any release; without it the failure is  *)
+(* retained and the lease cannot be recovered.                              *)
 CleanupStart ==
   /\ run = "stopped" /\ fin = "open"
   /\ https \notin {"releasing", "released", "retained"}
   /\ (Await => https \notin InFlight)
   /\ IF https \in {"admitted", "refused"}
+        \/ (Retire /\ https = "startupFailed")
        THEN /\ https' = "releasing" /\ waited' = 0
             /\ UNCHANGED fin
        ELSE /\ fin' = IF https \in {"pending", "none"}

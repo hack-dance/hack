@@ -44,7 +44,11 @@ pub fn command(
                 environment,
             }),
         },
-        Duration::from_secs(options.timeout_seconds + 20),
+        // The owner first waits up to `COMMAND_LEASE_WAIT` for a briefly held
+        // provider lease (see `handle`), then runs the job for its timeout, then
+        // reads its output: read the answer for all three.
+        Duration::from_secs(options.timeout_seconds + 20)
+            + crate::provider::lifecycle::COMMAND_LEASE_WAIT,
     )
 }
 fn send(
@@ -121,9 +125,12 @@ pub(super) fn handle(
     // inside one shared bound of `COMMAND_LEASE_WAIT`, instead of refusing
     // `provider_busy` (HACK-2669, row 3). Only acquisition is retried, all of it
     // before the job reservation, so nothing is replayed. This runs on the
-    // owner's only loop thread: a pending signal or a disconnected client ends
-    // the wait before the next attempt, and a lasting holder is still refused
-    // with the holder named.
+    // owner's only loop thread, so for the length of the wait (at most
+    // `COMMAND_LEASE_WAIT`) the loop serves nothing else: a `hack down` request
+    // waits in the listener backlog (its request bound is far longer) and the
+    // restart tick runs late. Only a pending signal or this client's disconnect
+    // ends the wait early, before the next attempt; a lasting holder is still
+    // refused with the holder named.
     let watch = transport::ClientWatch::half_closed(stream)?;
     let check = || {
         if signals::startup_pending() || watch.disconnected() {

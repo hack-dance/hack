@@ -2069,6 +2069,27 @@ const contracts: readonly ModelContract[] = [
         fields: ['fin = "unconfirmed"', 'https = "startupFailed"'],
       },
       {
+        // #1260 review, M3: a stop that holds the lease longer than the
+        // authority's wait (StopHold > AuthorityWait) still ends confirmed:
+        // recovery retires the owner generation that admitted nothing.
+        name: "long-stop",
+        negative: false,
+        states: 510,
+      },
+      {
+        // #1260 review, M3: the same long stop with the startup failure
+        // retained (the head before this fix) needs recovery.
+        name: "long-stop-retained",
+        negative: true,
+        invariant: "NoRecoveryRequired",
+        fields: [
+          'run = "stopped"',
+          "torn = FALSE",
+          'fin = "unconfirmed"',
+          'https = "startupFailed"',
+        ],
+      },
+      {
         // HACK-2707: cleanup did not wait for the in-flight acquisition.
         name: "cleanup-before-settled",
         negative: true,

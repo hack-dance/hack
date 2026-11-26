@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { lstat, mkdir, realpath } from "node:fs/promises";
+import { lstat, mkdir, readdir, realpath, rmdir } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { ClosedCliError } from "../lib/cli-result.ts";
@@ -35,6 +35,8 @@ import {
   nativeHttpsReadFile,
   nativeHttpsReadRelease,
   nativeHttpsReadRetiredOwner,
+  nativeHttpsRecordRetiredOwner,
+  nativeHttpsRemoveFile,
   nativeHttpsWriteNew,
 } from "./native-https-owner-storage.ts";
 import { nativeHttpsReleaseReplyError } from "./native-https-release-failure.ts";
@@ -323,10 +325,14 @@ async function endpointFor(
 }
 
 /**
- * How long the frontend that spawned a shared owner waits for it to publish its
+ * How long a connector waits for a starting shared owner to publish its
  * endpoint: longer than the owner's whole child startup (the authority's lease
- * wait included), so it never gives up on an owner that is still starting, then
- * finds nothing it can release or recover.
+ * wait included), so no connector gives up on an owner that is still starting,
+ * then finds nothing it can release or recover. That holds for every connector,
+ * not only the frontend that spawned the owner: a second project that found the
+ * configuration and waited only 15 s had its run aborted and its recovery left
+ * unconfirmed (#1260 review, M2). A failed owner still fails fast: its recorded
+ * startup failure ends the wait (`endpointFor`).
  */
 export const NATIVE_HTTPS_OWNER_STARTUP_WAIT_MS =
   NATIVE_HTTPS_CHILD_STARTUP_MS + 15_000;
@@ -335,17 +341,14 @@ export async function connectNativeHttpsOwner(
   configuration: NativeHttpsOwnerConfiguration,
   waitForStartup = true,
   /**
-   * The frontend that spawned this owner waits for its whole startup
-   * ({@link NATIVE_HTTPS_OWNER_STARTUP_WAIT_MS}), ending early once that
-   * process exits. Other callers wait the ordinary 15 s.
+   * The frontend that spawned this owner also stops waiting once that process
+   * exits. Every connector waits for the whole startup
+   * ({@link NATIVE_HTTPS_OWNER_STARTUP_WAIT_MS}).
    */
   spawned?: NativeHttpsSpawnedOwner
 ): Promise<Socket> {
-  let startupWaitMs = 1;
-  if (waitForStartup) {
-    startupWaitMs = spawned ? NATIVE_HTTPS_OWNER_STARTUP_WAIT_MS : 15_000;
-  }
-  const deadline = Date.now() + startupWaitMs;
+  const deadline =
+    Date.now() + (waitForStartup ? NATIVE_HTTPS_OWNER_STARTUP_WAIT_MS : 1);
   for (;;) {
     try {
       const endpoint = await endpointFor(configuration);
@@ -494,9 +497,9 @@ export async function acquireNativeHttpsLease(
   await opts.onIntent?.(intended);
   let socket: Socket;
   try {
-    // An owner this frontend just spawned may be waiting out a `hack down`
-    // of the same run for the provider lease (HACK-2707): wait for its whole
-    // startup rather than give up while it is still starting.
+    // A starting owner may be waiting out a `hack down` of the same run for
+    // the provider lease (HACK-2707): wait for its whole startup rather than
+    // give up while it is still starting.
     socket = await connectNativeHttpsOwner(configuration, true, spawned);
   } catch (startupFailure) {
     throw new NativeHttpsLeaseAcquisitionError(intended, { startupFailure });
@@ -677,6 +680,153 @@ async function archivePreviousBootSharedHttps(opts: {
   return false;
 }
 
+/** Absence as a value; anything other than ENOENT (a foreign entry) refuses. */
+async function nativeHttpsPathAbsent(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return false;
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return true;
+    }
+    throw nativeHttpsOwnerRefused();
+  }
+}
+
+/**
+ * A startup failure that admitted nothing by contract: the hostname authority's
+ * lease wait expired (`authority-ready: provider_busy`, "no operation was
+ * admitted") and the owner confirmed its child pair stopped.
+ */
+function admittedNothing(
+  failure: NativeHttpsStartupError | undefined
+): boolean {
+  return (
+    failure !== undefined &&
+    failure.diagnostic.stage === "authority-ready" &&
+    failure.diagnostic.nativeCode === "provider_busy" &&
+    !failure.diagnostic.cleanupUnconfirmed
+  );
+}
+
+/**
+ * Retire the current owner generation of `identity` when its startup failed
+ * having admitted nothing (#1260 review, M3; HACK-2707 for any stop length).
+ *
+ * The authority waits 30 s for the provider lease, but a graph stop holds it
+ * for as long as the run's stop grace periods take (up to 540 s). A `hack down`
+ * right after `up -d` whose stop outlasts the wait made the shared owner's
+ * startup fail, and that failure was retained: the frontend's recovery of its
+ * lease could not be confirmed (`down` exited 1) and every later acquisition
+ * found the failed generation (the next `up` needed recovery). The retained
+ * record now no longer blocks once a recovery of a lease of that generation
+ * runs, which the frontend does only after its graph owner has settled and
+ * `down` only after the stop:
+ *
+ * - The record proves the generation never ran: the owner records a startup
+ *   failure only while still starting, so it never admitted a lease, and with
+ *   no `endpoint.json` no client could ever reach it. The lease directory must
+ *   still be empty and the child pair confirmed stopped.
+ * - Only `authority-ready: provider_busy` qualifies (see `admittedNothing`).
+ *   Every other startup failure is still retained as evidence, unchanged.
+ * - Under the owner admission lock (which also serializes a new owner's
+ *   creation) it writes the retired-owner record, moves the diagnostic beside
+ *   it as evidence, and removes the root by exact identity. Every step is
+ *   repeatable, so an interrupted retirement resumes on the next recovery.
+ *
+ * The caller's retired-owner branch then verifies this lease's release through
+ * the graph (graph, bridges and publication claims), as for an idle-retired
+ * owner; no lease is acknowledged here.
+ */
+async function retireUnadmittedNativeHttpsOwner(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly identity: NativeHttpsLeaseIdentity;
+}): Promise<void> {
+  const home = opts.runtime.home;
+  const root = nativeHttpsOwnerRoot(home);
+  // Anything else (no owner, another generation, a live or foreign one, an
+  // unreadable record) is left to the rest of recovery, exactly as before.
+  const current = async () => {
+    try {
+      const configuration = await readNativeHttpsOwnerConfiguration(
+        opts.runtime
+      );
+      if (
+        configuration.ownerGeneration === opts.identity.ownerGeneration &&
+        configuration.binding.pool.owner === opts.identity.owner &&
+        admittedNothing(await readNativeHttpsStartupFailure(configuration))
+      ) {
+        return configuration;
+      }
+    } catch {
+      // Left to the rest of recovery.
+    }
+    return;
+  };
+  if (!(await current())) {
+    return;
+  }
+  const admission = await acquireNativeHttpsOwnerAdmission({
+    home,
+    waitMs: 15_000,
+  });
+  try {
+    // Everything again under admission: nothing can create or publish here now.
+    const configuration = await current();
+    if (!configuration) {
+      return;
+    }
+    // An endpoint was published: a client could have reached this owner.
+    if (!(await nativeHttpsPathAbsent(join(root, "endpoint.json")))) {
+      return;
+    }
+    await nativeHttpsPrivateDirectory(join(root, "leases"));
+    if ((await readdir(join(root, "leases"))).length !== 0) {
+      return;
+    }
+    const configurationFile = await nativeHttpsReadFile(
+      join(root, "configuration.json")
+    );
+    const failureFile = await nativeHttpsReadFile(
+      join(root, "startup-failure.json")
+    );
+    const generation = configuration.ownerGeneration;
+    try {
+      await nativeHttpsReadRetiredOwner(home, generation);
+    } catch (error) {
+      if (!isRecord(error) || error.code !== "ENOENT") {
+        throw error;
+      }
+      await nativeHttpsRecordRetiredOwner(configuration);
+    }
+    const evidence = join(
+      home,
+      "native-https",
+      "released-leases",
+      generation,
+      "startup-failure.json"
+    );
+    if (await nativeHttpsPathAbsent(evidence)) {
+      await nativeHttpsWriteNew(
+        evidence,
+        JSON.parse(failureFile.bytes.toString("utf8"))
+      );
+    }
+    await nativeHttpsRemoveFile(
+      join(root, "startup-failure.json"),
+      failureFile.identity
+    );
+    await nativeHttpsRemoveFile(
+      join(root, "configuration.json"),
+      configurationFile.identity
+    );
+    await rmdir(join(root, "leases"));
+    await rmdir(root);
+  } finally {
+    await admission.release();
+  }
+}
+
 /** Recovery never treats absent/dead helper state as permission to adopt its children. */
 export async function recoverNativeHttpsLease(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -713,6 +863,9 @@ export async function recoverNativeHttpsLease(opts: {
       throw error;
     }
   }
+  // An owner generation whose startup failed having admitted nothing is
+  // retired first; the retired-owner branch below then verifies the release.
+  await retireUnadmittedNativeHttpsOwner(opts);
   try {
     const retired = await nativeHttpsReadRetiredOwner(
       opts.runtime.home,

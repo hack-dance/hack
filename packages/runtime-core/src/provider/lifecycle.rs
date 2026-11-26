@@ -329,7 +329,11 @@ pub(super) const COMMAND_LEASE_WAIT: Duration = Duration::from_secs(15);
 /// next `up` refused `E_RECOVERY_REQUIRED` (HACK-2707). The authority therefore
 /// waits as long as owned cleanup does. Waiting admits nothing: the pool identity is
 /// reloaded after acquisition, and the wait ends early once the authority's owner is
-/// gone (its stdin pipe closed). On expiry the refusal still names the holder.
+/// gone (a non-blocking read of its stdin FIFO sees end of file). On expiry the
+/// refusal still names the holder. A stop can hold the lease longer than this (its
+/// stop budget reaches 540 s); that expiry admitted nothing, and the lease's
+/// recovery retires the failed owner generation (`retireUnadmittedNativeHttpsOwner`
+/// in `native-https-owner.ts`), so the outcome does not depend on the stop's length.
 pub(super) const AUTHORITY_STARTUP_LEASE_WAIT: Duration = Duration::from_secs(30);
 
 /// Startup's provider lease. Everything `start_pool` does before taking it is read-only

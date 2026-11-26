@@ -1998,7 +1998,10 @@ has env values that the run did not start with (for example after
 and starts no command; run `hack down`, then `hack up`, to start with them. A one-off
 `hack run <service> <cmd...>` replaces the service's command and keeps its entrypoint,
 as Compose `run` does, with or without `--` and whether or not the run started with
-private env values. Neither command persists application output in runtime
+private env values. A run started with private env values by 5.0.0-next.28 or
+earlier keeps appending the command to the service's own command after an upgrade,
+because its running owner still serves `hack run`; one `hack down`, then `hack up`,
+fixes it. Neither command persists application output in runtime
 receipts; output can contain sensitive application values and should be handled
 accordingly.
 

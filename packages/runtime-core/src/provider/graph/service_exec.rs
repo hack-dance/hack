@@ -36,9 +36,24 @@ fn refused() -> CandidateError {
     )
 }
 
-/// Fresh values arrived for a run that started without private environment
-/// delivery: the service env changed after `up` (HACK-2740). Exec never attaches
-/// delivery to a running container; only a fresh start applies the change.
+/// Fresh values arrived for a service whose exact container started without
+/// private environment delivery: its env changed after `up` (HACK-2740). Exec
+/// never attaches delivery to a running container; only a fresh start applies
+/// the change. The check is per service: another service's delivery (the
+/// run-wide `environment_attached` bit) does not count, only the selected
+/// container's own payload mount.
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "environment-launcher")),
+    allow(dead_code)
+)]
+fn started_with_environment(attached: bool, mounted: Option<&str>) -> Result<(), CandidateError> {
+    if attached && mounted.is_some() {
+        Ok(())
+    } else {
+        Err(environment_changed())
+    }
+}
+
 #[cfg_attr(
     not(all(target_os = "macos", feature = "environment-launcher")),
     allow(dead_code)
@@ -128,9 +143,7 @@ pub(super) fn interactive(
         #[cfg(feature = "environment-launcher")]
         {
             managed.validate_binding(&receipt.plan_id, &receipt.run)?;
-            if !receipt.environment_attached {
-                return Err(environment_changed());
-            }
+            started_with_environment(receipt.environment_attached, mounted_slot.as_deref())?;
             if managed.values().len() != 1
                 || managed
                     .values()
@@ -268,16 +281,15 @@ fn service_exec_inner(
         #[cfg(all(target_os = "macos", feature = "environment-launcher"))]
         {
             managed.validate_binding(&receipt.plan_id, &receipt.run)?;
-            if !receipt.environment_attached {
-                return Err(environment_changed());
-            }
+            let mounted = mounted_environment_slot(&container)?;
+            started_with_environment(receipt.environment_attached, mounted.as_deref())?;
             let slot = super::super::environment_recovery::active_exec_slot(
                 candidate,
                 engine.guest(),
                 &receipt.run,
                 options.service,
                 &resource.name,
-                mounted_environment_slot(&container)?.as_deref(),
+                mounted.as_deref(),
             )?;
             // The existing allocation must still belong to this exact container.
             // Its expiry is not renewed or read; only this command gets fresh values.
@@ -739,5 +751,16 @@ mod tests {
         let message = value["message"].as_str().unwrap();
         assert!(message.len() <= 400 && message.bytes().all(|b| (0x20..0x7f).contains(&b)));
         assert!(message.contains("hack down, then hack up"));
+        // Per service: another service's delivery does not count for this one.
+        let slot = Some("hack-env-lease-1");
+        assert!(started_with_environment(true, slot).is_ok());
+        for (attached, mounted) in [(true, None), (false, slot), (false, None)] {
+            assert_eq!(
+                started_with_environment(attached, mounted)
+                    .unwrap_err()
+                    .code,
+                "graph_service_exec_environment_changed"
+            );
+        }
     }
 }

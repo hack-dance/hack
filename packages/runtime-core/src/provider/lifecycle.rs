@@ -384,7 +384,7 @@ pub(super) const STARTUP_LEASE_WAIT: Duration = Duration::from_secs(5);
 /// what a holder that keeps the lease longer (a stop with dependent services stopped
 /// in turn, another project's cold start) gets. `hack exec`'s requesting process
 /// waits as long ([`COMMAND_REQUEST_LEASE_WAIT`]); its owner-side waits keep
-/// [`COMMAND_LEASE_WAIT`], and `ps` and `logs` take no wait.
+/// `COMMAND_LEASE_WAIT`, and `ps` and `logs` take no wait.
 pub(super) const START_LEASE_WAIT: Duration = Duration::from_secs(30 + 5);
 
 /// How long a one-shot service command (`hack exec`, and the dependency refresh that
@@ -402,7 +402,8 @@ pub(super) const START_LEASE_WAIT: Duration = Duration::from_secs(30 + 5);
 /// answer to a refresh, `hack run`'s job, the authored `exec` inside its 30 s
 /// budget), where a longer wait would hold up that owner's `hack down` and
 /// restart ticks. The requesting process of `hack exec` waits
-/// [`COMMAND_REQUEST_LEASE_WAIT`] instead.
+/// [`COMMAND_REQUEST_LEASE_WAIT`] instead. Every user runs on macOS only.
+#[cfg(target_os = "macos")]
 pub(super) const COMMAND_LEASE_WAIT: Duration = Duration::from_secs(15);
 
 /// How long the requesting process of a one-shot service command waits for a
@@ -410,7 +411,7 @@ pub(super) const COMMAND_LEASE_WAIT: Duration = Duration::from_secs(15);
 /// `hack exec` and `hack run` send first (`graph refresh-dependencies`, client
 /// side), and the exec itself (`graph exec`). Another project's `hack down` holds
 /// the lease for its whole graph stop, up to the 30 s per-service stop grace, so
-/// an exec in a ready project that gave up after [`COMMAND_LEASE_WAIT`] refused
+/// an exec in a ready project that gave up after `COMMAND_LEASE_WAIT` (15 s) refused
 /// `provider_busy` while that stop still ran, with nothing sent to its owner.
 ///
 /// It is [`START_LEASE_WAIT`] by definition, not a second number of the same

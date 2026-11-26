@@ -638,6 +638,15 @@ pub fn exec(
     if !selected.valid() {
         return Err(refused());
     }
+    // HACK-2739: wait out another project's stop here, in the requesting
+    // process, before anything is sent. The owner's own wait stays short
+    // because it blocks the owner's only loop. On expiry this returns the raw
+    // `provider_busy` naming the holder: nothing was sent and nothing ran.
+    #[cfg(target_os = "macos")]
+    crate::provider::lifecycle::await_free_command_lease(
+        candidate,
+        Instant::now() + crate::provider::lifecycle::COMMAND_REQUEST_LEASE_WAIT,
+    )?;
     request_selected(candidate, run, Action::Exec, None, Some(selected), None)
 }
 /// Exactly one finite noninteractive one-off service command in a fresh container

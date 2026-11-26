@@ -1011,7 +1011,8 @@ that stops its own run records itself as `project stop` in the lock, whether aft
 names the project. If the holder keeps the lease past 35 seconds, the start refuses
 `provider_busy` with nothing started, names the holder, and tells you to retry the
 same command once that holder finishes. You do not need `hack down` or a pool stop
-first. `hack exec` waits up to the same 35 seconds for each of its two lease steps
+first. `hack exec` waits up to the same 35 seconds for each of its two lease steps,
+and in an authored project for its one request before it is sent
 (see [Normal native exec](#normal-native-exec)). `hack ps` and `hack logs` keep their
 short observer behavior, and the inspection a foreground start makes after it ends
 (after Ctrl-C, for example) keeps its 5-second bound.
@@ -5468,12 +5469,25 @@ refusal whose command never ran also releases a background command's admission
 slot. Fresh per-command values sent with exec have a 65-second delivery lifetime,
 which covers the whole 35-second wait. "Unconfirmed" is kept for outcomes where the command may have run: a
 refresh or exec that was sent and whose answer did not arrive or did not match.
-For compose-backed exec the 30-second budget starts after that wait. An authored
-project's exec and one-off `run`, and a compose project's one-off `run`, are
-answered by the project's owner, which waits at most 15 seconds on its only loop
-(inside the authored 30-second budget, or for a compose `run` within one 15-second
-bound for its selection and admission before its job is reserved). A pending
-Ctrl-C or `hack down` ends the owner's wait at once without starting the command. When fresh values are delivered through private stdin, output that is still arriving
+For compose-backed exec the 30-second budget starts after that wait.
+
+An authored project's exec (`hack.project.json`) sends one request to the project's
+owner. Before it sends anything, the requesting command waits up to the same 35
+seconds for the provider lease to be free, prints the same single progress line, and
+refuses the same way on expiry, with `nothing ran`. When nothing holds the lease this
+is one lock attempt, so exec is as fast as before. The owner then takes the lease on
+its only loop and waits at most 15 seconds, inside the authored 30-second budget, so
+a long wait never holds up that owner's own `hack down` or restart ticks. If another
+holder took the lease between the two waits and the owner's wait expires, the owner
+answers `graph_authored_exec_lease_busy` before it reads its journal or touches a
+container, and exec says `nothing ran` with `Holder: unavailable.` and `Retry hack
+exec once the holder finishes.` Any other authored exec failure keeps its report,
+"completion is unconfirmed" included. An authored project's one-off `run`,
+interactive exec and a compose project's one-off `run` are answered by the project's
+owner, which waits at most 15 seconds on its only loop (inside the authored
+30-second budget, or for a compose `run` within one 15-second bound for its
+selection and admission before its job is reserved). A pending Ctrl-C or `hack down`
+ends the owner's wait at once without starting the command. When fresh values are delivered through private stdin, output that is still arriving
 or already queued when that budget ends is read to the end, so a command that finished on a
 busy host returns its exit code (see below). `--env` and `--profile` changes are refused. A command name such as `bun`
 uses the selected container's PATH; no host PATH or implicit shell is used. For

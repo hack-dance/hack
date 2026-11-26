@@ -2315,6 +2315,73 @@ const contracts: readonly ModelContract[] = [
         invariant: "NoSendWhileHeld",
         fields: ["sentHeld = TRUE", "sent = TRUE", 'phase = "sent"'],
       },
+      {
+        // HACK-2739: authored `hack exec` during another project's 31 s stop.
+        // The requesting process waits 35 s for a free lease and sends nothing;
+        // the owner's own wait keeps 15 s (SecondBound) on its only loop. The
+        // exec outlasts the stop and is never refused.
+        name: "authored-outlasts-stop",
+        module: "ExecStopWait",
+        negative: false,
+        states: 192,
+      },
+      {
+        // A second holder may take the lease between the requester's wait and
+        // the owner's, and a stop may outlast the requester's bound: every
+        // refusal is still reported as not run, and "unconfirmed" only follows
+        // a send.
+        name: "authored-peer-race",
+        module: "ExecStopWait",
+        negative: false,
+        states: 293,
+      },
+      {
+        // That race is reachable: the owner's 15 s wait refuses as not run,
+        // nothing sent (the owner's pre-effect code).
+        name: "authored-peer-refused",
+        module: "ExecStopWait",
+        negative: true,
+        invariant: "NeverRefusedAtSecondWait",
+        fields: [
+          'phase = "refused"',
+          'report = "not-run"',
+          "sent = FALSE",
+          "elapsed = 15",
+          "holds = 2",
+        ],
+      },
+      {
+        // The failure confirmed on a real VM: no requester wait, the owner's
+        // 15 s wait expired during the stop, and it was reported as
+        // unconfirmed although nothing ran.
+        name: "authored-old",
+        module: "ExecStopWait",
+        negative: true,
+        invariant: "UnconfirmedOnlyAfterSend",
+        fields: [
+          'phase = "refused"',
+          'report = "unconfirmed"',
+          "sent = FALSE",
+          "elapsed = 15",
+        ],
+      },
+      {
+        // An honest refusal alone is not the fix: without the requester's
+        // wait the exec still refuses at 15 s while the stop runs.
+        name: "authored-honest-no-wait",
+        module: "ExecStopWait",
+        negative: true,
+        invariant: "StopNeverRefuses",
+        fields: ['phase = "refused"', 'report = "not-run"', "elapsed = 15"],
+      },
+      {
+        // The authored exec runs after the stop held the lease for all 31 s.
+        name: "authored-ran-after-stop",
+        module: "ExecStopWait",
+        negative: true,
+        invariant: "NeverRanAfterStop",
+        fields: ['report = "ran"', "sent = TRUE", "held = 31"],
+      },
     ],
   },
   {

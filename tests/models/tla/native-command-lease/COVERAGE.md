@@ -30,7 +30,8 @@ nothing would hold Ctrl-C, `hack down` and the restart tick for up to 15 s
 | `dependency_refresh::handle` | owner loop | `Engine::connect_command` | `signals.pending()`, client disconnect, the 170 s answer deadline | the wait counts inside the 170 s answer |
 | `service_exec` (`graph exec`, finite exec) | requesting CLI | `Engine::connect_command_request` (35 s, HACK-2729) | expiry of fresh per-command values (`managed.deadline()`), if any | exec timeout starts after acquisition; frontend 95 s |
 | `service_exec::interactive` (compose) | CLI | `Engine::connect_command_until` | the frontend's `live` check | counts against the interactive deadline |
-| `native::runtime::exec::execute`, `exec::interactive`, `run::execute` (authored) | owner loop | `Engine::connect_command_until` | the owner's guard: signals, publication, pin (and client disconnect for interactive) | counts against the fixed 30 s budget |
+| `native::foreground::exec` (authored finite exec, `graph native exec`) | requesting CLI | `lifecycle::await_free_command_lease` (35 s, HACK-2739): waits for a free lease and releases it, no engine connection | none (Ctrl-C ends the process) | before the send; then the fixed 40 s read; frontend 85 s |
+| `native::runtime::exec::execute`, `exec::interactive`, `run::execute` (authored) | owner loop | `Engine::connect_command_until` | the owner's guard: signals, publication, pin (and client disconnect for interactive) | counts against the fixed 30 s budget; `execute` maps its expiry to `graph_authored_exec_lease_busy` (HACK-2739) |
 
 The authored paths keep the wait inside their 30 s budget on purpose: the
 native requester (`request_selected`) reads the owner's answer for a fixed
@@ -146,6 +147,89 @@ Tests:
 The model abstracts fresh per-command values (their lifetime is now 65 s, so
 it covers the exec's whole 35 s wait) and the owner-side waits of interactive
 `exec` and `hack run`, which keep 15 s.
+
+## Authored exec beside another project's stop (HACK-2739)
+
+Confirmed on a real VM: while another project's 30 s stop held the provider
+lease, `hack exec` in an authored project (`hack.project.json`) exited 1
+after 15.1 s with `E_LIFECYCLE_FAILED ... completion is unconfirmed ... No
+request was replayed`, and no progress line. The command never ran. An
+authored exec sends one request to its owner, and the only lease wait was the
+owner's own (`native/runtime/exec.rs` `execute`): 15 s inside a fixed 30 s
+budget, on the owner's only loop thread. The requester reads the owner's answer
+for a fixed 40 s (`foreground::request_selected`), and a longer owner wait
+would also hold up that owner's `hack down` and restart ticks. The CLI turned
+every failure, the owner's `provider_busy` included, into "unconfirmed".
+
+The fix moves the long wait to the requesting process, as the Compose refresh
+does. `native::foreground::exec` first calls
+`lifecycle::await_free_command_lease`, which waits up to
+`COMMAND_REQUEST_LEASE_WAIT` (35 s) through the same
+`state::wait_for_acquisition` loop (so the same `hack.lease-wait` report), then
+releases the lease and sends. It does not use `Engine::connect_command_request`:
+that opens an engine connection and runs the pool audit and a version request
+after acquisition, which the owner repeats at once, so it would add a full
+engine connection to every authored exec. The bare lock attempt costs one
+`flock` when the lease is free, and any other failure to take the lock (no
+provider state, no lock file) goes on to the owner, which answers as before.
+The wait does not read the pool record: while a `runtime down` or a cold start
+holds the lock, the requester waits up to 35 s and may refuse `provider_busy`
+naming that holder, instead of the owner's quick `runtime_not_running`. That
+refusal is pre-effect and bounded, so it is kept. On expiry the requester returns the raw `provider_busy`
+naming the holder: nothing was sent. The owner keeps its 15 s; if another
+holder took the lease in between and that wait expires, `execute` answers
+`graph_authored_exec_lease_busy` before it reads the journal or touches a
+container. The CLI reports both as "nothing ran" (`native-authored-project-exec.ts`),
+releases a background command's admission slot, and keeps "unconfirmed" for
+everything else.
+
+`ExecStopWait.tla` models this path with the same two waits: the first
+(`phase = "refresh"`) is the requester's wait, which sends nothing; the second
+(`phase = "exec"`) is the owner's, with its own bound `SecondBound = 15`.
+`Probe = FALSE` is the authored path before the fix (only the owner's wait).
+The Compose configs set `SecondBound = Bound` and `Probe = TRUE`, and their
+state counts are unchanged (352 and 393).
+
+| Config | Constants | Result | Shows |
+| --- | --- | --- | --- |
+| `authored-outlasts-stop` | `Bound = 35`, `SecondBound = 15`, `StopHold = 31`, `Holders = 1` | 192 distinct states, no error; `StopNeverRefuses`, `NoSendWhileHeld`, `UnconfirmedOnlyAfterSend`, `NotRunMeansNotSent` and `Settles` hold | The authored exec outlasts the 31 s stop with the owner's wait kept at 15 s |
+| `authored-peer-race` | `StopHold = 40`, `Holders = 2` | 293 distinct states, no error; the report invariants, `NoSendWhileHeld` and `Settles` hold | A second holder that takes the lease after the requester's wait and before the owner's, or a stop past 35 s, is refused as not run; "unconfirmed" only after a send |
+| `authored-peer-refused` | `Holders = 2` | `NeverRefusedAtSecondWait` violated: `phase = "refused"`, `report = "not-run"`, `sent = FALSE`, `elapsed = 15`, `holds = 2` | The race is reachable, and the owner's refusal says nothing ran |
+| `authored-old` | `Probe = FALSE`, old report | `UnconfirmedOnlyAfterSend` violated: `report = "unconfirmed"`, `sent = FALSE`, `elapsed = 15` | The failure seen on the VM |
+| `authored-honest-no-wait` | `Probe = FALSE` | `StopNeverRefuses` violated: `report = "not-run"` at `elapsed = 15` | An honest message without the requester's wait still refuses during the stop |
+| `authored-ran-after-stop` | `Holders = 1` | `NeverRanAfterStop` violated: `report = "ran"`, `sent = TRUE`, `held = 31` | The exec runs after the full stop |
+
+`PeerTake` is enabled only between the two waits (`phase = "exec"`), so the
+model does not cover a second holder that takes the lease while the
+requester's own wait is still running. Such a holder only lengthens a wait
+that sends nothing. Its expiry is the requester's not-run refusal, which
+`authored-peer-race` already reaches with a stop past the bound
+(`StopHold = 40`), so the reports are the same.
+
+[State chart](authored-exec-stop-wait.svg) ([source](authored-exec-stop-wait.mmd),
+Pele 1.9.0, label check PASS). It names the model's phases by their authored
+roles: `requester` is `phase = "refresh"`, `owner` is `phase = "exec"`.
+
+Tests:
+
+- `provider/engine/command_lease_tests.rs`, scaled 50 times: the requester's
+  wait outlasts a project stop held 600 ms and releases the lease; a stop past
+  its bound is refused with the raw, uncaused `provider_busy` naming the stop;
+  100 uncontended waits take well under a second, and on a home with no pool
+  the wait returns at once and creates no lock file; and the call site,
+  `native::foreground::exec`, waits out the stop before it contacts the owner
+  (this test fails when the wait is removed).
+- `native/runtime/exec_tests.rs`: only `provider_busy` maps to
+  `graph_authored_exec_lease_busy`, which passes the reply-code filter, and
+  the owner's wait on a real held flock ends in that code.
+- `tests/native-authored-project-exec.test.ts`: one progress line, the 85 s
+  frontend bound, both pre-effect refusals reported as "nothing ran" with the
+  released slot, and other failures (a wrapped `provider_busy` included) still
+  unconfirmed with the slot held. `tests/native-runtime-client.test.ts`: the
+  owner's code survives the client's closed cause filter.
+
+Not changed: authored one-off `run` and interactive exec keep only the
+owner's 15 s wait, and still report an expiry as unconfirmed.
 
 ## Code and tests
 

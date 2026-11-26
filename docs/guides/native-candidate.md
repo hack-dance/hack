@@ -2647,6 +2647,74 @@ notices that its provider's process is gone and ends as for an ended boot, and
 with the recorded provider proven gone by its identity), say so in one line, and
 continue as after any pool stop (HACK-2579).
 
+A foreground `hack up` (or `hack restart`) watches its pool the same way
+(HACK-2096). When its provider VM dies or the pool stops under it, it prints which
+VM was lost (the provider's pid, or the boot that ended), that it ends with exit
+code 1, and what to run next, which depends on how far the start got:
+
+- Ready (the runtime reported the run's graph ready and the run mapping is
+  saved): `hack down --recover`, which retires the run with its data kept
+  (running `runtime recover` first when the provider exited), then `hack up`,
+  which starts it again.
+- Before any service was requested (while it resolved, reviewed, built or
+  pulled images, or selected the restore): for a run with a record (a resumed
+  stopped run, or a restart's old run), the same `hack down --recover`, then
+  `hack up`. A fresh `hack up` has no record yet, so the message names only
+  `hack up`.
+- After its services were requested and before it was ready and mapped: no
+  supported retirement yet (HACK-2714: `hack down --recover` and `hack up` refuse
+  it), so the message names neither command and says to keep the native home
+  for inspection. A plain `hack up` that returned at "Project started" is in
+  this stage until its services report ready: the runtime has not confirmed
+  that start yet.
+
+A `hack restart` lost while it checks and pulls the new images, before it
+stops anything, gets the ready-stage message: its old run is still the live
+run. The same sequence follows a lost `hack restart`: if its replacement was lost
+before the restart finished, its old run was already stopped, so `hack down
+--recover` also retires the pending restart (it says so in one line) and `hack
+up` resumes the retained data; a `hack restart` then would refuse, because
+nothing is running to restart. The replacement releases the restart's operation
+lock before it exits, so a later `hack restart` is never refused as "already
+owned". If that lock is still held when `hack down --recover` runs (by another
+restart, recovery or data removal), the down keeps the pending restart and names
+the lock in one line; if the pending restart cannot be read, the down still
+stops the run and says the restart was not retired. An `up.after` command still
+running when the VM is lost is not waited for: it can outlive the exit until it
+finishes.
+
+The start's own error often comes first: a runtime request, image preparation
+or the start's unwind fails within about a second of the provider's death
+(`process_identity_unavailable`). That error ends the start with the same
+message, chosen by how far the start got, not by which error fired, followed
+by the start's own error on one `(cause: …)` line. The pool record decides: a
+provider pid it names that is gone proves the loss in any phase, including a
+stop that died part way (`quiescing` or `stopping`); an error on a pool still
+recorded `running` with a live provider keeps its own message, even when it
+carries that code, because the runtime also reports it for failures on a
+healthy VM. A VM lost
+seconds after a `hack down` can also bring that down's removed containers back,
+stopped, on the next boot (the guest engine's removal had not reached its
+disk). Where the runtime can remove them without the run's foreground owner,
+`hack down --recover` removes them again, says so in one line, and then
+confirms the run stopped with its data kept; a plain `hack down` still refuses
+that state, and nothing is removed while any of them runs. A run whose cleanup
+goes through its foreground owner (a relay-enrolled run) cannot yet: the owner
+is gone, and the runtime has no owner-less removal that keeps data. `hack down
+--recover` then says so, names no command, and leaves the data and the home as
+they are for inspection; `hack up` refuses that run until the containers are
+gone. This is a runtime gap, not fixed here.
+
+The start exits within about a
+second once it is ready, or about 11 seconds later while it is still starting or
+stopping; earlier versions waited on the lost VM and never exited. Once the
+run's graph has stopped, the pool counts as idle and may stop under the start
+while it still runs `down.after` and its cleanup; that is not a lost VM, and the
+start finishes on its own. A lost-VM exit ends the process as a crash would: the
+run's receipt, finalization and recovery evidence stay for `hack down
+--recover`, and so does the advisory env fingerprint record (which `hack exec`
+uses to report stale env; the next `hack up` writes a new one).
+
 Each such recovery moves the run's earlier completed recovery record aside as history
 (`dead-owner-cleanup-retired-<digest>.json`; failed-start recoveries keep
 `interrupted-start-cleanup-retired-<selection>.json` the same way). A run keeps the
@@ -3544,8 +3612,10 @@ A component acknowledgement is not application readiness, and this recovery does
 not diagnose or fix an upstream engine panic. Changed or incomplete evidence
 remains available for inspection; do not remove journals or ownership pins to retry.
 
-Native `hack exec` and `hack run` make this request once with a 180-second frontend
-budget before selecting their command or reading managed environment values.
+Native `hack exec` and `hack run` make this request once with a 200-second frontend
+budget before selecting their command or reading managed environment values. Both
+the request and the owner's answer first wait up to 15 seconds for a briefly held
+provider lease instead of refusing `provider_busy` at once.
 If refresh refuses, the frontend preserves only reviewed native error identifiers
 such as `provider_busy` or `graph_owner_recovery: graph_dependency_rebind_incomplete`.
 Subprocess text and unknown codes remain omitted. These diagnostics do not confirm
@@ -5076,7 +5146,14 @@ the current owned project/branch mapping, preserves binary stdout/stderr and the
 command exit code, and never falls back to Compose. With piped input/output or
 `HACK_NO_INTERACTIVE=1`, it uses finite exec with a 30-second observation budget;
 a timeout may leave the command running and is not
-retried. When fresh values are delivered through private stdin, output that is still arriving
+retried. A ready foreground owner holds the provider lease briefly and often, so exec,
+and the dependency refresh it sends first, wait up to 15 seconds for another holder
+to release that lease before refusing with `provider_busy` naming the holder. For
+compose-backed exec the 30-second budget starts after that wait; an authored project's
+exec and one-off `run` count the wait inside their own 30-second budget. A compose
+project's one-off `run` waits the same way before its job is reserved, within one
+15-second bound for its selection and admission. A pending
+Ctrl-C or `hack down` ends the wait at once without starting the command. When fresh values are delivered through private stdin, output that is still arriving
 or already queued when that budget ends is read to the end, so a command that finished on a
 busy host returns its exit code (see below). `--env` and `--profile` changes are refused. A command name such as `bun`
 uses the selected container's PATH; no host PATH or implicit shell is used. For
@@ -5176,11 +5253,38 @@ On the built current-branch runtime and CLI, exercise authored and adopted servi
 Linux PTY and fake-Engine tests do not qualify these real Engine/VM effects.
 
 
-Managed HTTPS authority startup uses the same five-second provider-lock admission
-budget as ordinary pool startup. This lets a brief concurrent graph inspection
-finish before admission. Pool identity, socket ownership and certificate admission
-are checked only after the lock is acquired; expiry refuses with `provider_busy`
-and no authority is published. Serving and cleanup are never replayed.
+Managed HTTPS authority startup waits up to 30 seconds for the provider lock, as
+owned cleanup does. A routed run started with `hack up -d` takes its shared HTTPS
+lease at the owner's ready line, which is exactly when that run's first `hack exec`
+or `hack run` and a `hack down` arrive; a `hack down` holds the lock for its whole
+graph stop. The wait ends early once the authority's owner is gone: before every
+attempt it reads its stdin FIFO without blocking and stops at end of file, on macOS
+as on Linux. Pool identity,
+socket ownership and certificate admission are checked only after the lock is
+acquired; expiry refuses with `provider_busy` and no authority is published.
+Serving and cleanup are never replayed.
+
+The shared owner's graph reads for a lease acquire or release, and its idle check
+before retiring, read under the provider lock too. Each waits out a holder for up
+to 15 seconds (one deadline per verification) instead of refusing at once, so a
+command or a stop during route warm-up no longer makes the acquire refuse (which
+stopped the whole run) or the release unconfirmed. Only `provider_busy` is
+retried; a holder that outlasts the wait is still refused. Every frontend that
+connects to a starting shared owner waits for its whole startup (about 55
+seconds; a recorded startup failure ends the wait at once), including a second
+project that found the owner already starting. A frontend's cleanup waits for an
+acquisition still in flight before it releases or recovers the lease, so a
+`hack down` during warm-up stops the run with confirmed cleanup.
+
+A graph stop can hold the provider lock longer than the authority's 30 seconds,
+for example for a service with a long `stop_grace_period`. The shared owner's
+startup then fails with `authority-ready: provider_busy`, having admitted no
+lease. When that run's lease is recovered (by its frontend after the graph
+stopped, or by `hack down`), the failed owner generation is retired: its
+owner directory, diagnostic included, moves beside a retired-owner record
+(`native-https/released-leases/<generation>/failed-owner`), the release is still verified
+against the stopped graph, and the next `up` starts a new shared owner. `down`
+does not fail and the next `up` needs no recovery because of it.
 
 An authority child that exits before readiness can supply a bounded structured
 native error code without exposing its stderr. Malformed, oversized or missing
@@ -5195,7 +5299,9 @@ reviewed startup stage and an allowlisted native error code; child output, paths
 and application values are omitted. If lease cleanup also fails, the original
 acquisition diagnostic remains visible alongside the unconfirmed cleanup status.
 This record is diagnostic evidence only: it does not acknowledge retirement or
-permit a replacement owner. A missing record (including a helper crash before
+permit a replacement owner. The one exception is the expired authority lease wait
+described above (`authority-ready: provider_busy` with child cleanup confirmed and
+no endpoint published), which a lease recovery retires. A missing record (including a helper crash before
 publication) leaves the cause unknown. Preserve the retained owner and finalization
 records for inspection; do not delete them to force another startup.
 

@@ -6,6 +6,7 @@ on:
       - mise.toml
       - .hack/toolchain/**
       - scripts/check-toolchain-image.sh
+      - scripts/mise-install-retry.sh
       - .github/workflows/toolchain-image.yml
   push:
     branches: [main, next]
@@ -13,6 +14,7 @@ on:
       - mise.toml
       - .hack/toolchain/**
       - scripts/check-toolchain-image.sh
+      - scripts/mise-install-retry.sh
       - .github/workflows/toolchain-image.yml
 
 permissions:

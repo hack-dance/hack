@@ -328,14 +328,16 @@ mod tests {
     /// owner's exit, an open one is a live owner (stray payload is discarded).
     #[test]
     fn owner_pipe_end_of_file_is_the_owners_exit() {
-        let mut fds = [0; 2];
-        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-        let idle = owner_pipe_open(fds[0]);
-        assert_eq!(unsafe { libc::write(fds[1], b"x".as_ptr().cast(), 1) }, 1);
-        let payload = owner_pipe_open(fds[0]);
-        unsafe { libc::close(fds[1]) };
-        let closed = owner_pipe_open(fds[0]);
-        unsafe { libc::close(fds[0]) };
+        use std::{io::Write, os::fd::AsRawFd};
+        // Close-on-exec ends (see `owner_fifo`): a process another test spawns
+        // must not keep the writer open past the close below.
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        let idle = owner_pipe_open(reader.as_raw_fd());
+        writer.write_all(b"x").unwrap();
+        let payload = owner_pipe_open(reader.as_raw_fd());
+        drop(writer);
+        let closed = owner_pipe_open(reader.as_raw_fd());
+        drop(reader);
         assert!(idle.is_ok());
         assert!(payload.is_ok());
         assert!(matches!(closed, Err(e) if e.code == "provider_acquisition_cancelled"));
@@ -344,14 +346,31 @@ mod tests {
     /// A named FIFO opened the way `spawnNativeHttpsChild` opens the
     /// authority's stdin: a reader exists before the writer opens, and the
     /// authority's end is a blocking read end. Returns (reader, writer).
+    ///
+    /// Both ends are close-on-exec, opened that way atomically (HACK-2743).
+    /// Other tests in this process spawn children all the time (the HTTP probe
+    /// helpers live for seconds), and a child spawned while an inheritable
+    /// writer was open kept the FIFO's write side open after the test closed
+    /// its own: end of file never came, and the loop rightly kept serving.
+    /// Production avoids the same leak by opening the owner's writer only
+    /// after spawning the authority (`spawnNativeHttpsChild`).
     fn owner_fifo(fixture: &Fixture) -> (libc::c_int, libc::c_int) {
         let path = fixture.0.join("owner-stdin");
         let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-        let reader = unsafe { libc::open(name.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+        let reader = unsafe {
+            libc::open(
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
         assert!(reader >= 0);
-        let writer = unsafe { libc::open(name.as_ptr(), libc::O_WRONLY) };
+        let writer = unsafe { libc::open(name.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
         assert!(writer >= 0);
+        for fd in [reader, writer] {
+            let descriptor = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(descriptor >= 0 && descriptor & libc::FD_CLOEXEC != 0);
+        }
         let flags = unsafe { libc::fcntl(reader, libc::F_GETFL) };
         assert_eq!(
             unsafe { libc::fcntl(reader, libc::F_SETFL, flags & !libc::O_NONBLOCK) },
@@ -715,36 +734,50 @@ mod tests {
     /// check interval) and ends within the bound once the writer closes, with
     /// `OwnerGone`. Linux reports the hangup through `poll` at once; Darwin
     /// reports nothing and the bounded wait plus the non-blocking read find it.
+    ///
+    /// The bound is the contract: one owner-check interval, plus one more for
+    /// scheduling. A child process alive across the close stands in for the
+    /// processes other tests spawn under full-suite load (HACK-2743): it must
+    /// not inherit the owner's writer and so keep the owner "present".
     #[test]
     fn serving_loop_exits_soon_after_its_owner_fifo_closes() {
+        let interval = Duration::from_millis(super::super::OWNER_CHECK_MS as u64);
         let fixture = Fixture::new();
         let candidate = fixture.candidate();
         let directory = SocketDirectory::new("loop");
         let (_path, listener) = loop_listener(&directory);
         let (reader, writer) = owner_fifo(&fixture);
+        let mut bystander = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
         let (done, ended) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result =
                 super::super::serve_clients(&candidate, &listener, &"0".repeat(64), None, reader);
             let _ = done.send(result);
         });
-        std::thread::sleep(Duration::from_millis(1500));
+        std::thread::sleep(interval + interval / 2);
         assert!(
             ended.try_recv().is_err(),
             "the loop stopped while its owner held the pipe"
         );
         let closed = Instant::now();
         unsafe { libc::close(writer) };
-        let result = ended
-            .recv_timeout(Duration::from_secs(2))
-            .expect("the loop kept serving after its owner's pipe closed");
+        let outcome = ended.recv_timeout(2 * interval);
         let after = closed.elapsed();
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+        let result = outcome.expect("the loop kept serving after its owner's pipe closed");
         unsafe { libc::close(reader) };
         assert!(
             matches!(result, Ok(super::super::ServeEnd::OwnerGone)),
             "{result:?}"
         );
-        assert!(after < Duration::from_secs(2), "noticed after {after:?}");
+        assert!(after < 2 * interval, "noticed after {after:?}");
     }
 
     /// The cooperative stop ends the serving loop on every host, with

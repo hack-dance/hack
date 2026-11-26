@@ -36,6 +36,20 @@ fn refused() -> CandidateError {
     )
 }
 
+/// Fresh values arrived for a run that started without private environment
+/// delivery: the service env changed after `up` (HACK-2740). Exec never attaches
+/// delivery to a running container; only a fresh start applies the change.
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "environment-launcher")),
+    allow(dead_code)
+)]
+fn environment_changed() -> CandidateError {
+    error(
+        "graph_service_exec_environment_changed",
+        "The service has env values that this run did not start with, for example after hack env set. Run hack down, then hack up, to start with them. No command was started.",
+    )
+}
+
 fn validate(options: &ServiceExecOptions<'_>) -> Result<(), CandidateError> {
     if !hex(options.run, 32)
         || !hex(options.expected_container, 64)
@@ -114,8 +128,10 @@ pub(super) fn interactive(
         #[cfg(feature = "environment-launcher")]
         {
             managed.validate_binding(&receipt.plan_id, &receipt.run)?;
-            if !receipt.environment_attached
-                || managed.values().len() != 1
+            if !receipt.environment_attached {
+                return Err(environment_changed());
+            }
+            if managed.values().len() != 1
                 || managed
                     .values()
                     .get(options.service)
@@ -253,7 +269,7 @@ fn service_exec_inner(
         {
             managed.validate_binding(&receipt.plan_id, &receipt.run)?;
             if !receipt.environment_attached {
-                return Err(refused());
+                return Err(environment_changed());
             }
             let slot = super::super::environment_recovery::active_exec_slot(
                 candidate,
@@ -712,5 +728,16 @@ mod tests {
             ..opts
         };
         assert!(binding(&receipt, "boot-one", false, &opts).is_err());
+    }
+
+    #[test]
+    fn new_env_on_a_run_without_delivery_names_the_restart() {
+        // HACK-2740: a fixed, one-line sentence the CLI prints as is.
+        let value = serde_json::to_value(environment_changed()).unwrap();
+        assert_eq!(value["code"], "graph_service_exec_environment_changed");
+        assert_eq!(value["message_fixed"], true);
+        let message = value["message"].as_str().unwrap();
+        assert!(message.len() <= 400 && message.bytes().all(|b| (0x20..0x7f).contains(&b)));
+        assert!(message.contains("hack down, then hack up"));
     }
 }

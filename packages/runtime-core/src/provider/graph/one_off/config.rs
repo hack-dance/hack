@@ -164,4 +164,52 @@ mod tests {
             UNCOVERED
         );
     }
+
+    /// HACK-2740: a service started with private env delivery has a materialized
+    /// template. A requested command must still replace only Cmd, as `compose run`
+    /// does, through the job's own materialization and wrapper.
+    #[test]
+    fn requested_command_replaces_a_materialized_service_command() {
+        use crate::provider::graph::{image_process::apply_private, launcher};
+        let receipt:Receipt=serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"ready-observed","readiness":{},"resources":{}})).unwrap();
+        let resource:Resource=serde_json::from_value(json!({"kind":"container","key":"job-123","name":"hkg-owned-container-1","id":null,"image":"sha256:pin","phase":"reserved"})).unwrap();
+        let service = ["python", "-u", "-m", "http.server", "8080"];
+        let requested: Vec<String> = ["sh", "-c", "echo x"].map(String::from).to_vec();
+        let process = |prefix: &[&str], tail: &[&str]| json!([prefix, tail].concat());
+        for (image, create, prefix) in [
+            // Compose `command:` only, on an image without an entrypoint.
+            (
+                json!({"Cmd":["/bin/sh"],"User":"1000:1000"}),
+                json!({"Cmd":service,"HostConfig":{"Mounts":[]}}),
+                &[][..],
+            ),
+            // An image entrypoint stays and receives the requested command.
+            (
+                json!({"Entrypoint":["docker-entrypoint.sh"],"User":"1000:1000"}),
+                json!({"Cmd":service,"HostConfig":{"Mounts":[]}}),
+                &["docker-entrypoint.sh"][..],
+            ),
+            // So does a Compose `entrypoint:`.
+            (
+                json!({"Cmd":["/bin/sh"],"User":"1000:1000"}),
+                json!({"Entrypoint":["/entry"],"Cmd":service,"HostConfig":{"Mounts":[]}}),
+                &["/entry"][..],
+            ),
+        ] {
+            let mut template = create;
+            apply_private(&mut template, &image).unwrap();
+            for (argv, expected) in [
+                (requested.clone(), process(prefix, &["sh", "-c", "echo x"])),
+                (Vec::new(), process(prefix, &service)),
+            ] {
+                let mut job = prepare(&template, &receipt, &resource, &argv, None).unwrap();
+                // A job with fresh values is materialized and wrapped again.
+                apply_private(&mut job, &image).unwrap();
+                launcher::attach(&mut job, "/run/slot/values.json", "/storage/launcher").unwrap();
+                let wrapped = job["Entrypoint"].as_array().unwrap();
+                assert_eq!(json!(wrapped[3..]), expected);
+                assert_eq!(job["Cmd"], json!([]));
+            }
+        }
+    }
 }

@@ -1992,7 +1992,13 @@ into engine metadata, and exec never renews credentials. With the current launch
 managed exec resolves a command name such as `bun` against PATH inside the selected
 container after applying its environment; an explicit path still runs literally.
 Older launcher mounts require a restart before using command names. Changing
-overlays is unsupported. Neither command persists application output in runtime
+overlays is unsupported. A running service never takes new values: when the service
+has env values that the run did not start with (for example after
+`hack env set --service`), exec refuses with `graph_service_exec_environment_changed`
+and starts no command; run `hack down`, then `hack up`, to start with them. A one-off
+`hack run <service> <cmd...>` replaces the service's command and keeps its entrypoint,
+as Compose `run` does, with or without `--` and whether or not the run started with
+private env values. Neither command persists application output in runtime
 receipts; output can contain sensitive application values and should be handled
 accordingly.
 

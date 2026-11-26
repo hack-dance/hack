@@ -105,6 +105,17 @@ test("a `--` inside the child argv reaches the child unchanged", () => {
   ).toEqual(["web", "npm", "test", "--", "--watch"]);
 });
 
+test("run passes the same replacement command with or without `--` (HACK-2740)", () => {
+  // The runtime replaces the service command with exactly this argv; `-c` is
+  // the child's option, never Hack's.
+  for (const argv of [
+    ["run", "web", "sh", "-c", "echo x"],
+    ["run", "web", "--", "sh", "-c", "echo x"],
+  ]) {
+    expect(parse(argv).rest).toEqual(["web", "sh", "-c", "echo x"]);
+  }
+});
+
 test("session exec never gives a flag after the workspace command to Hack", () => {
   const parsed = parse(["session", "exec", "dev", "npm", "--version"]);
   expect(parsed.path).toEqual(["session", "exec"]);

@@ -7,10 +7,11 @@ stateDiagram-v2
   refresh --> refresh : Tick [stop holds]
   refresh --> exec : Acquire [free, reads only]
   refresh --> refused : Expire [35 s]
-  exec --> sent : Acquire [command sent]
+  exec --> exec : Tick [second holder]
+  exec --> sent : Acquire [free, sends]
   exec --> refused : Expire [35 s]
   sent --> done : Finish
-  refused --> [*] : nothing ran
+  refused --> [*] : did not run
   done --> [*] : ran or unconfirmed
   class refresh wait
   class exec wait

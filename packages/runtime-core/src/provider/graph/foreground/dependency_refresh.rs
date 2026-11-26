@@ -108,6 +108,24 @@ pub fn request(candidate: &Candidate, run: &str) -> Result<Value, CandidateError
     Ok(response)
 }
 
+/// The owner's answer code when its own selection could not take the lease
+/// (HACK-2729). Its wait runs before the rebind, so nothing was refreshed and the
+/// command was never sent. The wire carries only this code, which the requester
+/// forwards as the cause of its `graph_owner_recovery`, so the CLI can say that
+/// nothing ran. A `provider_busy` from anywhere else keeps its own code.
+pub(super) const OWNER_SELECTION_BUSY: &str = "graph_dependency_refresh_lease_busy";
+
+fn owner_selection_refusal(error: CandidateError) -> CandidateError {
+    if error.code == "provider_busy" {
+        CandidateError::new(
+            OWNER_SELECTION_BUSY,
+            "The owner's dependency refresh could not acquire the provider lease; nothing was refreshed.",
+        )
+    } else {
+        error
+    }
+}
+
 pub(super) fn handle(
     candidate: &Candidate,
     runtime: &mut HostRelayRuntime,
@@ -125,7 +143,8 @@ pub(super) fn handle(
     // handled within one backoff step instead of after the wait.
     let watch = transport::ClientWatch::half_closed(stream)?;
     let cancelled = || signals.pending() || watch.disconnected() || Instant::now() >= deadline;
-    let current = selection(candidate, run, deadline, &owner_lease_check(&cancelled))?;
+    let current = selection(candidate, run, deadline, &owner_lease_check(&cancelled))
+        .map_err(owner_selection_refusal)?;
     if selected.plan != current.plan
         || selected.generation != current.generation
         || selected.boot != current.boot
@@ -395,6 +414,38 @@ mod owner_lease_tests {
         running_pool,
     };
     use std::cell::Cell;
+
+    /// HACK-2729 review: the owner's own selection refusal after its 15 s wait gets
+    /// a distinct pre-effect code; every other refusal keeps its code.
+    #[test]
+    fn the_owners_selection_lease_refusal_has_its_own_pre_effect_code() {
+        let (_home, candidate) = running_pool();
+        let (release, holder) = hold_lease_as_project_stop(&candidate, Duration::from_secs(30));
+        let refused = selection(
+            &candidate,
+            &"a".repeat(32),
+            Instant::now() + Duration::from_millis(300),
+            &|| Ok(()),
+        )
+        .map_err(owner_selection_refusal)
+        .err()
+        .unwrap();
+        assert_eq!(refused.code, OWNER_SELECTION_BUSY);
+        // It passes the requester's bounded cause-code filter unchanged.
+        assert!(
+            (1..=64).contains(&refused.code.len())
+                && refused
+                    .code
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        );
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        for code in ["provider_acquisition_cancelled", "graph_owner_recovery"] {
+            let kept = owner_selection_refusal(CandidateError::new(code, "kept"));
+            assert_eq!(kept.code, code);
+        }
+    }
 
     /// HACK-2729: the requesting side's selection, before anything is sent to the
     /// owner, outlasts a project stop (scaled: 600 ms against a 700 ms bound), and a

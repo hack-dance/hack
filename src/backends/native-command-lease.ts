@@ -64,7 +64,8 @@ export function nativeCommandLeaseWaitReporter(
  * Whether `error` is the requesting process's own expired lease wait: a raw
  * `provider_busy` with no cause. The runtime wraps every refusal from the owner
  * (and from anything after the lease was taken) in its own code, so this one
- * means the lease was never taken: nothing was sent and nothing ran.
+ * means the lease was never taken and the step it guards never started: for
+ * the refresh, nothing was sent; for `graph exec`, the command was not sent.
  */
 export function isNativeCommandLeaseRefusal(
   error: unknown
@@ -77,23 +78,70 @@ export function isNativeCommandLeaseRefusal(
 }
 
 /**
- * The refusal of a command whose lease wait expired. Nothing ran, so the next
- * step is a plain retry once the holder finishes; it is never "unconfirmed".
+ * The runtime's owner answer when its own refresh selection could not take the
+ * lease (`OWNER_SELECTION_BUSY` in `dependency_refresh.rs`). That wait runs
+ * before the rebind, so nothing was refreshed and the command was never sent.
+ */
+export const NATIVE_OWNER_REFRESH_LEASE_BUSY =
+  "graph_dependency_refresh_lease_busy";
+
+/**
+ * Whether `error` is the owner's own refresh lease refusal, forwarded as the
+ * cause of the requester's `graph_owner_recovery`. Only that exact pair is
+ * pre-effect; any other cause keeps its report.
+ */
+export function isNativeOwnerRefreshLeaseRefusal(
+  error: unknown
+): error is NativeRuntimeRequestError {
+  return (
+    error instanceof NativeRuntimeRequestError &&
+    error.nativeCode === "graph_owner_recovery" &&
+    error.nativeCauseCode === NATIVE_OWNER_REFRESH_LEASE_BUSY
+  );
+}
+
+/**
+ * Which step's lease wait expired: the dependency refresh (nothing ran), or the
+ * exec after a completed refresh (the command did not run).
+ */
+export type NativeLeaseStage = "refresh" | "exec";
+
+const notRunRefusals = new WeakSet<object>();
+
+/**
+ * Whether `error` is a refusal {@link nativeCommandLeaseRefusal} built: the
+ * command was not sent, so no guest process exists for it.
+ */
+export function isNativeCommandNotRun(error: unknown): boolean {
+  return (
+    typeof error === "object" && error !== null && notRunRefusals.has(error)
+  );
+}
+
+/**
+ * The refusal of a command whose lease wait expired. The command did not run,
+ * so the next step is a plain retry once the holder finishes; it is never
+ * "unconfirmed".
  */
 export function nativeCommandLeaseRefusal(opts: {
   readonly nativeMessage: string | undefined;
   readonly command: NativeLeaseCommand;
+  readonly stage: NativeLeaseStage;
 }): NativeRuntimeRequestError {
   const holder = nativeStartLeaseHolder(opts.nativeMessage);
-  return new NativeRuntimeRequestError({
+  const outcome =
+    opts.stage === "refresh" ? "nothing ran" : "the command did not run";
+  const error = new NativeRuntimeRequestError({
     nativeCode: "provider_busy",
     nativeMessage: opts.nativeMessage,
     message: [
-      `${opts.command} could not acquire the native runtime lock (provider_busy); nothing ran.`,
+      `${opts.command} could not acquire the native runtime lock (provider_busy); ${outcome}.`,
       `Holder: ${holder ?? "unavailable"}.`,
       holder
         ? `Retry ${opts.command} once that ${holder} finishes.`
         : `Retry ${opts.command} once the holder finishes.`,
     ].join("\n"),
   });
+  notRunRefusals.add(error);
+  return error;
 }

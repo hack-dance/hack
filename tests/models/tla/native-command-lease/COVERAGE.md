@@ -93,21 +93,33 @@ CLI reports exactly that refusal as "nothing ran", with the holder and a
 retry (`native-command-lease.ts`). Everything else keeps its report,
 "unconfirmed" included, where the request was sent.
 
-`ExecStopWait.tla` models this. The stop holds the lease for at most
+`ExecStopWait.tla` models this. Every holder keeps the lease for at most
 `StopHold` ticks, one tick per second. Y's exec waits up to `Bound` ticks for
 the refresh, which only reads, then up to `Bound` ticks for the exec, which
-sends the command. After the send the reply may arrive or be lost.
-`ExpiryUnconfirmed = TRUE` is the old report of an expiry.
+sends the command. With `Holders = 2` a second holder (another project's stop
+or start) may take the lease between the refresh and the exec. After the send
+the reply may arrive or be lost. `ExpiryUnconfirmed = TRUE` is the old report
+of an expiry; `EnforceLease = FALSE` is a control that sends without the lease.
+The fix reports an expiry as `not-run`: "nothing ran" at the refresh, "the
+command did not run" at the exec, whose refresh already ran.
 
 | Config | Constants | Result | Shows |
 | --- | --- | --- | --- |
-| `exec-outlasts-stop` | `Bound = 35`, `StopHold = 31` | 192 distinct states, no error; `StopNeverRefuses`, `NoSendWhileHeld`, `UnconfirmedOnlyAfterSend`, `NothingRanMeansNothingSent` and `Settles` hold | The exec outlasts the 31 s stop and is never refused |
-| `old-exec-bound` | `Bound = 15`, `ExpiryUnconfirmed = TRUE` | `UnconfirmedOnlyAfterSend` violated: `phase = "refused"`, `report = "unconfirmed"`, `sent = FALSE`, `elapsed = 15` | The reported failure |
-| `honest-old-bound` | `Bound = 15` | `StopNeverRefuses` violated: `report = "nothing-ran"` at `elapsed = 15` | An honest refusal alone does not fix the wait |
-| `exec-past-bound` | `Bound = 35`, `StopHold = 40` | `StopNeverRefuses` violated: `report = "nothing-ran"`, `sent = FALSE` at `elapsed = 35` | The wait stays bounded |
-| `exec-past-bound-honest` | `Bound = 35`, `StopHold = 40` | 214 distinct states, no error; the report invariants and `Settles` hold | That refusal still says nothing ran |
-| `exec-ran-after-stop` | `Bound = 35`, `StopHold = 31` | `NeverRanAfterStop` violated: `report = "ran"`, `sent = TRUE`, `held = 31` | The exec runs after the full stop |
-| `exec-unconfirmed-after-send` | `Bound = 35`, `StopHold = 31` | `NeverUnconfirmed` violated: `report = "unconfirmed"`, `sent = TRUE` | A reply lost after the send is still unconfirmed |
+| `exec-outlasts-stop` | `Bound = 35`, `StopHold = 31`, `Holders = 2` | 352 distinct states, no error; `StopNeverRefuses`, `NoSendWhileHeld`, `UnconfirmedOnlyAfterSend`, `NotRunMeansNotSent` and `Settles` hold | The exec outlasts the 31 s stop and a second holder, and is never refused |
+| `old-exec-bound` | `Bound = 15`, old report | `UnconfirmedOnlyAfterSend` violated: `phase = "refused"`, `report = "unconfirmed"`, `sent = FALSE`, `elapsed = 15` | The reported failure |
+| `honest-old-bound` | `Bound = 15` | `StopNeverRefuses` violated: `report = "not-run"` at `elapsed = 15` | An honest refusal alone does not fix the wait |
+| `exec-past-bound` | `Bound = 35`, `StopHold = 40` | `StopNeverRefuses` violated: `report = "not-run"`, `sent = FALSE` at `elapsed = 35` | The wait stays bounded |
+| `exec-past-bound-honest` | `Bound = 35`, `StopHold = 40`, `Holders = 2` | 393 distinct states, no error; the report invariants, `NoSendWhileHeld` and `Settles` hold | That refusal still says the command did not run |
+| `exec-ran-after-stop` | `Holders = 1` | `NeverRanAfterStop` violated: `report = "ran"`, `sent = TRUE`, `held = 31` | The exec runs after the full stop |
+| `exec-ran-after-peer` | `Holders = 2` | `NeverRanAfterPeer` violated: `report = "ran"`, `holds = 2` | The exec waits out a second holder after the refresh, then runs |
+| `exec-unconfirmed-after-send` | `Holders = 2` | `NeverUnconfirmed` violated: `report = "unconfirmed"`, `sent = TRUE` | A reply lost after the send is still unconfirmed |
+| `send-while-held` | `EnforceLease = FALSE` | `NoSendWhileHeld` violated: `sentHeld = TRUE`, `phase = "sent"` | The invariant is not vacuous: a send without the lease breaks it |
+
+The owner's own refresh wait (15 s on its loop) is not in this model. When it
+expires before the rebind, after another waiter took the lease, the owner
+answers `graph_dependency_refresh_lease_busy`, which the CLI also reports as
+"nothing ran" (`dependency_refresh::owner_selection_refusal`, tested in
+`owner_lease_tests`).
 
 [State chart](exec-stop-wait.svg) ([source](exec-stop-wait.mmd), Pele 1.9.0,
 label check PASS).
@@ -121,17 +133,19 @@ Tests:
   `connect_command_request`; a stop past the bound is refused with the raw,
   uncaused `provider_busy`.
 - `dependency_refresh.rs` `owner_lease_tests`: the same for the refresh's
-  `requested_selection`.
+  `requested_selection`, and the owner's selection refusal mapped to
+  `graph_dependency_refresh_lease_busy` while other codes are kept.
 - `tests/native-command-lease.test.ts`, `tests/native-project-exec.test.ts`,
   `tests/native-project-dependency-refresh.test.ts`: the progress line (once
   across the refresh and the exec), the refusal for `hack exec` and `hack
-  run`, a wrapped or caused `provider_busy` that stays as it was, and the
+  run`, "the command did not run" at the exec step, the owner's pre-effect
+  refusal, a wrapped or caused `provider_busy` that stays as it was, the 65 s
+  lifetime of fresh exec values, the released admission slot, and the
   frontend bounds.
 
-The model abstracts a second holder that arrives between the refresh and the
-exec (the exec's own wait covers it the same way), fresh per-command values
-whose 30 s lifetime can end the exec's wait first, and the owner-side waits
-of interactive `exec` and `hack run`, which keep 15 s.
+The model abstracts fresh per-command values (their lifetime is now 65 s, so
+it covers the exec's whole 35 s wait) and the owner-side waits of interactive
+`exec` and `hack run`, which keep 15 s.
 
 ## Code and tests
 

@@ -301,6 +301,41 @@ test("HACK-2729: the requester's own expired lease wait says nothing ran, names 
   );
 });
 
+test("HACK-2729 review: the owner's own expired lease wait before its rebind also says nothing ran", async () => {
+  const opts = await fixture();
+  await expect(
+    refreshNativeProjectDependencies({
+      ...opts,
+      invoke: async () => {
+        throw new NativeRuntimeRequestError({
+          message: "private stderr",
+          nativeCode: "graph_owner_recovery",
+          nativeCauseCode: "graph_dependency_refresh_lease_busy",
+        });
+      },
+    })
+  ).rejects.toThrow(
+    [
+      "hack exec could not acquire the native runtime lock (provider_busy); nothing ran.",
+      "Holder: unavailable.",
+      "Retry hack exec once the holder finishes.",
+    ].join("\n")
+  );
+  // The owner's raw provider_busy from anywhere else stays unconfirmed.
+  await expect(
+    refreshNativeProjectDependencies({
+      ...opts,
+      invoke: async () => {
+        throw new NativeRuntimeRequestError({
+          message: "private stderr",
+          nativeCode: "graph_owner_recovery",
+          nativeCauseCode: "provider_busy",
+        });
+      },
+    })
+  ).rejects.toThrow("identity or outcome is unconfirmed");
+});
+
 test("HACK-2729: the refresh asks for the lease-wait report and reaches the command's reporter", async () => {
   const opts = await fixture();
   const holders: string[] = [];

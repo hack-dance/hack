@@ -2229,13 +2229,14 @@ const contracts: readonly ModelContract[] = [
       },
       {
         // HACK-2729: `hack exec` in one project while another project's
-        // `hack down` holds the lease for about 31 s (one tick is one second).
-        // The requesting side waits 35 s for the refresh, then for the exec,
-        // and says "unconfirmed" only after it sent the command.
+        // `hack down` holds the lease for about 31 s (one tick is one second),
+        // and a second holder may take it between the refresh and the exec.
+        // The requesting side waits 35 s for each step, sends only under its
+        // own lease, and says "unconfirmed" only after it sent the command.
         name: "exec-outlasts-stop",
         module: "ExecStopWait",
         negative: false,
-        states: 192,
+        states: 352,
       },
       {
         // The reported failure: the 15 s wait expired during the stop and
@@ -2258,27 +2259,27 @@ const contracts: readonly ModelContract[] = [
         module: "ExecStopWait",
         negative: true,
         invariant: "StopNeverRefuses",
-        fields: ['phase = "refused"', 'report = "nothing-ran"', "elapsed = 15"],
+        fields: ['phase = "refused"', 'report = "not-run"', "elapsed = 15"],
       },
       {
-        // The wait stays bounded: a stop past 35 s is refused, nothing sent.
+        // The wait stays bounded: a holder past 35 s is refused, nothing sent.
         name: "exec-past-bound",
         module: "ExecStopWait",
         negative: true,
         invariant: "StopNeverRefuses",
         fields: [
           'phase = "refused"',
-          'report = "nothing-ran"',
+          'report = "not-run"',
           "sent = FALSE",
           "elapsed = 35",
         ],
       },
       {
-        // ... and that refusal still says nothing ran.
+        // ... and that refusal still says the command did not run.
         name: "exec-past-bound-honest",
         module: "ExecStopWait",
         negative: false,
-        states: 214,
+        states: 393,
       },
       {
         // The exec runs after the stop held the lease for all 31 s.
@@ -2289,12 +2290,30 @@ const contracts: readonly ModelContract[] = [
         fields: ['report = "ran"', "sent = TRUE", "held = 31"],
       },
       {
+        // The exec waits out a second holder that took the lease after the
+        // refresh, then runs.
+        name: "exec-ran-after-peer",
+        module: "ExecStopWait",
+        negative: true,
+        invariant: "NeverRanAfterPeer",
+        fields: ['report = "ran"', "sent = TRUE", "holds = 2"],
+      },
+      {
         // A reply lost after the send is still reported as unconfirmed.
         name: "exec-unconfirmed-after-send",
         module: "ExecStopWait",
         negative: true,
         invariant: "NeverUnconfirmed",
         fields: ['report = "unconfirmed"', "sent = TRUE", 'phase = "done"'],
+      },
+      {
+        // Negative control: an exec that sends without its own lease breaks
+        // NoSendWhileHeld, so that invariant is not vacuous.
+        name: "send-while-held",
+        module: "ExecStopWait",
+        negative: true,
+        invariant: "NoSendWhileHeld",
+        fields: ["sentHeld = TRUE", "sent = TRUE", 'phase = "sent"'],
       },
     ],
   },

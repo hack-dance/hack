@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import {
   isNativeCommandLeaseRefusal,
+  isNativeCommandNotRun,
+  isNativeOwnerRefreshLeaseRefusal,
   NATIVE_COMMAND_LEASE_WAIT_SECONDS,
+  NATIVE_OWNER_REFRESH_LEASE_BUSY,
   nativeCommandLeaseRefusal,
   nativeCommandLeaseWaitLine,
   nativeCommandLeaseWaitReporter,
@@ -74,7 +77,10 @@ test("HACK-2729: only the requester's raw provider_busy is a lease refusal, and 
   const refusal = nativeCommandLeaseRefusal({
     nativeMessage: PROJECT_STOP,
     command: "hack exec",
+    stage: "refresh",
   });
+  expect(isNativeCommandNotRun(refusal)).toBe(true);
+  expect(isNativeCommandNotRun(raw)).toBe(false);
   expect(refusal.nativeCode).toBe("provider_busy");
   expect(refusal.message.split("\n")).toEqual([
     "hack exec could not acquire the native runtime lock (provider_busy); nothing ran.",
@@ -82,6 +88,44 @@ test("HACK-2729: only the requester's raw provider_busy is a lease refusal, and 
     "Retry hack exec once that project stop finishes.",
   ]);
   expect(refusal.message).not.toContain("unconfirmed");
+  // At the exec step the refresh already ran: only the command did not.
+  expect(
+    nativeCommandLeaseRefusal({
+      nativeMessage: PROJECT_STOP,
+      command: "hack exec",
+      stage: "exec",
+    }).message.split("\n")[0]
+  ).toBe(
+    "hack exec could not acquire the native runtime lock (provider_busy); the command did not run."
+  );
+});
+
+test("HACK-2729 review: only the owner's exact pre-effect refusal is classified as such", () => {
+  expect(
+    isNativeOwnerRefreshLeaseRefusal(
+      new NativeRuntimeRequestError({
+        message: "x",
+        nativeCode: "graph_owner_recovery",
+        nativeCauseCode: NATIVE_OWNER_REFRESH_LEASE_BUSY,
+      })
+    )
+  ).toBe(true);
+  for (const [nativeCode, nativeCauseCode] of [
+    ["graph_owner_recovery", "provider_busy"],
+    ["graph_owner_recovery", undefined],
+    ["graph_one_off_failed", NATIVE_OWNER_REFRESH_LEASE_BUSY],
+    [NATIVE_OWNER_REFRESH_LEASE_BUSY, undefined],
+  ] as const) {
+    expect(
+      isNativeOwnerRefreshLeaseRefusal(
+        new NativeRuntimeRequestError({
+          message: "x",
+          nativeCode,
+          nativeCauseCode,
+        })
+      )
+    ).toBe(false);
+  }
 });
 
 test("HACK-2729: exec's requests outlast the runtime's longer lease wait", () => {

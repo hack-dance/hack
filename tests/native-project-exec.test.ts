@@ -1,10 +1,22 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { nativeProjectExec } from "../src/backends/native-project-exec.ts";
+import { NATIVE_COMMAND_LEASE_WAIT_SECONDS } from "../src/backends/native-command-lease.ts";
+import {
+  NATIVE_EXEC_VALUES_LIFETIME_SECONDS,
+  nativeProjectExec,
+} from "../src/backends/native-project-exec.ts";
 import { saveNativeProjectRun } from "../src/backends/native-project-run.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
+import { NATIVE_EXIT_CONFIRMED_ENV } from "../src/lib/background-command/native-exit.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
@@ -593,7 +605,10 @@ test("HACK-2729: a lock held past the bound refuses clearly before anything ran,
     failure = error;
   }
   expect(calls).toEqual(["status", "refresh-dependencies", "status", "exec"]);
-  expect((failure as Error).message).toBe(expected);
+  // The refresh already ran, so only the command did not.
+  expect((failure as Error).message).toBe(
+    expected.replace("nothing ran.", "the command did not run.")
+  );
   expect((failure as Error).message).not.toContain("unconfirmed");
 
   // A provider_busy the runtime caused or wrapped is passed on unchanged.
@@ -619,4 +634,95 @@ test("HACK-2729: a lock held past the bound refuses clearly before anything ran,
       },
     })
   ).rejects.toBe(wrapped);
+});
+
+test("HACK-2729 review: fresh exec values outlive the whole lease wait", async () => {
+  const opts = await freshFixture({ FIXTURE: "private-fixture-value" });
+  let lifetime: unknown;
+  const result = await nativeProjectExec({
+    ...opts,
+    service: "web",
+    argv: ["/bin/true"],
+    onLeaseWait: () => undefined,
+    invoke: async (request) => {
+      if (request.args[1] === "refresh-dependencies") {
+        return refreshed();
+      }
+      if (request.args[1] === "status") {
+        return snapshot();
+      }
+      if (request.args[1] === "exec-selection") {
+        return selection();
+      }
+      // Read before the frontend zeroes the buffer.
+      lifetime = JSON.parse(
+        Buffer.from(request.privateInput!).toString()
+      ).lifetime_seconds;
+      return {
+        exit_code: 0,
+        stdout_base64: "",
+        stderr_base64: "",
+        truncated: false,
+      };
+    },
+  });
+  expect(result.exitCode).toBe(0);
+  expect(lifetime).toBe(NATIVE_EXEC_VALUES_LIFETIME_SECONDS);
+  // The runtime ends the exec's lease wait once this lifetime has passed, so
+  // it must outlast that wait, and stay inside the runtime's 1..300 range.
+  expect(NATIVE_EXEC_VALUES_LIFETIME_SECONDS).toBeGreaterThanOrEqual(
+    NATIVE_COMMAND_LEASE_WAIT_SECONDS + 30
+  );
+  expect(NATIVE_EXEC_VALUES_LIFETIME_SECONDS).toBeLessThanOrEqual(300);
+});
+
+test("HACK-2729 review: an exec that did not run releases a background command's slot", async () => {
+  const marker = join(
+    await realpath(await mkdtemp(join(tmpdir(), "native-exec-slot-"))),
+    "exit-confirmed"
+  );
+  roots.push(join(marker, ".."));
+  const previous = process.env[NATIVE_EXIT_CONFIRMED_ENV];
+  process.env[NATIVE_EXIT_CONFIRMED_ENV] = marker;
+  try {
+    const opts = await fixture();
+    // An unconfirmed outcome keeps the slot.
+    await expect(
+      nativeProjectExec({
+        ...opts,
+        service: "web",
+        argv: ["true"],
+        onLeaseWait: () => undefined,
+        invoke: async (request) => {
+          if (request.args[1] === "status") {
+            return snapshot();
+          }
+          throw new Error("synthetic lost reply");
+        },
+      })
+    ).rejects.toThrow("unconfirmed");
+    expect(await lstat(marker).catch(() => null)).toBeNull();
+    // A refusal whose command was never sent releases it.
+    await expect(
+      nativeProjectExec({
+        ...opts,
+        service: "web",
+        argv: ["true"],
+        onLeaseWait: () => undefined,
+        invoke: async (request) => {
+          if (request.args[1] === "status") {
+            return snapshot();
+          }
+          throw new NativeRuntimeRequestError({
+            message: "private stderr",
+            nativeCode: "provider_busy",
+            nativeMessage: PROJECT_STOP,
+          });
+        },
+      })
+    ).rejects.toThrow("nothing ran.");
+    expect(await lstat(marker).catch(() => null)).not.toBeNull();
+  } finally {
+    restoreEnv(NATIVE_EXIT_CONFIRMED_ENV, previous);
+  }
 });

@@ -2,6 +2,8 @@ import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   isNativeCommandLeaseRefusal,
+  isNativeOwnerRefreshLeaseRefusal,
+  NATIVE_OWNER_REFRESH_LEASE_BUSY,
   type NativeLeaseCommand,
   nativeCommandLeaseRefusal,
   nativeCommandLeaseWaitReporter,
@@ -33,6 +35,7 @@ const REFRESH_DIAGNOSTIC_CODES = new Set([
   "graph_dependency_rebind_launch",
   "graph_dependency_rebind_readiness",
   "graph_dependency_rebind_stop",
+  NATIVE_OWNER_REFRESH_LEASE_BUSY,
   "graph_dependency_refresh_refused",
   "graph_owner_recovery",
   "graph_publisher_retirement",
@@ -62,12 +65,21 @@ const RUNTIME_NOT_RUNNING_MESSAGE =
 
 function refused(cause?: unknown, command?: NativeLeaseCommand): Error {
   // The requesting process's own lease wait expired before it sent anything to
-  // the owner (HACK-2729): nothing was refreshed and no command ran, so this is
-  // not an uncertain outcome. Owner refusals arrive wrapped in another code.
-  if (command && isNativeCommandLeaseRefusal(cause)) {
+  // the owner (HACK-2729), or the owner's own wait expired before its rebind:
+  // nothing was refreshed and no command ran, so this is not an uncertain
+  // outcome. Every other owner refusal arrives wrapped and stays unconfirmed.
+  if (
+    command &&
+    (isNativeCommandLeaseRefusal(cause) ||
+      isNativeOwnerRefreshLeaseRefusal(cause))
+  ) {
     return nativeCommandLeaseRefusal({
-      nativeMessage: cause.nativeMessage,
+      // The owner's answer carries only its code, so it names no holder.
+      nativeMessage: isNativeCommandLeaseRefusal(cause)
+        ? cause.nativeMessage
+        : undefined,
       command,
+      stage: "refresh",
     });
   }
   if (

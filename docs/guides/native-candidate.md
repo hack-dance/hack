@@ -1011,8 +1011,8 @@ that stops its own run records itself as `project stop` in the lock, whether aft
 names the project. If the holder keeps the lease past 35 seconds, the start refuses
 `provider_busy` with nothing started, names the holder, and tells you to retry the
 same command once that holder finishes. You do not need `hack down` or a pool stop
-first. `hack exec` waits the same 35 seconds before it sends anything (see
-[Normal native exec](#normal-native-exec)). `hack ps` and `hack logs` keep their
+first. `hack exec` waits up to the same 35 seconds for each of its two lease steps
+(see [Normal native exec](#normal-native-exec)). `hack ps` and `hack logs` keep their
 short observer behavior, and the inspection a foreground start makes after it ends
 (after Ctrl-C, for example) keeps its 5-second bound.
 
@@ -3882,7 +3882,10 @@ holds briefly and another project's `hack down` holds for its whole stop. The
 owner's answer waits up to 15 seconds, because it waits on the owner's only loop.
 If the request's own wait expires, it has sent nothing to the owner, so the command
 says that nothing ran, names the holder, and tells you to retry once that holder
-finishes (see [Normal native exec](#normal-native-exec)).
+finishes (see [Normal native exec](#normal-native-exec)). The same applies when the
+owner's own 15-second wait expires before its rebind (another waiter took the
+lease first): the owner answers `graph_dependency_refresh_lease_busy`, and the
+command says that nothing ran, with the holder unavailable.
 If refresh refuses after that, the frontend preserves only reviewed native error
 identifiers such as `graph_owner_recovery: graph_dependency_rebind_incomplete`.
 Subprocess text and unknown codes remain omitted. These diagnostics do not confirm
@@ -5421,8 +5424,8 @@ that lease. When nothing holds it, they take it at once and exec is as fast as
 before. When a wait lasts about 3 seconds, exec prints one line that names the
 holder, for example `Waiting for the native runtime lock, held by a project stop.
 This command continues once it is released (up to 35 s).` The line appears at most
-once per command. If the holder keeps the lease past 35 seconds, exec refuses
-`provider_busy` before it sends anything:
+once per command. If the holder keeps the lease past 35 seconds during the
+refresh, exec refuses `provider_busy` before it sends anything:
 
 ```text
 hack exec could not acquire the native runtime lock (provider_busy); nothing ran.
@@ -5430,8 +5433,12 @@ Holder: project stop.
 Retry hack exec once that project stop finishes.
 ```
 
-`hack run` says the same with `hack run` when its dependency refresh cannot take
-the lease. "Unconfirmed" is kept for outcomes where the command may have run: a
+If the refresh completed and the exec's own wait expires, the first line ends with
+`the command did not run.` instead, because the refresh has already run. `hack run`
+says the same with `hack run` when its dependency refresh cannot take the lease. A
+refusal whose command never ran also releases a background command's admission
+slot. Fresh per-command values sent with exec have a 65-second delivery lifetime,
+which covers the whole 35-second wait. "Unconfirmed" is kept for outcomes where the command may have run: a
 refresh or exec that was sent and whose answer did not arrive or did not match.
 For compose-backed exec the 30-second budget starts after that wait. An authored
 project's exec and one-off `run`, and a compose project's one-off `run`, are

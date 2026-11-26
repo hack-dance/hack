@@ -197,6 +197,7 @@ if (process.argv.includes("plan-change-unsafe")) { console.error(JSON.stringify(
 if (process.argv.includes("structured")) { console.error(JSON.stringify({code:"source_conflict",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("foreground-stopped")) { console.error(JSON.stringify({code:"native_graph_foreground",cause_code:"runtime_not_running",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("foreground-other")) { console.error(JSON.stringify({code:"native_graph_foreground",cause_code:"engine_protocol",message:"synthetic-secret-diagnostic"})); process.exit(23); }
+if (process.argv.includes("foreground-exec-lease")) { console.error(JSON.stringify({code:"native_graph_foreground",cause_code:"graph_authored_exec_lease_busy",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("one-off-fail")) { console.error(JSON.stringify({code:"graph_one_off_failed",cause_code:"graph_one_off_cancelled",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("one-off-unsafe")) { console.error(JSON.stringify({code:"graph_one_off_failed",cause_code:"synthetic-secret-diagnostic",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("owner-fail")) { const {appendFileSync}=await import("node:fs"); appendFileSync("attempts","attempt"); console.error(JSON.stringify({code:"graph_owner_recovery",cause_code:"graph_relay_identity",message:"synthetic-secret-diagnostic"})); process.exit(23); }
@@ -1260,8 +1261,14 @@ bunTest.each([
     cause: "runtime_not_running",
   },
   { argument: "foreground-other", stopped: false, cause: undefined },
+  // HACK-2739: the authored owner's pre-effect exec lease refusal.
+  {
+    argument: "foreground-exec-lease",
+    stopped: false,
+    cause: "graph_authored_exec_lease_busy",
+  },
 ])(
-  "authored control failure preserves only the stopped-runtime cause: $argument",
+  "authored control failure preserves only its closed causes: $argument",
   async ({ argument, stopped, cause }) => {
     const runtime = await fixture();
     const error: unknown = await invokeNativeRuntime({

@@ -1,0 +1,20 @@
+---
+title: ExecStopWait · authored exec
+---
+stateDiagram-v2
+  direction TB
+  [*] --> requester
+  requester --> requester : Tick [stop holds]
+  requester --> owner : Acquire [free, sends]
+  requester --> refused : Expire [35 s]
+  owner --> owner : Tick [second holder]
+  owner --> running : Acquire [free]
+  owner --> refused : Expire [15 s, own code]
+  running --> done : Finish
+  refused --> [*] : nothing ran
+  done --> [*] : ran or unconfirmed
+  class requester wait
+  class owner wait
+  class running live
+  class done ok
+  class refused fail

@@ -10,6 +10,12 @@
  * start (`native-start-lease.ts`, HACK-2724), a wait that lasted about 3 s
  * prints one progress line per command, and an expired wait says that nothing
  * ran, names the holder, and says to retry.
+ *
+ * An authored project's `hack exec` (HACK-2739) sends one request to its owner.
+ * Its requesting process (`graph native exec`) waits the same bound for a free
+ * lease before it sends anything, so it reports and refuses the same way. If
+ * the lease is taken again before the owner acquires it, the owner's own short
+ * wait ends in a pre-effect code that also reads as "nothing ran".
  */
 import { NativeRuntimeRequestError } from "./native-runtime-client.ts";
 import {
@@ -101,10 +107,34 @@ export function isNativeOwnerRefreshLeaseRefusal(
 }
 
 /**
- * Which step's lease wait expired: the dependency refresh (nothing ran), or the
- * exec after a completed refresh (the command did not run).
+ * The authored owner's answer when its own lease wait for an exec expired
+ * (`OWNER_EXEC_LEASE_BUSY` in `native/runtime/exec.rs`, HACK-2739). That wait
+ * is the first thing the owner does for the exec, so nothing ran.
  */
-export type NativeLeaseStage = "refresh" | "exec";
+export const NATIVE_OWNER_AUTHORED_EXEC_LEASE_BUSY =
+  "graph_authored_exec_lease_busy";
+
+/**
+ * Whether `error` is the authored owner's own exec lease refusal, forwarded as
+ * the cause of the requester's `native_graph_foreground`. Only that exact pair
+ * is pre-effect; every other authored failure keeps its report.
+ */
+export function isNativeOwnerAuthoredExecLeaseRefusal(
+  error: unknown
+): error is NativeRuntimeRequestError {
+  return (
+    error instanceof NativeRuntimeRequestError &&
+    error.nativeCode === "native_graph_foreground" &&
+    error.nativeCauseCode === NATIVE_OWNER_AUTHORED_EXEC_LEASE_BUSY
+  );
+}
+
+/**
+ * Which step's lease wait expired: the dependency refresh (nothing ran), the
+ * exec after a completed refresh (the command did not run), or an authored
+ * exec's only request, refused before its owner did anything (nothing ran).
+ */
+export type NativeLeaseStage = "refresh" | "exec" | "authored";
 
 const notRunRefusals = new WeakSet<object>();
 
@@ -127,12 +157,20 @@ export function nativeCommandLeaseRefusal(opts: {
   readonly nativeMessage: string | undefined;
   readonly command: NativeLeaseCommand;
   readonly stage: NativeLeaseStage;
+  /**
+   * The wire code and cause this refusal came from, when it is not the
+   * requester's own raw `provider_busy` (an owner's pre-effect code, carried as
+   * the cause of the requester's code). Defaults to `provider_busy`, no cause.
+   */
+  readonly nativeCode?: string;
+  readonly nativeCauseCode?: string;
 }): NativeRuntimeRequestError {
   const holder = nativeStartLeaseHolder(opts.nativeMessage);
   const outcome =
-    opts.stage === "refresh" ? "nothing ran" : "the command did not run";
+    opts.stage === "exec" ? "the command did not run" : "nothing ran";
   const error = new NativeRuntimeRequestError({
-    nativeCode: "provider_busy",
+    nativeCode: opts.nativeCode ?? "provider_busy",
+    nativeCauseCode: opts.nativeCauseCode,
     nativeMessage: opts.nativeMessage,
     message: [
       `${opts.command} could not acquire the native runtime lock (provider_busy); ${outcome}.`,

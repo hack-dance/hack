@@ -423,6 +423,59 @@ pub(super) const COMMAND_LEASE_WAIT: Duration = Duration::from_secs(15);
 /// still costs only its own hold, and an uncontended acquisition returns at once.
 pub(super) const COMMAND_REQUEST_LEASE_WAIT: Duration = START_LEASE_WAIT;
 
+/// The requesting process of an authored `hack exec` waits here, before it sends
+/// anything to its owner, until the provider lease is free (HACK-2739). The owner
+/// answers on its only loop thread, where its own wait keeps `COMMAND_LEASE_WAIT`
+/// inside a fixed 30 s budget that the requester reads for a fixed 40 s, so the
+/// wait for another project's stop belongs on this side, as the Compose
+/// refresh's does (HACK-2729). It waits until `deadline`, and for at most
+/// [`COMMAND_REQUEST_LEASE_WAIT`], through the same loop, holder report and
+/// refusal as every other lease wait.
+///
+/// This only waits: it takes the lease for one nonblocking attempt at a time and
+/// releases it at once. It opens no engine connection and checks nothing else,
+/// so an uncontended call costs one lock attempt and the normal path keeps its
+/// latency. Every pool, owner and identity check stays with the owner, after its
+/// own acquisition. Only a `provider_busy` on expiry (the last refusal, so the
+/// holder is named) is returned; nothing was sent and no command ran. Any other
+/// failure to take the lock (no provider state directory, no lock file, a lock
+/// that cannot be opened) returns `Ok` at once, and the request goes on to the
+/// owner, whose answer is the same as before this wait existed.
+///
+/// It does not read the pool record, so it does not tell a running pool from a
+/// stopped one. While anything holds the lock it waits, whatever the pool's
+/// phase: during a `runtime down` or a cold start (the pool not running, the
+/// lock held) the requester waits up to 35 s and may refuse `provider_busy`
+/// naming that holder, instead of reaching the owner's quick
+/// `runtime_not_running`. That refusal is still pre-effect and bounded. Once the
+/// lock is free, the owner reports the pool's phase as before.
+///
+/// The lease can be taken again between this wait and the owner's acquisition.
+/// The owner then waits its own 15 s, and on expiry answers with a pre-effect
+/// code of its own (`graph_authored_exec_lease_busy`).
+#[cfg(all(target_os = "macos", any(test, feature = "native-config-plan")))]
+pub(in crate::provider) fn await_free_command_lease(
+    candidate: &Candidate,
+    deadline: Instant,
+) -> Result<(), CandidateError> {
+    let lease =
+        super::engine::command_lease_deadline(Instant::now(), deadline, COMMAND_REQUEST_LEASE_WAIT);
+    let root = root(candidate);
+    match state::wait_for_acquisition(
+        lease,
+        || Ok(()),
+        || state::Lock::acquire_existing(&root),
+        state::acquisition_expired,
+    ) {
+        Ok(lock) => {
+            drop(lock);
+            Ok(())
+        }
+        Err(error) if error.code == "provider_busy" => Err(error),
+        Err(_) => Ok(()),
+    }
+}
+
 /// How long the shared HTTPS owner's hostname authority waits for the provider lease
 /// at startup. The authority starts at a run's ready line after `hack up -d` returned,
 /// which is exactly when that run's first commands and a `hack down` arrive. A

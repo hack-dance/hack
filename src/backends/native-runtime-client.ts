@@ -1376,7 +1376,10 @@ function nativeFailureCause(input: {
   ) ||
     (input.code === "native_graph_foreground" &&
       (input.cause === NATIVE_RUNTIME_NOT_RUNNING ||
-        input.cause === "graph_status_changed"))
+        input.cause === "graph_status_changed" ||
+        // The authored owner's pre-effect exec lease refusal (HACK-2739),
+        // `NATIVE_OWNER_AUTHORED_EXEC_LEASE_BUSY` in native-command-lease.ts.
+        input.cause === "graph_authored_exec_lease_busy"))
     ? input.cause
     : undefined;
 }

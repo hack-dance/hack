@@ -76,7 +76,7 @@ Usage:
   hack-local runtime archive-previous-boot-shared-https --run-id <32-hex> --expect-owner-generation <32-hex> --expect-lease-id <32-hex> --expect-attempt <32-hex> --expect-owner <32-hex> --expect-namespace <64-hex> --expect-plan <64-hex> --json
   hack-local runtime recover-quiescent-https --expect-owner <64-hex> --expect-configuration <64-hex> --expect-frontend-pid <pid> --accept-legacy-device-rebind <run:witness-sha:socket-dev:socket-ino:lock-dev:lock-ino> --json
   hack-local runtime inspect-host-listener --pid <pid> --port <loopback-port> --executable <absolute-path> [--peer-port <open-client-port>] [--json]
-  hack-local runtime serve-managed-hostnames [--certificate-name-limit <1..4096>] (owner pipe on stdin)
+  hack-local runtime serve-managed-hostnames [--certificate-name-limit <1..4096> [--caddy-admin-socket <path>]] (owner pipe on stdin)
   hack-local runtime certificate-admission [--json]
   hack-local runtime guest-disk-usage [--json]
   hack-local runtime disk-usage [--scope all|runtime|build|evidence|artifacts|image-archives] [--max-entries <1..1000000>] [--json]
@@ -1047,6 +1047,24 @@ fn run() -> Result<(), CandidateError> {
             hack_runtime_core::provider::hostname_authority::managed::serve_with_certificate_limit(
                 &discover_candidate(&requested)?,
                 Some(limit),
+                None,
+            )?;
+        }
+        [
+            "runtime",
+            "serve-managed-hostnames",
+            "--certificate-name-limit",
+            limit,
+            "--caddy-admin-socket",
+            admin,
+        ] => {
+            let limit = limit.parse::<usize>().map_err(|_| {
+                CandidateError::new("certificate_admission", "Invalid certificate name limit.")
+            })?;
+            hack_runtime_core::provider::hostname_authority::managed::serve_with_certificate_limit(
+                &discover_candidate(&requested)?,
+                Some(limit),
+                Some(std::path::Path::new(admin)),
             )?;
         }
         ["runtime", "serve-managed-hostnames"] => {

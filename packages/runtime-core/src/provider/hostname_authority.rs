@@ -11,7 +11,7 @@ use std::{
     os::{
         fd::AsRawFd,
         unix::{
-            fs::PermissionsExt,
+            fs::{FileTypeExt, MetadataExt, PermissionsExt},
             net::{UnixListener, UnixStream},
         },
     },
@@ -20,6 +20,12 @@ use std::{
 };
 const LIMIT: usize = 4096;
 const CLIENTS: usize = 32;
+/// The longest the serving loop waits before it checks its owner again, also
+/// with no clients (HACK-2720): a killed owner is noticed within about a second.
+const OWNER_CHECK_MS: i32 = 1000;
+/// Bounds on asking the owner's Caddy to stop through its admin socket.
+const CADDY_STOP_IO: Duration = Duration::from_secs(1);
+const CADDY_STOP_WAIT: Duration = Duration::from_secs(2);
 fn error() -> CandidateError {
     CandidateError::new(
         "hostname_authority",
@@ -187,26 +193,92 @@ fn answer(
         response(200, &serde_json::to_vec(&found).expect("JSON value"), None)
     }
 }
-/// No background daemon, idle polling or implicit socket adoption. EOF revokes this service.
+/// No background daemon or implicit socket adoption. End of file on the owner
+/// pipe revokes this service.
 pub fn serve(candidate: &Candidate, socket: &Path) -> Result<(), CandidateError> {
-    serve_locked(candidate, socket, None, None)
+    serve_locked(candidate, socket, None, None, 0, None)
 }
+
+/// Whether `path` can name the owner's Caddy admin socket: absolute and short
+/// enough for a Unix socket address.
+pub(crate) fn caddy_admin_path(path: &Path) -> Result<(), CandidateError> {
+    if !path.is_absolute() || path.as_os_str().len() > 100 {
+        return Err(error());
+    }
+    Ok(())
+}
+
+/// Ask the owner's Caddy to stop through its private admin socket (HACK-2720).
+/// Caddy routes every request through this authority (`forward_auth` and the
+/// on-demand TLS permission), so it is useless once the authority has gone, and
+/// an owner killed outright never stops it: it kept the HTTPS port and answered
+/// 403. This is Caddy's own graceful stop (`POST /stop`), never a signal, and only
+/// to a socket this user owns, mode 0600, in a private directory: the session
+/// directory the owner created for that Caddy. A missing or refusing socket means
+/// Caddy has not started or is already gone. Every step is bounded and the
+/// outcome is not trusted: recovery proves the port free separately.
+fn stop_caddy(admin: &Path) {
+    let Some(parent) = admin.parent() else {
+        return;
+    };
+    if state::check_private_directory(parent).is_err() {
+        return;
+    }
+    let Ok(metadata) = fs::symlink_metadata(admin) else {
+        return;
+    };
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+    {
+        return;
+    }
+    let Ok(mut stream) = UnixStream::connect(admin) else {
+        return;
+    };
+    let _ = stream.set_write_timeout(Some(CADDY_STOP_IO));
+    let _ = stream.set_read_timeout(Some(CADDY_STOP_IO));
+    // Caddy accepts these Host values on a Unix admin socket.
+    if stream
+        .write_all(b"POST /stop HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return;
+    }
+    let deadline = Instant::now() + CADDY_STOP_WAIT;
+    let mut sink = [0u8; 512];
+    while Instant::now() < deadline {
+        match stream.read(&mut sink) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+}
+
+/// `input` is the owner pipe (stdin in production; a test passes its own FIFO).
+/// `caddy_admin` is the admin socket of the Caddy that routes through this
+/// authority: it is asked to stop whenever serving ends (see [`stop_caddy`]).
 fn serve_locked(
     candidate: &Candidate,
     socket: &Path,
     startup_lock: Option<state::Lock>,
-    mut budget: Option<certificates::Budget>,
+    budget: Option<certificates::Budget>,
+    input: libc::c_int,
+    caddy_admin: Option<&Path>,
 ) -> Result<(), CandidateError> {
-    let mut input = std::mem::MaybeUninit::<libc::stat>::uninit();
-    if unsafe { libc::fstat(0, input.as_mut_ptr()) } != 0 {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(input, stat.as_mut_ptr()) } != 0 {
         return Err(error());
     }
-    let input = unsafe { input.assume_init() };
-    if input.st_mode & libc::S_IFMT != libc::S_IFIFO {
+    let stat = unsafe { stat.assume_init() };
+    if stat.st_mode & libc::S_IFMT != libc::S_IFIFO {
         return Err(error());
     }
     if !socket.is_absolute() || socket.as_os_str().len() > 100 {
         return Err(error());
+    }
+    if let Some(admin) = caddy_admin {
+        caddy_admin_path(admin)?;
     }
     let parent = socket.parent().ok_or_else(error)?;
     state::check_private_directory(parent)?;
@@ -221,6 +293,30 @@ fn serve_locked(
     listener.set_nonblocking(true).map_err(state::io)?;
     let fingerprint = owned.record(candidate)?;
     drop(startup_lock);
+    let served = serve_clients(candidate, &listener, &fingerprint, budget, input);
+    // Caddy goes with its authority, on every way out of serving; the socket
+    // and its receipt go when `owned` drops, after this.
+    if let Some(admin) = caddy_admin {
+        stop_caddy(admin);
+    }
+    drop(owned);
+    served
+}
+
+/// Serve until the owner is gone, a stop names this authority's receipt, or the
+/// listener fails. The owner is checked after every wake-up with one
+/// non-blocking read of its pipe ([`managed::owner_pipe_open`]), and the wait is
+/// bounded by [`OWNER_CHECK_MS`] even with no clients (HACK-2720): on a named
+/// FIFO Darwin's `poll` never reports that the last writer closed, and with no
+/// clients the wait was unbounded, so a killed owner left its authority serving
+/// forever. On Linux `POLLHUP` still wakes the loop at once.
+fn serve_clients(
+    candidate: &Candidate,
+    listener: &UnixListener,
+    fingerprint: &str,
+    mut budget: Option<certificates::Budget>,
+    input: libc::c_int,
+) -> Result<(), CandidateError> {
     let mut clients: Vec<Client> = Vec::new();
     println!("ready");
     std::io::stdout().flush().map_err(state::io)?;
@@ -229,7 +325,7 @@ fn serve_locked(
         clients.retain(|c| c.deadline > now);
         let mut fds = vec![
             libc::pollfd {
-                fd: 0,
+                fd: input,
                 events: libc::POLLIN,
                 revents: 0,
             },
@@ -257,7 +353,8 @@ fn serve_locked(
                     .clamp(1, 1000) as i32
             })
             .min()
-            .unwrap_or(-1);
+            .unwrap_or(OWNER_CHECK_MS)
+            .min(OWNER_CHECK_MS);
         let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
         if result < 0 {
             let e = std::io::Error::last_os_error();
@@ -266,12 +363,10 @@ fn serve_locked(
             }
             return Err(state::io(e));
         }
-        if fds[0].revents != 0 {
-            let mut bytes = [0u8; 64];
-            // Input is only an owner-lifetime pipe; payload is never a command.
-            if unsafe { libc::read(0, bytes.as_mut_ptr().cast(), bytes.len()) } <= 0 {
-                return Ok(());
-            }
+        // Input is only an owner-lifetime pipe; payload is never a command and
+        // is discarded. End of file is the owner's exit.
+        if managed::owner_pipe_open(input).is_err() {
+            return Ok(());
         }
         for index in (0..clients.len()).rev() {
             let events = fds[index + 2].revents;

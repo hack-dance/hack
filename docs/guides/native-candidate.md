@@ -5174,6 +5174,30 @@ owner directory, diagnostic included, moves beside a retired-owner record
 against the stopped graph, and the next `up` starts a new shared owner. `down`
 does not fail and the next `up` needs no recovery because of it.
 
+A serving hostname authority also notices when its owner is gone. It reads its
+stdin FIFO without blocking after every wake-up and waits at most a second, also
+with no clients, so after the shared owner is killed (for example `kill -9`) the
+authority stops serving within about 2 seconds, on macOS as on Linux. Whenever it
+stops serving it asks its Caddy to stop through Caddy's own admin socket (a
+graceful stop with a 1 second grace period, never a signal), then removes its
+socket and receipt as a cooperative stop does. When the run's lease is then
+recovered (by its frontend or by `hack down`), the exited owner generation is
+retired: recovery proves, under the owner admission lock, that the owner had
+published its endpoint, that its control socket refuses connections, that no
+process runs its exact owner invocation, and that the pool still runs the
+owner's boot. It waits up to 5 seconds for the authority and Caddy to exit. An
+authority still serving after that (an older runtime, or a recovery faster than
+its check) is stopped only through the runtime's cooperative stop, and only when
+the dead owner's receipt names its exact socket, receipt hash and process;
+anything else, or an HTTPS port that stays in use, is refused with a next step
+(run `hack down` again shortly, or stop that process yourself) and every record
+is kept. Otherwise the receipt, the dead challenge socket and the empty owner
+lock are removed, the owner directory moves beside a retired-owner record
+(`native-https/released-leases/<generation>/exited-owner`), the release is still
+verified against the stopped graph, `hack down` exits 0 and the next `up -d`
+starts a new shared owner. The owner's temporary session directory is left for
+the system to clear.
+
 An authority child that exits before readiness can supply a bounded structured
 native error code without exposing its stderr. Malformed, oversized or missing
 output leaves the cause unknown. The `authority-ready` diagnostic now covers only

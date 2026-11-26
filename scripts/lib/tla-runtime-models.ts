@@ -16,7 +16,11 @@ type ModelContract = {
   readonly alternativeWitnesses?: readonly WitnessFields[];
   readonly additionalControls?: readonly {
     readonly name: string;
-    readonly module?: "TerminalReuse" | "MetadataAliasing" | "PreReady";
+    readonly module?:
+      | "TerminalReuse"
+      | "MetadataAliasing"
+      | "PreReady"
+      | "ServingExit";
     readonly negative: boolean;
     readonly states?: number;
     readonly invariant?: string;
@@ -2127,6 +2131,59 @@ const contracts: readonly ModelContract[] = [
           'fin = "confirmed"',
           'https = "released"',
           "refusedSeen = TRUE",
+        ],
+      },
+      {
+        // HACK-2720: the shared owner killed while its run is ready. The
+        // authority notices its closed owner pipe within the deadline and stops
+        // its Caddy; `down` retires the exited owner and the next `up` starts.
+        name: "serving-exit",
+        module: "ServingExit",
+        negative: false,
+        states: 9,
+      },
+      {
+        // The old serving loop: `poll` never reports the closed named FIFO on
+        // macOS and waited with no timeout, so the authority served forever.
+        name: "serving-exit-old",
+        module: "ServingExit",
+        negative: true,
+        invariant: "NoticedInTime",
+        fields: ['authority = "serving"', 'owner = "killed"', "since = 3"],
+      },
+      {
+        // An authority that exits without stopping its Caddy leaves the port
+        // held, so `down` cannot prove the children gone.
+        name: "serving-exit-caddy-left",
+        module: "ServingExit",
+        negative: true,
+        invariant: "DownConfirms",
+        fields: ['caddy = "running"', 'down = "refused"'],
+      },
+      {
+        // Recovery that can release a lease only through a live owner: `down`
+        // fails and the next `up` refuses E_RECOVERY_REQUIRED.
+        name: "serving-exit-retained",
+        module: "ServingExit",
+        negative: true,
+        invariant: "NoRecoveryRequired",
+        fields: [
+          'up = "recoveryRequired"',
+          'records = "held"',
+          'down = "refused"',
+        ],
+      },
+      {
+        // Reachability: a killed owner is recovered and the next `up` starts.
+        name: "serving-exit-recovered",
+        module: "ServingExit",
+        negative: true,
+        invariant: "NeverStartedAfterKill",
+        fields: [
+          'up = "started"',
+          'records = "retired"',
+          'caddy = "stopped"',
+          'authority = "exited"',
         ],
       },
     ],

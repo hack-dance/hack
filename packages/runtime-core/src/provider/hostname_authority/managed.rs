@@ -2,7 +2,7 @@
 use super::super::{lifecycle, state, status};
 use crate::{Candidate, CandidateError};
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 fn socket(owner: &state::Owner) -> PathBuf {
@@ -26,17 +26,24 @@ pub fn inspect(c: &Candidate) -> Result<serde_json::Value, CandidateError> {
     Ok(serde_json::json!({"socket":path,"authority":state,"automatic_start":false}))
 }
 pub fn serve(c: &Candidate) -> Result<(), CandidateError> {
-    serve_with_certificate_limit(c, None)
+    serve_with_certificate_limit(c, None, None)
 }
+/// `caddy_admin` names the admin socket of the Caddy that routes through this
+/// authority; that Caddy is asked to stop when serving ends (HACK-2720).
 pub fn serve_with_certificate_limit(
     c: &Candidate,
     limit: Option<usize>,
+    caddy_admin: Option<&Path>,
 ) -> Result<(), CandidateError> {
+    if let Some(admin) = caddy_admin {
+        super::caddy_admin_path(admin)?;
+    }
     serve_with_startup_wait(
         c,
         limit,
         lifecycle::AUTHORITY_STARTUP_LEASE_WAIT,
         &owner_present,
+        caddy_admin,
     )
 }
 
@@ -49,8 +56,9 @@ fn owner_gone() -> CandidateError {
 
 /// The managed authority's owner keeps the write end of its stdin FIFO for the
 /// authority's whole lifetime (see `serve_locked`), so end of file means the
-/// owner is gone (it exited, was killed, or closed its end) and a startup that
-/// still waits for the lease stops waiting. Only a FIFO is that channel: any
+/// owner is gone (it exited, was killed, or closed its end): a startup that still
+/// waits for the lease stops waiting, and a serving authority stops serving
+/// (`serve_clients`, HACK-2720). Only a FIFO is that channel: any
 /// other stdin is left for `serve_locked` to refuse after acquisition, exactly as
 /// before. Payload is never a command and is discarded, as `serve_locked` does.
 fn owner_present() -> Result<(), CandidateError> {
@@ -70,9 +78,9 @@ fn owner_present() -> Result<(), CandidateError> {
 ///
 /// The open file description is this process's own (the shell opened it and
 /// exec'd), so setting `O_NONBLOCK` for the one read affects no other reader. The
-/// previous flags are restored before returning, because `serve_locked` reads
-/// the same descriptor after its own `poll`.
-fn owner_pipe_open(fd: libc::c_int) -> Result<(), CandidateError> {
+/// previous flags are restored before returning, so the descriptor keeps the
+/// mode it was opened with.
+pub(super) fn owner_pipe_open(fd: libc::c_int) -> Result<(), CandidateError> {
     let mut input = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(fd, input.as_mut_ptr()) } != 0 {
         return Ok(());
@@ -106,6 +114,7 @@ fn serve_with_startup_wait(
     limit: Option<usize>,
     wait: Duration,
     owner: &dyn Fn() -> Result<(), CandidateError>,
+    caddy_admin: Option<&Path>,
 ) -> Result<(), CandidateError> {
     // Graph inspection, commands and a graph stop also hold this lease. Wait before
     // admission (checking that the owner is still there before every attempt), then
@@ -131,7 +140,7 @@ fn serve_with_startup_wait(
             super::certificates::Budget::open(&super::certificates::root(c), &owner.token, limit)
         })
         .transpose()?;
-    super::serve_locked(c, &path, Some(lock), budget)
+    super::serve_locked(c, &path, Some(lock), budget, 0, caddy_admin)
 }
 /// Caller holds the provider operation lock, fencing concurrent managed startup.
 pub(crate) fn stop(c: &Candidate, owner: &state::Owner) -> Result<(), CandidateError> {
@@ -195,7 +204,8 @@ mod tests {
             drop(held);
         });
         let start = Instant::now();
-        let result = serve_with_startup_wait(&candidate, None, Duration::from_secs(2), &|| Ok(()));
+        let result =
+            serve_with_startup_wait(&candidate, None, Duration::from_secs(2), &|| Ok(()), None);
         worker.join().unwrap();
         assert!(start.elapsed() >= Duration::from_millis(100));
         // The exact production path gets past contention and rejects the unprepared
@@ -219,8 +229,13 @@ mod tests {
         let root = candidate.state_root.join("run/smolvm");
         let _held = state::Lock::acquire(&root).unwrap();
         let start = Instant::now();
-        let result =
-            serve_with_startup_wait(&candidate, None, Duration::from_millis(100), &|| Ok(()));
+        let result = serve_with_startup_wait(
+            &candidate,
+            None,
+            Duration::from_millis(100),
+            &|| Ok(()),
+            None,
+        );
         assert!(start.elapsed() >= Duration::from_millis(75));
         assert!(
             matches!(result, Err(e) if e.code == "provider_busy" && e.message.contains("no operation was admitted"))
@@ -258,6 +273,7 @@ mod tests {
             None,
             lifecycle::AUTHORITY_STARTUP_LEASE_WAIT,
             &|| Ok(()),
+            None,
         );
         worker.join().unwrap();
         assert!(start.elapsed() >= hold);
@@ -291,6 +307,7 @@ mod tests {
                     Ok(())
                 }
             },
+            None,
         );
         assert!(start.elapsed() < Duration::from_secs(2));
         assert!(
@@ -387,6 +404,7 @@ mod tests {
             None,
             lifecycle::AUTHORITY_STARTUP_LEASE_WAIT,
             &|| owner_pipe_open(reader),
+            None,
         );
         closer.join().unwrap();
         unsafe { libc::close(reader) };
@@ -397,5 +415,148 @@ mod tests {
             "{result:?}"
         );
         assert!(!root.join("owner.json").exists());
+    }
+
+    /// A private directory short enough for a Unix socket path on macOS and
+    /// Linux (the fixture's temporary directory is not, on macOS).
+    struct SocketDirectory(PathBuf);
+    impl SocketDirectory {
+        fn new(tag: &str) -> Self {
+            let path = fs::canonicalize("/tmp").unwrap().join(format!(
+                "hka-{tag}-{}-{}",
+                std::process::id(),
+                crate::next_test_scratch()
+            ));
+            state::private_directory(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for SocketDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A stand-in for the owner's Caddy admin socket: returns the one request it
+    /// receives (empty if none arrives) and answers as Caddy does before it exits.
+    fn caddy_admin(directory: &SocketDirectory) -> (PathBuf, std::thread::JoinHandle<Vec<u8>>) {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::PermissionsExt;
+        let path = directory.0.join("admin.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let handle = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        let mut request = Vec::new();
+                        let mut bytes = [0u8; 256];
+                        while !request.ends_with(b"\r\n\r\n") {
+                            match stream.read(&mut bytes) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => request.extend_from_slice(&bytes[..n]),
+                            }
+                        }
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        return request;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+            Vec::new()
+        });
+        (path, handle)
+    }
+
+    /// HACK-2720: a serving authority with no clients notices that its owner is
+    /// gone. The owner pipe is a real named FIFO opened as production opens it.
+    /// While the writer stays open the authority keeps serving (no false exit
+    /// past one owner-check interval); once the writer closes (the owner was
+    /// killed) the loop ends within the bound, asks its Caddy to stop through the
+    /// admin socket, and removes its socket and receipt, as a cooperative stop
+    /// does. Before the fix the loop waited in `poll` with no timeout and Darwin
+    /// never reported the closed FIFO, so it served forever.
+    #[test]
+    fn serving_authority_exits_soon_after_its_owner_fifo_closes() {
+        let fixture = Fixture::new();
+        let candidate = fixture.candidate();
+        let sockets = SocketDirectory::new("serve");
+        let socket = sockets.0.join("route.sock");
+        let receipt = sockets.0.join("route.sock.identity");
+        let session = SocketDirectory::new("caddy");
+        let (admin, caddy) = caddy_admin(&session);
+        let (reader, writer) = owner_fifo(&fixture);
+        let (done, ended) = std::sync::mpsc::channel();
+        let (served, admin_path) = (socket.clone(), admin.clone());
+        // On its own thread, so a loop that never notices fails this test
+        // instead of hanging it.
+        std::thread::spawn(move || {
+            let result = super::super::serve_locked(
+                &candidate,
+                &served,
+                None,
+                None,
+                reader,
+                Some(admin_path.as_path()),
+            );
+            let _ = done.send(result);
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !socket.exists() {
+            assert!(Instant::now() < deadline, "the authority never served");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // A healthy owner holds the pipe longer than one check interval.
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(
+            socket.exists() && ended.try_recv().is_err(),
+            "the authority stopped while its owner held the pipe"
+        );
+        let closed = Instant::now();
+        unsafe { libc::close(writer) };
+        let result = ended
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the authority kept serving after its owner's pipe closed");
+        let after = closed.elapsed();
+        unsafe { libc::close(reader) };
+        let request = caddy.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(after < Duration::from_secs(2), "noticed after {after:?}");
+        assert!(
+            request.starts_with(b"POST /stop HTTP/1.1\r\n"),
+            "{:?}",
+            String::from_utf8_lossy(&request)
+        );
+        assert!(!socket.exists() && !receipt.exists());
+    }
+
+    /// Caddy is asked to stop only through a private admin socket: one in a
+    /// directory other users can enter is left alone.
+    #[test]
+    fn caddy_is_stopped_only_through_a_private_admin_socket() {
+        use std::os::unix::fs::PermissionsExt;
+        let session = SocketDirectory::new("open");
+        let (admin, caddy) = caddy_admin(&session);
+        fs::set_permissions(&session.0, fs::Permissions::from_mode(0o755)).unwrap();
+        super::super::stop_caddy(&admin);
+        fs::set_permissions(&session.0, fs::Permissions::from_mode(0o700)).unwrap();
+        // The stand-in is still waiting: end it with a request of our own.
+        std::io::Write::write_all(
+            &mut std::os::unix::net::UnixStream::connect(&admin).unwrap(),
+            b"GET / HTTP/1.1\r\n\r\n",
+        )
+        .unwrap();
+        assert!(caddy.join().unwrap().starts_with(b"GET / "));
     }
 }

@@ -1,4 +1,4 @@
-# Native warm-up window after `hack up -d` (HACK-2669, HACK-2707, HACK-2708, HACK-2709)
+# Native warm-up window after `hack up -d` (HACK-2669, HACK-2707, HACK-2708, HACK-2709, HACK-2720)
 
 `hack up -d` returns at started with "N routes warming". The owner then reaches
 its ready line and releases the provider lease, and the detached frontend takes
@@ -157,6 +157,94 @@ retained startup failure.
   (`publication::inspect_claims`, `graph::inspect_bridges`) refuse
   `provider_busy` at once, naming the holder, which is the only refusal the
   owner retries.
+
+## Owner killed while serving (HACK-2720)
+
+On a real VM a routed project was ready for three minutes, then its shared
+HTTPS owner (`hack --internal-native-https-owner`) got `kill -9`. The run went
+to `stopped-data-retained`, but the hostname authority
+(`serve-managed-hostnames`) was still running 120 s later, both routes answered
+403, `hack down` failed with "Shared native HTTPS ownership is unavailable or
+unconfirmed", `up -d` then refused `E_RECOVERY_REQUIRED`, and a Caddy process
+was left behind.
+
+- **The authority never noticed.** Once serving, its loop
+  (`hostname_authority.rs`, `serve_locked`) learned of its owner's exit only
+  from `poll` on its stdin FIFO, and with no clients it waited with a `-1`
+  timeout. On a named FIFO Darwin's `poll` reports nothing after the writer
+  closes, the same defect the startup wait had (#1260, M1). It now reads the
+  pipe once without blocking after every wake-up (`managed::owner_pipe_open`:
+  0 is the owner's exit, `EAGAIN` a live owner) and never waits longer than
+  1 s (`OWNER_CHECK_MS`), so it ends within about 2 s, on Linux as on macOS.
+- **Nothing stopped Caddy.** Caddy is the owner's child and routes every
+  request through the authority. The authority is now told Caddy's admin socket
+  (`--caddy-admin-socket`) and, whenever serving ends, asks that Caddy to stop
+  with its own graceful `POST /stop` (bounded, only through a private socket,
+  never a signal) before it removes its socket and receipt, as the cooperative
+  `stop-hostname-authority` does. Caddy's `grace_period 1s` bounds that stop
+  with open connections (a dev server's websocket).
+- **Recovery could only release through a live owner.** `recoverNativeHttpsLease`
+  now retires an owner generation that ran and exited without its cleanup
+  (`retireExitedNativeHttpsOwner`), under the owner admission lock and without
+  signaling anything: the endpoint was published and its control socket is gone
+  or refuses connections; no process runs that generation's exact owner
+  invocation (checked again at the effect boundary); the pool still runs the
+  owner's boot (an ended boot is the previous-boot archive's); and its children
+  are gone (`retireExitedNativeHttpsChildren`). That waits 5 s for the
+  authority and Caddy to exit on their own; an authority still serving after
+  that (an older runtime, or a caller faster than its check) is stopped only
+  through the cooperative, identity-checked `stop-hostname-authority`, and only
+  when the dead owner's receipt (whose challenge socket refuses connections)
+  names its exact socket, receipt hash and process; anything else, and a port
+  still held, is refused with a next step. Then the receipt, the dead challenge
+  socket and the empty owner lock are removed by their exact identities, and
+  the owner root moves beside a retired-owner record
+  (`released-leases/<generation>/exited-owner`). Each lease's release is still
+  verified through the graph.
+
+`ServingExit.tla` (same directory) models this: the ready owner, its authority
+and Caddy, a kill, ticks of one second while the authority still serves, the
+authority's notice, `hack down` at any time after the kill (also before the
+authority noticed), and the next `up`. `PipeCheck = FALSE` is the old serving
+loop, `StopsCaddy = FALSE` an authority that leaves Caddy running,
+`RetireExited = FALSE` the old recovery.
+
+| Config | Result | Shows |
+| --- | --- | --- |
+| `serving-exit` (all fixes) | 9 distinct states, no error; `ChildrenEnd` holds under weak fairness | The authority is gone within the 2 s deadline (`NoticedInTime`); a healthy owner's children never stop (`NoFalseExit`); a live owner is never retired (`NoLiveRetire`); a confirmed `down` leaves no child running (`DownLeavesNothing`); `down` confirms and the next `up` needs no recovery |
+| `serving-exit-old` (`PipeCheck`, `StopsCaddy`, `RetireExited` all FALSE) | `NoticedInTime` violated: `authority = "serving"`, `owner = "killed"`, `since = 3` | The real-VM row: the authority serves on after its owner was killed |
+| `serving-exit-caddy-left` (`StopsCaddy = FALSE`) | `DownConfirms` violated: `caddy = "running"`, `down = "refused"` | Without Caddy's stop, `down` cannot prove the children gone |
+| `serving-exit-retained` (`RetireExited = FALSE`) | `NoRecoveryRequired` violated: `up = "recoveryRequired"`, `records = "held"`, `down = "refused"` | `down` failed and the next `up` refused `E_RECOVERY_REQUIRED` |
+| `serving-exit-recovered` | `NeverStartedAfterKill` violated: `up = "started"`, `records = "retired"` | Reachability: a killed owner is recovered and the next `up` starts |
+
+[State chart](serving-exit.svg) ([source](serving-exit.mmd)).
+
+Tests:
+
+- `hostname_authority::managed::tests::serving_authority_exits_soon_after_its_owner_fifo_closes`:
+  the real serving loop on a real named FIFO with no clients keeps serving
+  1.5 s while the writer is open, then ends under 2 s after it closes, sends
+  `POST /stop` to a stand-in admin socket and removes its socket and receipt. It
+  fails on macOS with the old loop (timed out, still serving).
+  `caddy_is_stopped_only_through_a_private_admin_socket`: a socket in a
+  directory others can enter gets nothing.
+- `tests/native-https-owner.test.ts` ("a shared owner that exited while
+  serving"): the real owner process is killed with `SIGKILL`; the production
+  owner-invocation check sees it alive and then gone; the lease recovery
+  retires it (evidence kept, release verified, repeatable) and the next owner
+  starts. A still-running invocation, an ended pool boot, children not proven
+  gone, or a live owner leave every record and refuse as before.
+- `tests/native-project-https.test.ts`: the authority gets the admin socket and
+  Caddy `grace_period 1s`; an exited owner's records are retired once its
+  authority exits on its own; an orphaned authority is stopped only through the
+  cooperative stop, with its exact socket and hash; a dead authority is
+  recovered by its hash; an authority the receipt does not name, a held port,
+  and a receipt whose owner still answers are refused with every record kept.
+
+Not modelled or tested: the real Caddy and runtime binaries, the 5 s wait
+against a slow machine, and a Caddy whose authority was killed too (recovery
+refuses with a next step: the user stops it). Only the real-VM rows prove the
+end-to-end outcome.
 
 ## Not modelled
 

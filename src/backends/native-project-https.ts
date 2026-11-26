@@ -7,13 +7,21 @@ import {
   verify,
   X509Certificate,
 } from "node:crypto";
-import { closeSync, constants, mkdtempSync, openSync, rmSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  mkdtempSync,
+  openSync,
+  rmSync,
+  type Stats,
+} from "node:fs";
 import {
   link,
   lstat,
   mkdir,
   mkdtemp,
   open,
+  readdir,
   realpath,
   rm,
   rmdir,
@@ -345,6 +353,7 @@ function config(opts: {
  persist_config off
  skip_install_trust
  auto_https disable_redirects
+ grace_period 1s
  on_demand_tls {
   permission http http://127.0.0.1:${opts.permissionPort}/ask
  }
@@ -1029,6 +1038,327 @@ export async function inspectActiveNativeHttpsOwner(opts: {
   }
 }
 
+/**
+ * How long the authority and Caddy of an owner that exited get to exit on their
+ * own. The authority notices within about 2 s (it checks its owner pipe every
+ * second) and stops its Caddy as it exits (HACK-2720).
+ */
+export const NATIVE_HTTPS_EXITED_CHILD_WAIT_MS = 5000;
+
+/** A next step for a child the exited owner left that recovery may not stop. */
+function exitedChildRefused(detail: string): Error {
+  return new ClosedCliError(
+    `${detail} Nothing was stopped and the retained records were kept. Run hack down again in a few seconds; if this repeats, stop that process yourself, then run hack down again.`
+  );
+}
+
+/** Whether a Unix socket refuses connections: no process listens on it. */
+async function socketRefuses(path: string): Promise<boolean> {
+  return await new Promise((resolve) => {
+    const socket = connect(path);
+    const finish = (refuses: boolean) => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(refuses);
+    };
+    // An answer proves a live listener; silence proves nothing.
+    const timer = setTimeout(() => finish(false), 1000);
+    socket.once("connect", () => finish(false));
+    socket.once("error", (error: NodeJS.ErrnoException) =>
+      finish(error.code === "ECONNREFUSED")
+    );
+  });
+}
+
+/** The file's identity if it exists; anything but ENOENT refuses. */
+async function presentEntry(path: string): Promise<Stats | undefined> {
+  try {
+    return await lstat(path);
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return;
+    }
+    throw refused();
+  }
+}
+
+type ReceiptIdentity = {
+  readonly dev: number;
+  readonly ino: number;
+  readonly sha256: string;
+};
+interface ExitedOwnerEntries {
+  readonly receipt?: {
+    readonly value: NativeHttpsOwnerReceipt;
+    readonly identity: ReceiptIdentity;
+  };
+  readonly lock?: Stats;
+  readonly owner?: Stats;
+}
+
+/** The exited owner's receipt, lock and challenge socket, proven not live. */
+async function exitedOwnerEntries(opts: {
+  readonly storage: string;
+  readonly httpsPort: number;
+}): Promise<ExitedOwnerEntries> {
+  const receiptPath = join(opts.storage, OWNER_RECEIPT);
+  const lockPath = join(opts.storage, "owner.lock");
+  const ownerSocket = join(opts.storage, OWNER_SOCKET);
+  let receipt: ExitedOwnerEntries["receipt"];
+  const receiptEntry = await presentEntry(receiptPath);
+  if (receiptEntry) {
+    const bytes = await boundedFile(receiptPath, 4096, true);
+    const value = parseOwnerReceipt(
+      JSON.parse(bytes.toString("utf8")) as unknown
+    );
+    if (value.listener.port !== opts.httpsPort) {
+      throw refused();
+    }
+    receipt = {
+      value,
+      identity: {
+        dev: receiptEntry.dev,
+        ino: receiptEntry.ino,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      },
+    };
+  }
+  const lock = await presentEntry(lockPath);
+  if (lock) {
+    await inspectPrivateDirectory(lockPath);
+    const recorded = receipt?.value.lock;
+    if (
+      (recorded && (lock.dev !== recorded.dev || lock.ino !== recorded.ino)) ||
+      (await readdir(lockPath)).length !== 0
+    ) {
+      throw refused();
+    }
+  }
+  const owner = await presentEntry(ownerSocket);
+  const challenge = receipt?.value.owner;
+  if (
+    owner &&
+    (!owner.isSocket() ||
+      owner.uid !== process.getuid?.() ||
+      (owner.mode & 0o777) !== 0o600 ||
+      (challenge &&
+        (owner.dev !== challenge.dev || owner.ino !== challenge.ino)) ||
+      !(await socketRefuses(ownerSocket)))
+  ) {
+    throw refused();
+  }
+  return { receipt, lock, owner };
+}
+
+type AuthorityState =
+  | { readonly present: false }
+  | {
+      readonly present: true;
+      readonly alive: boolean;
+      readonly owned: { readonly socket: string; readonly sha256: string };
+    };
+
+/** The authority as `managed-hostname-authority` reports it, validated. */
+function authorityState(value: unknown): AuthorityState {
+  if (
+    !(
+      isRecord(value) &&
+      typeof value.socket === "string" &&
+      isRecord(value.authority)
+    )
+  ) {
+    throw refused();
+  }
+  if (value.authority.present === false) {
+    return { present: false };
+  }
+  if (
+    value.authority.present !== true ||
+    typeof value.authority.sha256 !== "string" ||
+    !SHA.test(value.authority.sha256) ||
+    typeof value.authority.process_present !== "boolean"
+  ) {
+    throw refused();
+  }
+  return {
+    present: true,
+    alive: value.authority.process_present,
+    owned: { socket: value.socket, sha256: value.authority.sha256 },
+  };
+}
+
+/**
+ * Wait for the exited owner's authority to exit on its own; recover a dead
+ * one's records; stop one still serving at the deadline only cooperatively and
+ * only when the receipt names it exactly; otherwise refuse with a next step.
+ */
+async function retireExitedAuthority(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly home: string;
+  readonly invoke: typeof invokeNativeRuntime;
+  readonly receipt: NativeHttpsOwnerReceipt | undefined;
+  readonly deadline: number;
+}): Promise<void> {
+  const inspect = () =>
+    opts.invoke({
+      runtime: opts.runtime,
+      cwd: opts.home,
+      args: ["runtime", "managed-hostname-authority", "--json"],
+      timeoutMs: 5000,
+    });
+  let value = await inspect();
+  let state = authorityState(value);
+  while (state.present && state.alive && Date.now() < opts.deadline) {
+    await Bun.sleep(100);
+    value = await inspect();
+    state = authorityState(value);
+  }
+  if (!state.present) {
+    return;
+  }
+  if (!state.alive) {
+    // A dead authority's records; the runtime proves its exit by identity.
+    await retireAuthority({
+      inspect,
+      invoke: opts.invoke,
+      runtime: opts.runtime,
+      home: opts.home,
+      owned: state.owned,
+    });
+    return;
+  }
+  const named = opts.receipt?.authority;
+  if (
+    !named ||
+    named.socket !== state.owned.socket ||
+    named.sha256 !== state.owned.sha256
+  ) {
+    throw exitedChildRefused(
+      "The managed hostname authority still runs and the exited shared HTTPS owner's receipt does not name it."
+    );
+  }
+  await authorityIdentity(value, named.pid);
+  await opts.invoke({
+    runtime: opts.runtime,
+    cwd: opts.home,
+    args: [
+      "runtime",
+      "stop-hostname-authority",
+      "--socket",
+      state.owned.socket,
+      "--expect-sha256",
+      state.owned.sha256,
+      "--json",
+    ],
+    timeoutMs: 10_000,
+  });
+  if (authorityState(await inspect()).present) {
+    throw refused();
+  }
+}
+
+/** Caddy leaves the HTTPS port once its authority has stopped it. */
+async function awaitExitedCaddy(opts: {
+  readonly port: number;
+  readonly checkPort: (port: number) => Promise<void>;
+  readonly receipt: NativeHttpsOwnerReceipt | undefined;
+  readonly deadline: number;
+}): Promise<void> {
+  for (;;) {
+    try {
+      await opts.checkPort(opts.port);
+      return;
+    } catch {
+      if (Date.now() >= opts.deadline) {
+        throw exitedChildRefused(
+          opts.receipt
+            ? `HTTPS port ${opts.port} is still in use; the exited shared HTTPS owner's Caddy (process ${opts.receipt.listener.pid}) may still run.`
+            : `HTTPS port ${opts.port} is still in use after the shared HTTPS owner exited.`
+        );
+      }
+      await Bun.sleep(100);
+    }
+  }
+}
+
+/**
+ * Retire what a shared owner that exited without its own cleanup (killed,
+ * HACK-2720) left of its child pair, or refuse with a next step. The caller has
+ * proved the owner process itself is gone, under the owner admission lock.
+ *
+ * Nothing here signals a process:
+ * - The receipt's owner must be gone: its exact challenge socket refuses
+ *   connections. A live one is never touched.
+ * - The hostname authority exits by itself once its owner pipe closes, and stops
+ *   its Caddy as it goes; it gets {@link NATIVE_HTTPS_EXITED_CHILD_WAIT_MS}. An
+ *   authority still serving after that (an older runtime, or one slower than
+ *   this caller) is stopped only through the runtime's cooperative,
+ *   identity-checked stop, and only when the exited owner's receipt names its
+ *   exact socket, receipt hash and process. Otherwise it is refused with a next
+ *   step. A dead authority's records are recovered by their exact hash.
+ * - Caddy must have left the HTTPS port within the same wait. One that still
+ *   holds it is refused with a next step, never stopped from here.
+ *
+ * Only then are the receipt, the dead challenge socket and the empty owner lock
+ * removed, each by its exact identity, so the next owner can start. The
+ * temporary session directory (Caddyfile and caches) is left to the system.
+ */
+export async function retireExitedNativeHttpsChildren(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly httpsPort: number;
+  readonly invoke?: typeof invokeNativeRuntime;
+  readonly checkPort?: (port: number) => Promise<void>;
+  readonly exitWaitMs?: number;
+}): Promise<void> {
+  const deadline =
+    Date.now() + (opts.exitWaitMs ?? NATIVE_HTTPS_EXITED_CHILD_WAIT_MS);
+  const home = await realpath(opts.runtime.home);
+  if (home !== opts.runtime.home) {
+    throw refused();
+  }
+  const storage = join(home, "native-https");
+  await inspectPrivateDirectory(home);
+  await inspectPrivateDirectory(storage);
+  const { receipt, lock, owner } = await exitedOwnerEntries({
+    storage,
+    httpsPort: opts.httpsPort,
+  });
+  await retireExitedAuthority({
+    runtime: opts.runtime,
+    home,
+    invoke: opts.invoke ?? invokeNativeRuntime,
+    receipt: receipt?.value,
+    deadline,
+  });
+  await awaitExitedCaddy({
+    port: opts.httpsPort,
+    checkPort: opts.checkPort ?? checkNativeHttpsPort,
+    receipt: receipt?.value,
+    deadline,
+  });
+  if (receipt) {
+    await retireOwnerReceipt({
+      path: join(storage, OWNER_RECEIPT),
+      identity: receipt.identity,
+    });
+  }
+  if (owner) {
+    const ownerSocket = join(storage, OWNER_SOCKET);
+    const current = await lstat(ownerSocket);
+    if (current.dev !== owner.dev || current.ino !== owner.ino) {
+      throw refused();
+    }
+    await unlink(ownerSocket);
+  }
+  if (lock) {
+    await removeOwnedDirectory(
+      join(storage, "owner.lock"),
+      { dev: lock.dev, ino: lock.ino },
+      false
+    );
+  }
+}
+
 export interface ActiveNativeHttpsOwner {
   readonly caPath: string;
   readonly caSha256: string;
@@ -1498,6 +1828,10 @@ export async function startNativeProjectHttps(opts: {
     session = await mkdtemp(join(await realpath(tmpdir()), "hk-https-"));
     await privateDirectory(session);
     sessionIdentity = await lstat(session);
+    // Caddy's admin socket. The authority is told it from the start: whenever it
+    // stops serving it asks this Caddy to stop too, so an owner that was killed
+    // leaves neither child running (HACK-2720).
+    const admin = join(session, "admin.sock");
     const env: Record<string, string> = { PATH: "/usr/bin:/bin", HOME: home };
     startupStage = "authority-start";
     authority = deps.spawn({
@@ -1509,6 +1843,8 @@ export async function startNativeProjectHttps(opts: {
         "serve-managed-hostnames",
         "--certificate-name-limit",
         String(limit),
+        "--caddy-admin-socket",
+        admin,
       ],
       env,
       pipe: true,
@@ -1539,7 +1875,6 @@ export async function startNativeProjectHttps(opts: {
       throw refused();
     }
     startupStage = "caddy-configuration";
-    const admin = join(session, "admin.sock");
     const filename = join(session, "Caddyfile");
     await writeFile(
       filename,

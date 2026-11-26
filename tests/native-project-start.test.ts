@@ -57,6 +57,7 @@ import {
 } from "../src/backends/native-project-run.ts";
 import {
   NATIVE_CONFIGURATION_REFUSAL,
+  NATIVE_EXITED_RUNTIME_RECOVERY_FAILED,
   NATIVE_SHARED_SOURCE_REFUSAL,
   NativeForegroundVmLostError,
   NativeStartupCanceledError,
@@ -8269,6 +8270,37 @@ test.each([
     expect(ups).toBe(1);
     expect(events).not.toContain("runtime recover");
   }
+});
+
+test("a failed exited-provider recovery says so, then keeps the original refusal", async () => {
+  const { opts } = await fixture(false);
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => void notices.push(line);
+  const original = new NativeRuntimeRequestError({
+    message:
+      "Native runtime request failed (process_identity_unavailable); inspect owned state before retrying.",
+    nativeCode: "process_identity_unavailable",
+  });
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    const [area, command] = request.args;
+    if (area === "runtime" && command === "up") {
+      throw original;
+    }
+    if (area === "runtime" && command === "status") {
+      return { phase: "process-exited", process_alive: false };
+    }
+    if (area === "runtime" && command === "recover") {
+      throw new Error("synthetic recovery failure");
+    }
+    return await invoke(request);
+  };
+  await expect(startNativeProject({ ...opts, watchPool: false })).rejects.toBe(
+    original
+  );
+  expect(
+    notices.filter((line) => line === NATIVE_EXITED_RUNTIME_RECOVERY_FAILED)
+  ).toHaveLength(1);
 });
 
 test("a restart preflight's loss stage follows the restart it retries", () => {

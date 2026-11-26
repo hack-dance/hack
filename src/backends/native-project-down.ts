@@ -968,7 +968,7 @@ function lostContainerRemovals(snapshot: unknown): boolean {
  * no command that would fail, and none that would discard the data.
  */
 export const NATIVE_LOST_REMOVAL_UNREPAIRABLE =
-  "This run is stopped with its data kept and nothing of it is running, but stopped containers that an earlier hack down had removed are listed again: the VM was lost seconds after that down, before the removal reached its disk. This run's cleanup goes through its foreground owner, which is gone, so no hack command can remove them while keeping the data yet, and hack up refuses the run until they are gone. Keep this native home unchanged for inspection; hack ps --json shows the stopped containers.";
+  "This run is stopped with its data kept and nothing of it is running, but stopped containers that an earlier hack down had removed are listed again, most likely because the VM was lost seconds after that down, before the removal reached its disk. This run's cleanup goes through its foreground owner, which is gone, so no hack command can remove them while keeping the data yet, and hack up refuses the run until they are gone. Keep this native home unchanged for inspection; hack ps --json shows the stopped containers.";
 
 /** Shown when `hack down --recover` removed containers a lost VM brought back. */
 export const NATIVE_LOST_REMOVAL_NOTE =

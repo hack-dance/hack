@@ -2380,11 +2380,7 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
         cwd: opts.projectRoot,
         invoke: opts.invoke,
         signal: opts.signal,
-        notice: (line) => {
-          if (!reportNativeImageNotice(line)) {
-            opts.warn(line);
-          }
-        },
+        notice: imageNoticeOr(opts.warn),
       }))
     ) {
       return await selectNativeStartupRecoveringStoppedPool({
@@ -2442,6 +2438,19 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
   );
   return await opts.select();
 }
+/** Shown when `runtime recover` for an exited provider failed before `runtime up`. */
+export const NATIVE_EXITED_RUNTIME_RECOVERY_FAILED =
+  "The native runtime's provider looked exited, but recovering it failed; the original refusal follows.";
+
+/** A notice line: an image notice is reported as one, anything else is a warning. */
+function imageNoticeOr(warn: (line: string) => void): (line: string) => void {
+  return (line) => {
+    if (!reportNativeImageNotice(line)) {
+      warn(line);
+    }
+  };
+}
+
 /**
  * `runtime up` that first recovers a pool whose provider exited while its
  * record still says `running` (HACK-2579), once. Real-VM row 7 at c624229e:
@@ -2451,7 +2460,8 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
  * that the lost-VM message names failed. `recoverExitedNativeRuntime` acts only
  * when `runtime status` reports `process-exited`, and `runtime recover` proves
  * the recorded provider gone by its identity under the provider lease; any
- * other refusal is left as it is.
+ * other refusal is left as it is. A start can recover twice, once in selection
+ * and once here, each at most once per start, so the recovery stays bounded.
  */
 function runtimeUpRecoveringExitedProvider(opts: {
   readonly invoke: typeof invokeNativeRuntime;
@@ -2472,12 +2482,12 @@ function runtimeUpRecoveringExitedProvider(opts: {
             cwd: request.cwd,
             invoke: opts.invoke,
             signal: opts.signal,
-            notice: (line) => {
-              if (!reportNativeImageNotice(line)) {
-                opts.warn(line);
-              }
-            },
-          }).catch(() => false))
+            notice: imageNoticeOr(opts.warn),
+          }).catch(() => {
+            // The original refusal follows; say the recovery was tried.
+            opts.warn(NATIVE_EXITED_RUNTIME_RECOVERY_FAILED);
+            return false;
+          }))
         )
       ) {
         throw error;
@@ -3661,11 +3671,7 @@ async function startNativeProjectAttempt(
     signal: opts.signal,
     invoke: deps.invoke,
     // A detached owner hands the line to the launcher, as image notices do.
-    notice: (line) => {
-      if (!reportNativeImageNotice(line)) {
-        deps.warn(line);
-      }
-    },
+    notice: imageNoticeOr(deps.warn),
   });
   if (!extension) {
     await deps.prepareStorage(opts.scope);

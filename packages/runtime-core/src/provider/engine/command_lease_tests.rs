@@ -348,10 +348,10 @@ fn the_requesting_side_of_exec_waits_as_long_as_a_start_and_the_owner_side_keeps
     assert_eq!(command_lease_deadline(now, near, COMMAND_LEASE_WAIT), near);
 }
 
-/// HACK-2729, scaled 50 times (15 s is 300 ms, 35 s is 700 ms): a project stop holds
-/// the lease for 600 ms. At the owner-side bound the wait refuses with the exact
-/// project-stop refusal the CLI reads; the requesting side's bound outlasts the
-/// stop and acquires right after it, before any check of its own.
+/// HACK-2729, scaled (the owner's 15 s is 300 ms): a project stop holds the lease
+/// for 600 ms. At the owner-side bound the wait refuses with the exact
+/// project-stop refusal the CLI reads; the requesting side's longer bound
+/// outlasts the stop and acquires right after it, before any check of its own.
 #[test]
 fn a_requested_command_waits_out_a_project_stop_that_the_owner_bound_refuses() {
     let (_home, candidate) = running_pool();
@@ -367,9 +367,11 @@ fn a_requested_command_waits_out_a_project_stop_that_the_owner_bound_refuses() {
     assert_eq!(refused.message, PROJECT_STOP_REFUSAL);
     assert!(started.elapsed() < hold);
 
+    // The backoff caps at 50 ms and is not scaled with the hold. Allow ten poll
+    // intervals for the holder to run, unlock and be observed on CI (HACK-2741).
     let after = Engine::connect_command_request(
         &candidate,
-        Instant::now() + Duration::from_millis(700),
+        started + hold + Duration::from_millis(500),
         &|| Ok(()),
     )
     .err()
@@ -401,11 +403,11 @@ fn a_requested_command_refuses_a_stop_past_its_bound_naming_it() {
     holder.join().unwrap();
 }
 
-/// HACK-2739, scaled 50 times (35 s is 700 ms): the requesting process of an
-/// authored `hack exec` waits for a free lease before it sends anything to its
-/// owner. It outlasts a project stop held for 600 ms, then returns, having
-/// released the lease. It opens no engine connection, so unlike
-/// `connect_command_request` it reaches no post-acquisition check.
+/// HACK-2739: the requesting process of an authored `hack exec` waits for a free
+/// lease before it sends anything to its owner. It outlasts a project stop held
+/// for 600 ms, then returns, having released the lease. It opens no engine
+/// connection, so unlike `connect_command_request` it reaches no
+/// post-acquisition check.
 #[test]
 fn the_authored_exec_request_waits_out_a_project_stop_and_releases_the_lease() {
     use crate::provider::lifecycle::await_free_command_lease;
@@ -413,7 +415,10 @@ fn the_authored_exec_request_waits_out_a_project_stop_and_releases_the_lease() {
     let hold = Duration::from_millis(600);
     let (_release, holder) = hold_lease_as_project_stop(&candidate, hold);
     let started = Instant::now();
-    await_free_command_lease(&candidate, started + Duration::from_millis(700)).unwrap();
+    // The backoff caps at 50 ms and is not scaled with the hold. Allow ten poll
+    // intervals for the holder to run, unlock and be observed on CI (HACK-2741).
+    let deadline = started + hold + Duration::from_millis(500);
+    await_free_command_lease(&candidate, deadline).unwrap();
     assert!(
         started.elapsed() >= hold - Duration::from_millis(50),
         "returned before the stop released: {:?}",
@@ -433,9 +438,12 @@ fn the_authored_exec_request_refuses_a_stop_past_its_bound_naming_it() {
     let (_home, candidate) = running_pool();
     let (release, holder) = hold_lease_as_project_stop(&candidate, Duration::from_secs(30));
     let started = Instant::now();
-    let refused = await_free_command_lease(&candidate, started + Duration::from_millis(300))
+    let deadline = started + Duration::from_millis(300);
+    let refused = await_free_command_lease(&candidate, deadline)
         .err()
         .unwrap();
+    // The exact refusal is asserted only once the deadline has passed.
+    assert!(Instant::now() >= deadline);
     assert_eq!(refused.code, "provider_busy");
     assert_eq!(refused.message, PROJECT_STOP_REFUSAL);
     assert!(refused.cause_code.is_none());

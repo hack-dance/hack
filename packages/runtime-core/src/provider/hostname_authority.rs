@@ -232,8 +232,8 @@ enum ServeEnd {
 ///
 /// `patience` covers an owner killed after it spawned Caddy but before Caddy
 /// bound its admin socket: while the session directory stays and the socket is
-/// missing or refuses connections, the attempt is repeated until `patience`
-/// runs out. With no patience (a cooperative stop, where the owner itself stops
+/// missing, not yet private, or refuses connections, the attempt is repeated
+/// until `patience` runs out. With no patience (a cooperative stop, where the owner itself stops
 /// Caddy) one attempt is made. Every step is bounded and the outcome is not
 /// trusted: recovery proves the port free separately.
 fn stop_caddy(admin: &Path, patience: Duration) {
@@ -248,11 +248,15 @@ fn stop_caddy(admin: &Path, patience: Duration) {
         let attempt = match fs::symlink_metadata(admin) {
             Ok(metadata)
                 if !metadata.file_type().is_socket()
-                    || metadata.uid() != unsafe { libc::geteuid() }
-                    || metadata.mode() & 0o077 != 0 =>
+                    || metadata.uid() != unsafe { libc::geteuid() } =>
             {
                 return;
             }
+            // Caddy binds its admin socket and only then sets the `|0600`
+            // mode it was given, so a Caddy still starting shows a socket
+            // other users could open for a moment (HACK-2743). That is not
+            // ready yet: wait like a missing socket, and never connect to it.
+            Ok(metadata) if metadata.mode() & 0o077 != 0 => None,
             Ok(_) => UnixStream::connect(admin).ok(),
             Err(_) => None,
         };

@@ -250,6 +250,49 @@ fn unproven_owner_receipt_or_reservation_refuses_without_effects() {
     assert!(publication(&fixture).join("control.sock").exists());
 }
 
+/// `down --recover`'s retirement shares the retained-start check (`checked`), so since
+/// HACK-2730 it also admits a pool whose provider ended uncleanly after a retained stop:
+/// `recovered-unclean` or `stopped-after-engine-failure` with that boot's id, its recorded
+/// provider proven gone. Without a recorded provider it still refuses.
+#[test]
+fn an_owner_on_a_pool_whose_provider_was_lost_is_retired_only_with_its_provider_gone() {
+    for phase in ["recovered-unclean", "stopped-after-engine-failure"] {
+        for recorded in [true, false] {
+            let fixture = Fixture::new();
+            let _scratch = scratch(&fixture);
+            foreground::transport::fixture_exited_publication(&fixture.candidate, &fixture.run);
+            let mut owner = Owner::load(&fixture.candidate).unwrap();
+            owner.phase = phase.into();
+            if !recorded {
+                owner.process = None;
+            }
+            owner.save(&fixture.candidate).unwrap();
+            let receipt = fs::read(fixture.graph().join("state.json")).unwrap();
+            if !recorded {
+                assert_eq!(
+                    refused_code(&fixture, &receipt_sha(&fixture)),
+                    "graph_unadmitted_owner_recovery",
+                    "{phase}"
+                );
+                assert!(publication(&fixture).join("owner.json").exists());
+                continue;
+            }
+            let value =
+                retire_unadmitted_owner(&fixture.candidate, &fixture.run, &receipt_sha(&fixture))
+                    .unwrap();
+            assert_eq!(value["publisher_retired"], true, "{phase}");
+            assert_eq!(value["data_retained"], true, "{phase}");
+            assert_eq!(
+                fs::read(fixture.graph().join("state.json")).unwrap(),
+                receipt
+            );
+            assert!(!publication(&fixture).join("owner.json").exists());
+            let eligible = retained_startup::preflight(&fixture.candidate, &fixture.run).unwrap();
+            assert_eq!(eligible["runtime_phase"], phase);
+        }
+    }
+}
+
 #[test]
 fn an_owner_without_relay_or_reservation_is_retired() {
     let fixture = Fixture::new();

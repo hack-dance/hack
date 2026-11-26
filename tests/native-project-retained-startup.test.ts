@@ -1,10 +1,15 @@
 import { expect, test } from "bun:test";
 import {
+  confirmRunningRetainedGraph,
+  NATIVE_RETAINED_LOST_REMOVAL,
+  NATIVE_RETAINED_POOL_CHANGED_AGAIN,
   preflightNativeRetainedStartup,
+  runtimeUpJoiningChangedPool,
   verifyNativeResumedRetainedGraph,
   verifyNativeRetainedMapping,
 } from "../src/backends/native-project-retained-startup.ts";
 import type { NativeProjectRun } from "../src/backends/native-project-run.ts";
+import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 
 /**
@@ -147,5 +152,134 @@ test("a resumed retained graph that differs refuses", async () => {
       invoke: async () => ({ journal_incomplete: false, receipt: {} }),
     }),
     "Native resumed retained graph differs; no graph restore was requested."
+  );
+});
+
+/** This run's stopped graph after a lost VM brought back a removed container. */
+function lostRemovalGraph(owner = run.owner) {
+  return {
+    journal_incomplete: false,
+    receipt: {
+      phase: "stopped-data-retained",
+      run: run.run,
+      owner,
+      namespace: run.namespace,
+      plan_id: run.planId,
+      resources: {
+        "container:web": { kind: "container", key: "web", phase: "absent" },
+        "volume:data": { kind: "volume", key: "data", phase: "created" },
+      },
+    },
+    observations: {
+      "container:web": { state: "exited" },
+      "volume:data": { state: "present" },
+    },
+  };
+}
+
+test("a resumed or running retained graph with containers a lost VM brought back names down --recover, then up (HACK-2730)", async () => {
+  await expectClosedRefusal(
+    verifyNativeResumedRetainedGraph({
+      runtime,
+      projectRoot: scope.projectRoot,
+      run,
+      invoke: async () => lostRemovalGraph(),
+    }),
+    NATIVE_RETAINED_LOST_REMOVAL
+  );
+  await expectClosedRefusal(
+    confirmRunningRetainedGraph({
+      runtime,
+      projectRoot: scope.projectRoot,
+      run,
+      invoke: async () => lostRemovalGraph(),
+      runtimePhase: "running",
+    }),
+    NATIVE_RETAINED_LOST_REMOVAL
+  );
+  expect(NATIVE_RETAINED_LOST_REMOVAL).toContain(
+    "Run hack down --recover to remove them again (data kept), then hack up."
+  );
+  // Another run's graph, or a running container, keeps the generic refusals.
+  await expectClosedRefusal(
+    verifyNativeResumedRetainedGraph({
+      runtime,
+      projectRoot: scope.projectRoot,
+      run,
+      invoke: async () => lostRemovalGraph("9".repeat(32)),
+    }),
+    "Native resumed retained graph differs; no graph restore was requested."
+  );
+  const running = lostRemovalGraph();
+  running.observations["container:web"] = { state: "running" };
+  await expectClosedRefusal(
+    confirmRunningRetainedGraph({
+      runtime,
+      projectRoot: scope.projectRoot,
+      run,
+      invoke: async () => running,
+      runtimePhase: "running",
+    }),
+    "Native project already has an owned run mapping that is not safely stopped; inspect it before starting another run."
+  );
+});
+
+test("a changed pool is retried only for a retained start, once (HACK-2732)", async () => {
+  const changed = () =>
+    new NativeRuntimeRequestError({
+      nativeCode: "graph_retained_pool_changed",
+      message: "Native runtime request failed (graph_retained_pool_changed).",
+    });
+  const calls: (readonly string[])[] = [];
+  // A fresh start sends no retained flags: nothing is selected again.
+  await expect(
+    runtimeUpJoiningChangedPool({
+      flags: [],
+      up: async (flags) => {
+        calls.push(flags);
+        throw changed();
+      },
+      reselect: async () => {
+        throw new Error("not selected again");
+      },
+    })
+  ).rejects.toMatchObject({ nativeCode: "graph_retained_pool_changed" });
+  expect(calls).toEqual([[]]);
+  calls.length = 0;
+  expect(
+    await runtimeUpJoiningChangedPool({
+      flags: ["--expect-retained-selection", "7"],
+      up: async (flags) => {
+        calls.push(flags);
+        if (calls.length === 1) {
+          throw changed();
+        }
+        return "joined";
+      },
+      reselect: async () => ["--expect-retained-selection", "8"],
+    })
+  ).toBe("joined");
+  expect(calls).toEqual([
+    ["--expect-retained-selection", "7"],
+    ["--expect-retained-selection", "8"],
+  ]);
+  // A second change is not retried again: it names the command to repeat.
+  calls.length = 0;
+  await expect(
+    runtimeUpJoiningChangedPool({
+      flags: ["--expect-retained-selection", "7"],
+      up: async (flags) => {
+        calls.push(flags);
+        throw changed();
+      },
+      reselect: async () => ["--expect-retained-selection", "8"],
+    })
+  ).rejects.toMatchObject({
+    nativeCode: "graph_retained_pool_changed",
+    message: NATIVE_RETAINED_POOL_CHANGED_AGAIN,
+  });
+  expect(calls).toHaveLength(2);
+  expect(NATIVE_RETAINED_POOL_CHANGED_AGAIN).toContain(
+    "Retry hack up (or hack up -d)."
   );
 });

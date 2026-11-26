@@ -1,19 +1,32 @@
 ---
-title: LeaseWait · native startup
+title: Native startup lease wait
 ---
 stateDiagram-v2
   direction TB
-  [*] --> waiting
+  [*] --> preflight
+  preflight --> waiting : Select [under the lease]
   waiting --> waiting : Tick [held, in bound]
   waiting --> waiting : Release [within StopHold]
-  waiting --> acquired : Acquire [stopped]
-  waiting --> resumed : Resume [running]
+  waiting --> leased : Acquire [lease free]
   waiting --> expired : Expire [at bound]
+  leased --> acquired : Boot [stopped, same]
+  leased --> resumed : Resume [running, same]
+  leased --> changed : Changed [peer boot]
+  leased --> refused : Refuse [owner or disk new]
+  changed --> preflight : Select again [once]
   note right of waiting
     StopHold under Bound: no expiry
     35 s wait, 31 s project stop
   end note
+  note right of leased
+    The guard reads the pool here,
+    never mid-boot (HACK-2732)
+  end note
   class waiting wait
+  class preflight wait
+  class leased live
+  class changed wait
   class acquired ok
   class resumed ok
   class expired fail
+  class refused fail

@@ -1329,7 +1329,7 @@ export async function startNativeDetachedUp(opts: {
       new HackCliError({
         code: "E_STARTUP_INCOMPLETE",
         message:
-          "Native detached startup was not confirmed. Inspect hack ps before retrying; retained owners and recovery evidence are preserved.",
+          "Native detached startup was not confirmed. Inspect hack ps before retrying; retained owners and recovery evidence are preserved. If an earlier run of this project is retained (for example after the native runtime stopped under it), run hack down first.",
       })
     );
   };

@@ -467,6 +467,10 @@ macTest(
       "retained"
     );
     expect(error).toHaveProperty("stage", "retained-state");
+    // HACK-2715 review round 4: the refusal names the command that clears it.
+    expect(String((error as Error).message)).toContain(
+      "run hack down in this project first"
+    );
     expect(await Bun.file(selected.calls).exists()).toBe(false);
     expect(await Bun.file(join(root, `${key}.live-stop.json`)).text()).toBe(
       "{}"

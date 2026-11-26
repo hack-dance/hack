@@ -695,7 +695,7 @@ fn pre_ready_origins_resume_monotonic_cleanup_with_exact_original_and_never_crea
                         .unwrap();
                 assert_eq!(intent.version, 2);
                 assert_eq!(intent.receipt_progress, receipt_progress(&original)?);
-                assert_eq!(intent.original(RUN)?.phase, phase);
+                assert_eq!(intent.original(RUN, false)?.phase, phase);
                 if original.resources["container:web"].phase == "reserved" {
                     let mut created = original.clone();
                     created.phase = Phase::StopIntent;
@@ -1122,4 +1122,145 @@ fn fresh_absence_and_unchanged_publication_are_required_before_retirement() {
                 .exists()
         );
     }
+}
+
+/// The pool's own record, as `runtime down --force`, a crash or a host reboot leaves it:
+/// this receipt's pool owner, no longer running the receipt's boot (HACK-2715).
+fn end_pool_boot(fixture: &Fixture, phase: &str) {
+    let pool = fixture.candidate.state_root.join("run/smolvm");
+    state::private_directory(&fixture.candidate.state_root.join("run")).unwrap();
+    state::private_directory(&pool).unwrap();
+    state::write(
+        &pool.join("owner.json"),
+        &json!({
+            "token": OWNER,
+            "phase": phase,
+            "guest_boot_id": "87654321-abcd-abcd-abcd-123456789abc",
+        }),
+    )
+    .unwrap();
+}
+
+/// HACK-2715 review (M1): a start caught mid-way by the end of its pool boot (`preparing`
+/// with a create that was never confirmed, or `ready-observed` with a failure observed) is
+/// refused in the current boot, where its effects may still land, but the explicit
+/// dead-owner recovery selects and clears it from an ended boot: the guest that held its
+/// pending effects is gone. The selection says so (`ended_boot`), the committed intent
+/// keeps the exact original, and cleanup progress runs to removed.
+#[test]
+fn an_ended_boots_start_caught_mid_way_is_selected_and_recovered() {
+    for case in ["preparing", "failed"] {
+        let fixture = Fixture::new();
+        fixture.dead();
+        let mut original = fixture.receipt();
+        if case == "preparing" {
+            original.phase = Phase::Preparing;
+            let web = original.resources.get_mut("container:web").unwrap();
+            web.id = None;
+            web.phase = "create-intent".into();
+        } else {
+            let mut encoded = serde_json::to_value(&original).unwrap();
+            encoded["failure"] = json!({"service":"web","observation":{"state":"dead"}});
+            original = serde_json::from_value(encoded).unwrap();
+        }
+        journal::save(&fixture.journal_root(), &original).unwrap();
+        // Same boot (or no pool record, which proves nothing): refused, nothing written.
+        assert!(select(&fixture.candidate, RUN).is_err(), "{case}");
+        assert!(!fixture.journal_root().join(FILE).exists());
+        // A record that still runs the receipt's boot keeps the same-boot rule.
+        end_pool_boot(&fixture, "running");
+        let pool = fixture.candidate.state_root.join("run/smolvm/owner.json");
+        let mut record: Value = state::read(&pool).unwrap();
+        record["guest_boot_id"] = json!(original.boot);
+        state::write(&pool, &record).unwrap();
+        assert!(select(&fixture.candidate, RUN).is_err(), "{case}");
+        assert!(!fixture.journal_root().join(FILE).exists());
+        end_pool_boot(&fixture, "stopped");
+        let selected = select(&fixture.candidate, RUN).unwrap();
+        let wire = serde_json::to_value(&selected).unwrap();
+        assert_eq!(wire["ended_boot"], true, "{case}");
+        cleanup::recover_using(
+            &fixture.candidate,
+            recovery_options(&selected),
+            |context, _| {
+                let intent: Intent =
+                    serde_json::from_slice(&fs::read(fixture.journal_root().join(FILE)).unwrap())
+                        .unwrap();
+                assert_eq!(intent.receipt_progress, 0);
+                assert!(intent.original(RUN, false).is_err(), "{case}");
+                assert_eq!(intent.original(RUN, true)?.phase, original.phase);
+                context.guard()?;
+                let mut stopping = fixture.receipt();
+                stopping.phase = Phase::StopIntent;
+                journal::save(&fixture.journal_root(), &stopping)?;
+                context.guard()?;
+                let receipt = removed(&fixture);
+                context.finish_using(&absent_snapshot(receipt.clone()), &|_| Ok(()))?;
+                Ok(receipt)
+            },
+        )
+        .unwrap();
+        assert_eq!(fixture.receipt().phase, Phase::Removed);
+        assert!(!fixture.owner_root().join("owner.json").exists());
+    }
+}
+
+/// HACK-2715 review (L4): a run of an ended boot whose state is bound to that boot is
+/// refused by name at admission, before `live-owner-recovery.json` (or the frontend's
+/// intent, which follows this selection) is written, and before any cleanup is reached.
+/// In its own boot the same receipt keeps the ordinary refusal.
+#[test]
+fn an_ended_boots_boot_bound_run_is_refused_by_name_before_any_intent() {
+    let fixture = Fixture::new();
+    fixture.dead();
+    let project = fixture.root.join("project");
+    fs::write(project.join("package.json"), b"{}\n").unwrap();
+    let metadata = fs::symlink_metadata(&project).unwrap();
+    let share = crate::provider::ProjectShareIntent::approve(&project, true).unwrap();
+    let mut encoded = serde_json::to_value(fixture.receipt()).unwrap();
+    encoded["version"] = json!(3);
+    encoded["source"] = json!({
+        "version":1, "policy":"host-mounted", "share":share,
+        "mounts":{"web":{"source":".","target":"/app"}},
+        "anchors":{".":{"device":metadata.dev(),"inode":metadata.ino(),
+            "mode":metadata.mode(),"uid":metadata.uid(),"gid":metadata.gid(),"kind":"directory"}}
+    });
+    let receipt: Receipt = serde_json::from_value(encoded).unwrap();
+    receipt.validate(RUN, OWNER).unwrap();
+    state::write(&fixture.journal_root().join("state.json"), &receipt).unwrap();
+    assert_eq!(
+        select(&fixture.candidate, RUN).err().unwrap().code,
+        "native_graph_live_owner_recovery"
+    );
+    end_pool_boot(&fixture, "stopped");
+    let before = fs::read(fixture.journal_root().join("state.json")).unwrap();
+    assert_eq!(
+        select(&fixture.candidate, RUN).err().unwrap().code,
+        "native_graph_ended_boot_unsupported"
+    );
+    let wrong = "f".repeat(64);
+    let error = cleanup::recover_using(
+        &fixture.candidate,
+        Options {
+            run: RUN,
+            expect_receipt: &wrong,
+            expect_owner: &wrong,
+        },
+        |_, _| panic!("a refused ended-boot run never reaches cleanup"),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.code, "native_graph_ended_boot_unsupported");
+    assert!(!fixture.journal_root().join(FILE).exists());
+    assert!(
+        !fixture
+            .journal_root()
+            .join("live-owner-recovery.pending")
+            .exists()
+    );
+    assert_eq!(
+        fs::read(fixture.journal_root().join("state.json")).unwrap(),
+        before
+    );
+    assert!(fixture.owner_root().join("owner.json").exists());
 }

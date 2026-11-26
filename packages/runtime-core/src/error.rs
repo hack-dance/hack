@@ -287,6 +287,10 @@ pub struct RefusalDiagnostics {
     pub provider_line: Option<Box<str>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_probe: Option<RouteProbeDiagnostic>,
+    /// Graph run ids (32 lowercase hex) whose receipt is live, sorted: what a refused
+    /// `runtime down` would have stopped (HACK-2477). Ids only, never project data.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub live_runs: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -546,6 +550,24 @@ impl CandidateError {
             service: service.to_owned(),
             field,
         });
+        self
+    }
+
+    /// Carry the live graph runs a refused `runtime down` names (HACK-2477). Anything
+    /// that is not a graph run id is dropped, never escaped.
+    pub fn with_live_runs(mut self, runs: Vec<String>) -> Self {
+        let runs: Vec<String> = runs
+            .into_iter()
+            .filter(|run| {
+                run.len() == 32
+                    && run
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+            .collect();
+        if !runs.is_empty() {
+            self.refusals.get_or_insert_default().live_runs = runs;
+        }
         self
     }
 

@@ -1,9 +1,13 @@
 //! Explicit native foreground lifetime; dead ownership never authorizes adoption or replay.
 use super::*;
 use crate::provider::engine::LOG_STREAM_BUDGET;
-use crate::provider::graph::foreground::{signals, transport};
+use crate::provider::graph::foreground::{signals, signals::Wake, transport};
 use serde::{Deserialize, Serialize};
-use std::{cell::Cell, io::Write};
+use std::{
+    cell::Cell,
+    io::Write,
+    time::{Duration, Instant},
+};
 mod host_boot;
 mod owner;
 pub mod recovery;
@@ -17,6 +21,10 @@ fn refused() -> CandidateError {
         "native_graph_foreground",
         "Native foreground ownership is changed, unavailable or uncertain; its exact evidence was preserved. Use tagged native control for a live owner; no recovery or replay was attempted.",
     )
+}
+/// Whether the run's foreground owner process is still running (see `owner::holds_lock`).
+pub(in crate::provider) fn owner_running(candidate: &Candidate, run: &str) -> Option<bool> {
+    owner::holds_lock(candidate, run)
 }
 pub(super) fn require_unpublished(candidate: &Candidate, run: &str) -> Result<(), CandidateError> {
     if owner::present(candidate, run)? {
@@ -311,7 +319,20 @@ impl Reply {
     }
 }
 
-/// This process remains supervised until TERM/INT or authenticated exact-run cleanup.
+/// How often a ready owner reads the pool record to notice that its boot ended. A
+/// lock-free read of one small file; two readings in a row decide.
+const POOL_BOOT_CHECK: Duration = Duration::from_secs(1);
+
+/// The owner's own exit once its pool boot ended under it (HACK-2715 review round 2).
+fn pool_ended() -> CandidateError {
+    error(
+        "native_graph_pool_ended",
+        "The native pool boot of this run ended under its owner (runtime down --force or a crash); the owner exited without a cleanup effect, and hack down in its project recovers the run. Values omitted.",
+    )
+}
+
+/// This process remains supervised until TERM/INT, authenticated exact-run cleanup, or
+/// the end of its pool boot.
 /// Startup and cleanup use the owning native runtime; no Compose receipt is constructed.
 pub fn serve(
     candidate: &Candidate,
@@ -337,6 +358,10 @@ pub fn serve_with_storage_tool(
         }
     };
     let admitted = Cell::new(false);
+    // The pool boot this owner starts in. A start whose boot ends under it (`runtime
+    // down --force`, a crash) fails at its next check instead of waiting on a guest
+    // that is gone (HACK-2715 review round 2, seen on a real VM).
+    let started_in = journal::running_boot(candidate);
     let attempt = {
         let check = || {
             publication.verify()?;
@@ -345,6 +370,11 @@ pub fn serve_with_storage_tool(
                     "native_graph_canceled",
                     "Native foreground startup canceled; values omitted.",
                 ));
+            }
+            if started_in.as_ref().is_some_and(|(owner, boot)| {
+                journal::boot_of(candidate, owner, boot) == journal::ReceiptBoot::Ended
+            }) {
+                return Err(pool_ended());
             }
             Ok(())
         };
@@ -403,11 +433,30 @@ pub fn serve_with_storage_tool(
             .and_then(|_| stdout.flush())
             .map_err(|_| refused())?;
     }
+    let mut ended_seen = false;
     loop {
-        if signals.wait()? {
-            let receipt = clean()?;
-            publication.finish()?;
-            return Ok(receipt);
+        match signals.wait_until(Some(Instant::now() + POOL_BOOT_CHECK))? {
+            Wake::Signal | Wake::FrontendExit => {
+                let receipt = clean()?;
+                publication.finish()?;
+                return Ok(receipt);
+            }
+            Wake::Timeout => {
+                // HACK-2715 review round 2 (seen on a real VM): a native-authored owner
+                // outlived `runtime down --force` and kept its publication until host
+                // reboot. Like a Compose owner, it now notices from the pool record that
+                // its boot ended (twice in a row, positive evidence only) and exits
+                // without a cleanup effect: no engine of that boot remains. Its
+                // publication stays as evidence for the dead-owner recovery.
+                let ended = journal::boot_of(candidate, &receipt.owner, &receipt.boot)
+                    == journal::ReceiptBoot::Ended;
+                if ended && ended_seen {
+                    return Err(pool_ended());
+                }
+                ended_seen = ended;
+                continue;
+            }
+            _ => {}
         }
         let Some(mut stream) = publication.accept()? else {
             continue;

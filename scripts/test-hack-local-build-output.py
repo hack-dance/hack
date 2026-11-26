@@ -186,7 +186,7 @@ def main():
             except Exception:
                 pass
         try:
-            call("down", ["runtime", "down", "--json"])
+            call("down", ["runtime", "down", "--force", "--json"])
             stopped = call("final-status", ["runtime", "status", "--json"])
             assert stopped["phase"] == "stopped" and not stopped["process_alive"]
         finally:

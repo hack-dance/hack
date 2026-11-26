@@ -170,6 +170,35 @@ pub(super) fn root(candidate: &Candidate, run: &str) -> Result<PathBuf, Candidat
     )
     .into())
 }
+/// Whether a foreground owner process still holds this run's owner lock, which its
+/// publication keeps for its whole life (HACK-2715 review round 2: `runtime down
+/// --force` waits for interrupted owners to exit). `Some(false)` when no lock file is
+/// left or nobody holds it; `None` when it cannot be read. A bare probe: it takes the
+/// lock for one instant only, grants nothing and changes no file.
+pub(super) fn holds_lock(candidate: &Candidate, run: &str) -> Option<bool> {
+    lock_held(&root(candidate, run).ok()?)
+}
+fn lock_held(root: &Path) -> Option<bool> {
+    use std::os::fd::AsRawFd;
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(root.join("operation.lock"))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(false),
+        Err(_) => return None,
+    };
+    if !file.metadata().is_ok_and(|metadata| private(&metadata)) {
+        return None;
+    }
+    // SAFETY: flock on a descriptor this function owns; closing it releases the lock.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Some(false);
+    }
+    (std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)).then_some(true)
+}
+
 /// No PID-only fallback or dead-owner adoption. An orphan socket is still evidence.
 pub(super) fn present(candidate: &Candidate, run: &str) -> Result<bool, CandidateError> {
     let root = root(candidate, run)?;
@@ -652,6 +681,29 @@ mod boot_tests {
     const UUID: &str = "12345678-abcd-abcd-abcd-123456789abc";
     fn session(value: &str) -> host_boot::Session {
         serde_json::from_value(json!(value)).unwrap()
+    }
+    /// HACK-2715 review round 2: `runtime down --force` tells a running owner from one
+    /// that exited by its owner lock, which the publication holds for the owner's life.
+    /// The probe takes nothing it keeps, and an absent lock file is no owner.
+    #[test]
+    fn the_owner_lock_probe_tells_a_running_owner_from_one_that_exited() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "hknf-probe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert_eq!(lock_held(&root), Some(false));
+        let held = state::Lock::acquire(&root).unwrap();
+        assert_eq!(lock_held(&root), Some(true));
+        assert_eq!(lock_held(&root), Some(true), "the probe keeps nothing");
+        drop(held);
+        assert_eq!(lock_held(&root), Some(false));
+        let again = state::Lock::acquire(&root).unwrap();
+        drop(again);
+        fs::remove_dir_all(&root).unwrap();
     }
     #[test]
     fn session_authority_ignores_calendar_adjustment_but_not_reboot_or_unavailability() {

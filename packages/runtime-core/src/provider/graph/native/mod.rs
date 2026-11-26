@@ -15,7 +15,7 @@ mod runtime;
 pub(super) use log_follow::follow_logs;
 pub mod selection;
 mod source;
-pub use journal::{Phase, Receipt};
+pub use journal::{BootCheck, Phase, Receipt, boot_check};
 pub use persistent_data::engine::StorageTool;
 pub(super) use runtime::reservations;
 pub(super) use runtime::reservations_except;

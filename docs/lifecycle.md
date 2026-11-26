@@ -298,6 +298,8 @@ Important boundaries:
 - `singleton` is a listener-level guard, not a health, identity, or readiness check. Adopt only checks that every configured port is occupied; pair it with a `lifecycle.up.before` identity check when a foreign listener on the same port would cause harm.
 - Adoption means "Hack observed the full expected local listener set and will not start another copy". It does not mean Hack now owns or can safely tear down that external process.
 - `hack down` only stops processes Hack actually launched inside the lifecycle session. Adopted external listeners are intentionally left alone.
+- A hook that starts its own background process (for example `sleep 3600 &` in `up.after`) is not managed: Hack waits for the hook command itself, not for what it leaves behind, and no `hack down` or recovery stops that process. Run a long-lived process as a `persistent` hook or under `lifecycle.processes` so Hack starts and stops it.
+- On the native backend, when the VM pool stopped under a run (`runtime down --force`, a crash or a host reboot), the `hack down` that recovers the run runs no `down.before` or `down.after` hook: the run's services already stopped with the pool boot. This needs boot evidence (Hack started the pool or recovered its provider itself, or the runtime places the run in an earlier boot); without it the hooks run as before. A `down.after` that an earlier down left owed still runs once.
 
 ### Processes
 

@@ -496,10 +496,10 @@ jobs:
           esac
           archive="zig-${platform}-0.15.2.tar.xz"
           destination="${RUNNER_TEMP}/candidate-zig"
-          mkdir -p "$destination"
-          if [ ! -f "$destination/$archive" ]; then
-            curl --fail --location --retry 3 "https://ziglang.org/download/0.15.2/${archive}" -o "$destination/$archive"
-          fi
+          # ziglang.org first, then the pinned community mirrors, with
+          # resumable attempts and a time budget (HACK-2681); a cached
+          # tarball is re-verified and reused.
+          bash scripts/fetch-zig.sh 0.15.2 "$archive" "$checksum" "$destination"
           (cd "$destination" && echo "$checksum  $archive" | shasum -a 256 --check)
           tar -xf "$destination/$archive" -C "$destination"
           echo "$destination/zig-${platform}-0.15.2" >> "$GITHUB_PATH"

@@ -330,6 +330,42 @@ test("a failed nextest invocation cannot publish the previous pass's stale JUnit
   );
 });
 
+test("the pinned installer retries every download error and keeps --fail (HACK-2717)", async () => {
+  const f = await fixture();
+  const tools = join(f.root, "bin");
+  await writeFile(
+    join(tools, "uname"),
+    '#!/bin/sh\nif [ "$1" = -s ]; then echo Darwin; else echo arm64; fi\n',
+    { mode: 0o700 }
+  );
+  const args = join(f.root, "curl-args");
+  await writeFile(
+    join(tools, "curl"),
+    '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$FIXTURE_CURL_ARGS"\nexit 56\n',
+    { mode: 0o700 }
+  );
+  const child = Bun.spawn(
+    [
+      "/bin/bash",
+      join(f.root, "scripts/install-cargo-nextest.sh"),
+      join(f.root, "install"),
+    ],
+    {
+      env: { ...f.env, FIXTURE_CURL_ARGS: args },
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      timeout: 5000,
+    }
+  );
+  expect(await child.exited).toBe(56);
+  const passed = (await Bun.file(args).text()).split("\n");
+  expect(passed).toContain("--fail");
+  expect(passed).toContain("--retry-all-errors");
+  expect(passed[passed.indexOf("--retry") + 1]).toBe("4");
+  expect(passed[passed.indexOf("--retry-delay") + 1]).toBe("2");
+});
+
 test("the pinned installer refuses corrupt download bytes before extraction or execution", async () => {
   const f = await fixture();
   const tools = join(f.root, "bin");

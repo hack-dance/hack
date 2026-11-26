@@ -357,6 +357,23 @@ fn verify_prior_data_retirement(
     Ok(())
 }
 
+/// Every earlier run of this pool owner, in any boot, that names one of `selected`'s
+/// volumes has retired it ([`verify_prior_data_retirement`]). A run of an ended boot
+/// (HACK-2715) that still names one keeps it until its own recovery; one that names none
+/// of them does not block this start, as it did when only the current boot was readable.
+fn prior_data_retired(
+    candidate: &Candidate,
+    owner: &str,
+    boot: &str,
+    selected: &BTreeMap<String, persistent_data::engine::Reference>,
+) -> Result<(), CandidateError> {
+    for run in storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))? {
+        let (prior, _, _) = journal::load_any_boot(candidate, &run, owner, boot)?;
+        verify_prior_data_retirement(&prior, selected)?;
+    }
+    Ok(())
+}
+
 fn verify_data_using_engine(
     engine: &Engine<'_>,
     receipt: &Receipt,
@@ -445,8 +462,15 @@ fn storage_attempt_preflight(
     let runs = storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))?;
     let archive = archive_at_limit(candidate, owner, &runs)?;
     for run in runs {
-        let (receipt, root) = journal::load_admission(candidate, &run, owner, boot)?;
+        // A run of an ended boot of this owner (HACK-2715) has saved state nothing can
+        // change any more: its guest stopped, and a pending helper call still refuses
+        // (`require_idle`). It is never waited on; its volumes stay protected by the
+        // prior-data check in `run_guarded`, which refuses a new consumer of any of them.
+        let (receipt, root, which) = journal::load_any_boot(candidate, &run, owner, boot)?;
         persistent_data::tool::require_idle(&root)?;
+        if which == journal::ReceiptBoot::Ended {
+            continue;
+        }
         if !matches!(receipt.phase, Phase::ReadyObserved | Phase::Removed) {
             return Err(refused());
         }
@@ -1067,15 +1091,12 @@ pub(super) fn run_guarded(
     // A new compute attempt may reuse data only after all earlier admitted consumers
     // have completed exact retirement. Exited/uncertain containers still count.
     if !config.data.is_empty() {
-        for run in storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))? {
-            let (prior, _) = journal::load_admission(
-                candidate,
-                &run,
-                engine.guest().incarnation(),
-                engine.guest().boot_id(),
-            )?;
-            verify_prior_data_retirement(&prior, &config.data)?;
-        }
+        prior_data_retired(
+            candidate,
+            engine.guest().incarnation(),
+            engine.guest().boot_id(),
+            &config.data,
+        )?;
     }
     for (service, mounts) in &config.data_mounts {
         config.configs.get_mut(service).ok_or_else(refused)?["HostConfig"]["Mounts"] = json!(mounts.iter().map(|mount| {
@@ -1475,8 +1496,15 @@ pub(super) fn cleanup_guarded(
     expected: Option<&Receipt>,
     guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
 ) -> Result<Receipt, CandidateError> {
-    cleanup_inner(candidate, run, expected, guard, false, None, None)
+    cleanup_inner(candidate, run, expected, guard, false, None, None).map(|(receipt, _)| receipt)
 }
+/// The explicit dead-owner recovery's cleanup. It also accepts a run of an ended boot
+/// of this pool (HACK-2715): after `runtime down --force`, a crash or a host reboot the
+/// run's containers stay, stopped, in the engine's persisted state, and this boot's
+/// engine removes each exact owned instance as the same-boot cleanup does (a stopped
+/// instance needs no stop request). Only [`journal::ended_boot_recoverable`] receipts
+/// qualify; the run's own owner's cleanup ([`cleanup_guarded`] with its bound receipt)
+/// follows the same rule. Also returns whether the receipt belonged to the current boot.
 #[cfg(target_os = "macos")]
 pub(super) fn cleanup_recovery(
     candidate: &Candidate,
@@ -1486,7 +1514,7 @@ pub(super) fn cleanup_recovery(
     environment_retired: bool,
     inventory: &native_environment::Inventory,
     finish: &dyn Fn(&Snapshot) -> Result<(), CandidateError>,
-) -> Result<Receipt, CandidateError> {
+) -> Result<(Receipt, bool), CandidateError> {
     cleanup_inner(
         candidate,
         run,
@@ -1496,8 +1524,40 @@ pub(super) fn cleanup_recovery(
         Some(inventory),
         Some(finish),
     )
+    .map(|(receipt, which)| (receipt, which == journal::ReceiptBoot::Current))
 }
 type CleanupFinish<'a> = dyn Fn(&Snapshot) -> Result<(), CandidateError> + 'a;
+/// The journal a cleanup acts on, against the connected engine's owner and boot, before
+/// any effect (the cross-boot gate of [`cleanup_inner`]).
+///
+/// A cleanup bound to the run's receipt (`expected`) may act on a run of an ended boot
+/// that [`journal::ended_boot_recoverable`] admits: the run's own live owner stopping it
+/// (`hack down` after `runtime down --force`: a native-authored owner outlives the pool,
+/// HACK-2715, seen on a real VM), or the explicit dead-owner recovery (`recovery`). The
+/// unbound `graph native cleanup` stays same-boot. The recovery admits a start caught
+/// mid-way only from an ended boot; if the engine says the run is of this boot after
+/// all, its effects may still be in flight, so it refuses here.
+fn cleanup_journal(
+    candidate: &Candidate,
+    run: &str,
+    owner: &str,
+    boot: &str,
+    expected: Option<&Receipt>,
+    recovery: bool,
+) -> Result<(Receipt, PathBuf, journal::ReceiptBoot), CandidateError> {
+    let (receipt, root, which) =
+        journal::load_for_recovery(candidate, run, owner, boot, expected.is_some())?;
+    if let Some(expected) = expected {
+        receipt.check_binding(expected)?;
+        #[cfg(any(target_os = "macos", test))]
+        if recovery && which == journal::ReceiptBoot::Current {
+            expected.require_recovery_settled()?;
+        }
+    }
+    #[cfg(not(any(target_os = "macos", test)))]
+    let _ = recovery;
+    Ok((receipt, root, which))
+}
 fn cleanup_inner(
     candidate: &Candidate,
     run: &str,
@@ -1506,19 +1566,26 @@ fn cleanup_inner(
     environment_retired: bool,
     inventory: Option<&native_environment::Inventory>,
     finish: Option<&CleanupFinish<'_>>,
-) -> Result<Receipt, CandidateError> {
+) -> Result<(Receipt, journal::ReceiptBoot), CandidateError> {
     check_startup(guard)?;
-    let engine = Engine::connect_cleanup(candidate)?;
+    // A cleanup bound to the run's receipt (its own owner, or the recovery) waits for
+    // a briefly held lease instead of giving up (HACK-2715 review round 2, seen on a
+    // real VM: an owner's stop right after a pool start did not confirm). A stopped
+    // pool still refuses at once, before any wait.
+    let engine = if expected.is_some() {
+        Engine::connect_owned_cleanup(candidate)?
+    } else {
+        Engine::connect_cleanup(candidate)?
+    };
     check_startup(guard)?;
-    let (mut receipt, root) = journal::load(
+    let (mut receipt, root, which) = cleanup_journal(
         candidate,
         run,
         engine.guest().incarnation(),
         engine.guest().boot_id(),
+        expected,
+        finish.is_some(),
     )?;
-    if let Some(expected) = expected {
-        receipt.check_binding(expected)?;
-    }
     check_startup(guard)?;
     let backend = OwnedBackend {
         engine,
@@ -1575,7 +1642,7 @@ fn cleanup_inner(
     }
     #[cfg(target_os = "macos")]
     crate::provider::interactive_session::after_cleanup(candidate, receipt.review.scope().run);
-    Ok(receipt)
+    Ok((receipt, which))
 }
 #[cfg(test)]
 fn cleanup_using<B: Backend>(
@@ -1939,7 +2006,11 @@ pub(in crate::provider::graph) fn reservations_except(
         new_attempt,
         except.map(|receipt| receipt.review.scope().run),
         |receipt, resource| {
-            if verified_data.insert(receipt.review.scope().run.to_owned()) {
+            // An ended boot's run only reserves its present containers; its data is
+            // bound to that boot and is re-proved by the run's own recovery.
+            if receipt.boot == engine.guest().boot_id()
+                && verified_data.insert(receipt.review.scope().run.to_owned())
+            {
                 engine.verify_data(
                     receipt,
                     Instant::now() + Duration::from_secs(40),
@@ -1991,9 +2062,13 @@ fn reservations_using_except(
         if except == Some(run.as_str()) {
             continue;
         }
-        let (receipt, root) = journal::load_admission(candidate, run, owner, boot)?;
+        let (receipt, root, which) = journal::load_any_boot(candidate, run, owner, boot)?;
         persistent_data::tool::require_idle(&root)?;
         if receipt.phase == Phase::Removed {
+            continue;
+        }
+        if which == journal::ReceiptBoot::Ended {
+            ended_boot_reservations(&receipt, &mut inspect, &mut add)?;
             continue;
         }
         if receipt.phase != Phase::ReadyObserved {
@@ -2023,6 +2098,45 @@ fn reservations_using_except(
     }
     if let Some(source) = archive {
         super::archive::make_room(candidate, source)?;
+    }
+    Ok(())
+}
+
+/// What a native run of an ended pool boot reserves for another start (HACK-2715).
+///
+/// After `runtime down --force`, a crash or a host reboot, a run whose owner has not
+/// recovered it keeps its receipt from the boot that ended. Refusing it, as every
+/// same-boot rule must, blocked every other project's start in the new boot, so the
+/// Compose project that recovers first could not come up again. Its containers can no
+/// longer run their effects (the guest that owned them stopped, and the engine has no
+/// restart policy for native containers), but the engine keeps them, stopped, on the
+/// pool's disk until the run's own recovery removes them. Like an exited Compose
+/// container (`admission::check_using`), each one that is still present reserves its
+/// limits; one already gone reserves nothing. Its network members and data are not
+/// rechecked: they reserve no capacity, and the run's recovery re-proves them.
+///
+/// A start caught mid-way (`preparing`) may hold a container whose create was never
+/// recorded. In the current boot that create could still land, so a same-boot start in
+/// progress refuses. The ended boot's guest is gone, so nothing more can land: each
+/// member not yet removed is looked up by its recorded id or, without one, by its exact
+/// name, with ownership checked as always, and what is present reserves its limits.
+/// Such a run does not block another project's start (HACK-2715 review), unless a
+/// member found by its exact name fails that ownership check, its journal cannot be
+/// loaded (a `state.pending` left by a crash mid-save), or it has a pending helper
+/// call: admission then refuses, as it does for any such run (review round 2).
+fn ended_boot_reservations(
+    receipt: &Receipt,
+    inspect: &mut impl FnMut(&Receipt, &Resource) -> Result<Option<Value>, CandidateError>,
+    add: &mut impl FnMut(&Value) -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    for resource in receipt.resources.values().filter(|resource| {
+        resource.kind == Kind::Container
+            && resource.phase != "removed"
+            && (resource.id.is_some() || resource.phase != "reserved")
+    }) {
+        if let Some(value) = inspect(receipt, resource)? {
+            add(&value)?;
+        }
     }
     Ok(())
 }

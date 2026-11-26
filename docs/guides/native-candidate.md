@@ -972,12 +972,134 @@ data, and requires inspection before retry. No guest is started by alias recover
 Interrupted starts without a recorded process or both identified disks remain
 outside this repair path.
 
-`runtime down` stops the pool even while projects run in it, because a crash or a
-host reboot ends the same way. Their containers stop with the guest and their data is
-kept. Its JSON then lists the graph runs (Compose and native-authored) whose receipts were live, including a failed start that kept its started services, in
-`interrupted_runs`, or sets `interrupted_runs_unknown` when they could not be read,
-and it writes one line on stderr saying how many it stopped. `hack up` in each of those
-projects starts the pool again and recovers its run.
+`runtime down` refuses to stop a running pool while projects run in it. A graph run
+(Compose or native-authored) is running when its receipt is live: running, starting,
+restoring, stopping, or a failed start that kept its started services. The refusal
+stops and releases nothing, exits non-zero with code `runtime_down_live_runs`, lists the
+run ids in `live_runs`, and writes one line on stderr naming them. The ids are the same
+as `live_runs` in `runtime status`; a project records the runs it owns in its Hack
+directory (usually `.hack/`), under `.internal/native-runs/` (Compose) or
+`.internal/native-authored-runs/` (native-authored). Run `hack down` in each project first, or `hack down --recover` for
+a run whose `hack up` has exited. When the receipts cannot be read it refuses with
+`runtime_down_runs_unreadable` instead. Usually a run directory under `run/graphs/` or
+`run/native-graphs/` of the home has no readable `state.json`, for example after a start
+crashed before its first save; `runtime status` then counts it in `graph_runs` and omits
+`live_runs`. `runtime down --force` stops the pool in that case too.
+
+Only a pool that really runs is refused: its record says `running` and its recorded
+provider is alive. A stopped pool is never refused, and nor are retained runs, which
+hold no containers. A pool whose provider died under it (`process-exited`, below) and
+a down that stalled in `quiescing` get the same `runtime down` as before, whatever
+their receipts say.
+
+`runtime down` (plain or `--force`) waits up to 5 seconds for a provider lease that
+another operation holds, such as a project start writing its receipt, and then refuses
+`provider_busy`, naming the holder when the lock records one.
+
+`runtime down --force` stops the pool anyway, as a crash or a host reboot would. The
+projects' containers stop with the guest and their data is kept. Its JSON lists the
+runs that were live in `interrupted_runs`, or sets `interrupted_runs_unknown` when they
+could not be read. After the stop it waits, up to 10 seconds, for the owner of each
+interrupted native-authored run to exit, and lists in `interrupted_owners` which
+owners `exited` and which were still `running`. It also writes one line on stderr
+saying how many it stopped, what each such owner did and, for each run, the command
+that brings it back in its project:
+
+The command depends on the kind of run and on the phase its receipt was in:
+
+- A Compose run that was ready (or had every service started): `hack up` starts the
+  pool again and recovers the run, data kept. If another project's command already
+  started the pool again, `hack up` recovers the run in that running pool the same
+  way, so the order in which the projects come back does not matter. On a running
+  pool this also covers a run whose owner exited in the same boot: `hack up` stops
+  its services that are still running, with data kept, and starts them again, where
+  it used to refuse and name `hack down --recover`; it says so on one line. The
+  `hack down` that recovers a run after its pool boot ended runs no live `down.before`
+  or `down.after` hook, because its services stopped with that boot. It knows the boot
+  ended when it started the stopped pool or recovered an exited provider itself, or
+  when the runtime's owner selection carries a dead-owner recovery hint (boot evidence
+  places the run in an earlier boot), however the pool came back. Without such
+  evidence (no hint while the pool is not running, or a receipt with no boot
+  evidence) the hooks run as before. A `down.after` that an earlier down left owed in
+  the journal still runs once.
+- A Compose run caught in a start that failed or never finished (`failed-retained`,
+  `preparing`) or in its owner's own stop (`cleanup-intent`): `hack up` does not
+  recover it. Once its owner has exited, the explicit `graph recover-cleanup` described
+  under [Explicit cleanup after a dead foreground
+  owner](#explicit-cleanup-after-a-dead-foreground-owner) clears it while the pool is
+  stopped, data kept.
+- A Compose run caught restoring or restarting (`restoring`, `restarting`): nothing
+  recovers it, as before. Stop it with `hack down` before the pool stops.
+- A native-authored run (`hack.project.json`) in any phase, including a start caught
+  mid-way: `hack down`, then `hack up`. A native-authored `hack up -d` owner is a host
+  process. It notices from the pool record, within about two seconds, that its boot
+  ended, and exits without a cleanup effect as a crash would, keeping its records and
+  its admission lock for the dead-owner recovery;
+  `runtime down --force` waits up to 10 seconds for these owners and its line says,
+  per run, whether each one exited or was still running. A pool whose provider
+  crashed still records running (`runtime status` says `process-exited`); its owners
+  also count a recorded provider proven gone as the end of their boot, and the native
+  `hack down` (and `--recover`) first runs `runtime recover`, which records the pool
+  stopped, as `hack up` and the Compose `hack down` already do. If an
+  owner still runs when the pool is stopped, `hack down` first asks it to stop with
+  the pool left stopped: the stop needs no pool, the owner's cleanup refuses without
+  an effect, and `hack down` waits for the owner to exit. Then `hack down` (or `hack
+  down --recover` once the owner is gone) runs the dead-owner recovery in the same
+  command. On a running pool in a later boot, the owner's own stop clears the run. The
+  recovery first starts a stopped pool exactly as recorded (`runtime up`, no project
+  share asked for), saying so on one line, but only after the
+  read-only `graph native boot --run-id RUN --json` shows that the run's receipt
+  belongs to an ended boot and that its cleanup can proceed. If the recovery still
+  fails after this command started the pool, it says that the pool is still running;
+  it does not stop it again, because other projects may already use it. The cleanup
+  removes the run's stopped containers, which the engine keeps on the pool's disk
+  after the boot ends. A member whose create the start never recorded is looked up by
+  its exact name: absent, it is recorded removed; present, it cannot be attributed
+  (labels never authorize adoption), so the cleanup refuses before any effect and
+  keeps it, and no command clears it yet. For a start caught mid-way with such a
+  member, the forced-stop line says this instead of promising `hack down`, then
+  `hack up`.
+- A native-authored run with persistent data, a live source, a custom network or a
+  managed environment: nothing recovers it from an ended boot yet, because that state
+  is bound to the boot that made it. `hack down` never starts a pool for it. If its
+  owner still runs, `hack down` first asks that owner to stop, because the stop needs
+  no pool: the owner's cleanup refuses without any effect, and the owner exits and
+  leaves its record as evidence. `hack down` then refuses the run by name
+  (`native_graph_ended_boot_unsupported`), on a stopped pool and on a running one
+  alike. The recovery refuses it before it writes any recovery state. Its containers,
+  data and evidence are kept. Stop such a run with `hack down` before the pool stops.
+
+A plain `runtime down` refusal names the same command for each live run before you
+pass `--force`. A native-authored run of an ended boot does not block other projects,
+except in the cases listed after these points:
+
+- It is not live any more: its guest stopped, so it does not keep a plain `runtime
+  down` refused in the new boot, and a stopped pool's `runtime status` lists no run in
+  `live_runs`.
+- Until it is recovered, the containers it still has count toward the pool's capacity
+  for other projects' starts, as an exited Compose container does. A start caught
+  mid-way counts each member it may have created, found by its recorded id or, without
+  one, by its exact name.
+- A start with persistent storage reads such a run's saved state without waiting for
+  it. A pending helper call still refuses, and the run keeps its own volumes from any
+  new consumer until its own recovery; volumes it does not name are not blocked.
+
+These runs still block other projects until they are cleared:
+
+- A Compose run caught restoring or restarting stays live, so a plain `runtime down`
+  and the idle stop of another project's `hack up` refuse until it is stopped.
+- A Compose run caught starting or stopping (`failed-retained`, `preparing`,
+  `cleanup-intent`) stays live the same way until the explicit dead-owner cleanup
+  clears it.
+- A native run that a crash left with a `state.pending` beside its receipt cannot be
+  read, so graph admission refuses every project's start until it is inspected.
+- A native start caught mid-way whose unrecorded member is found by its exact name
+  but fails the ownership check also makes graph admission refuse every start.
+
+In its own boot, a start that is still in progress keeps refusing other starts, as
+before, because its effects may still land. Hack's own scripts pass `--force` only
+where they stop a pool on purpose, such as test disposal, the host watchdog and the
+qualification run's emergency stop.
 
 How a run moves across a pool stop. It is checked as the TLA+ model
 `tests/models/tla/native-pool-stop`. A run left from a boot older than the previous
@@ -1006,20 +1128,45 @@ stateDiagram-v2
     none --> ready : hack up
     retained --> ready : hack up
     ready --> retained : hack down
-    ready --> orphaned : runtime down, owner dies
+    ready --> ready : runtime down refused
+    ready --> orphaned : forced down, owner dies
     ready --> crashed : VM or provider dies
     crashed --> orphaned : hack native recover
-    orphaned --> recover : hack up, down --recover
+    orphaned --> recover : hack up, hack down
     state recover <<choice>>
     recover --> retained : [boot known, no HTTPS lease]
     recover --> finalizing : [boot known, HTTPS lease]
     recover --> stranded : [boot not known]
     finalizing --> retained : lease released or archived
 
+    state "native starting" as nstarting
+    state "native ready" as nready
+    state "native orphaned" as norphaned
+    state "native removed" as nremoved
+    state "native refused" as nrefused
+    [*] --> nstarting : native-authored hack up
+    nstarting --> nready : start completes
+    nstarting --> norphaned : forced down, starting
+    nready --> norphaned : forced down, owner exits
+    norphaned --> nrecover : hack down
+    state nrecover <<choice>>
+    nrecover --> nremoved : [graph2, no env]
+    nrecover --> nrefused : [data, source or env]
+    nremoved --> nstarting : hack up
+
+    note right of ready
+        runtime down refuses a live
+        run and names it; only
+        runtime down --force stops
+        the pool under it.
+        INV NoDownOverLiveRun.
+    end note
     note left of orphaned
         Receipt still ready-observed,
         owner dead, publication left.
         Pool stopped or in a new boot.
+        hack down needs --recover while
+        the owner's frontend is left.
     end note
     note right of recover
         runtime up first, then the
@@ -1040,14 +1187,49 @@ stateDiagram-v2
     note left of retained
         INV NoDeadEnd: some named
         command always acts.
+        INV CanComeUp: hack up starts
+        it even when another
+        project's native run of an
+        ended boot is left, mid-start
+        too: its present containers
+        reserve their limits.
         PROP Recovers.
+    end note
+    note right of norphaned
+        Receipt names the ended boot,
+        ready or mid-start. Its owner
+        notices and exits; --force
+        waits for it. hack down asks a
+        live owner to stop first (no
+        pool needed), checks the
+        receipt, starts a stopped pool
+        and the dead-owner recovery
+        removes the stopped
+        containers, data kept. Not
+        live in the new boot.
+        INV NativeCanComeUp,
+        NoWastedPoolStart,
+        DownConfirms,
+        NoOwnerLeftByForce.
+    end note
+    note right of nrefused
+        Data, source, custom network
+        or managed env: no pool start.
+        A live owner is asked to stop
+        first (that needs no pool),
+        then the run is refused by
+        name, data kept. It blocks
+        only its own volumes.
     end note
 
     class ready ok
+    class nready ok
     class orphaned wait
+    class norphaned wait
     class crashed wait
     class finalizing wait
     class stranded fail
+    class nrefused fail
 ```
 
 `runtime down` first quiesces the guest engine, which leaves the pool in phase

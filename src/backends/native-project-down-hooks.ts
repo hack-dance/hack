@@ -459,16 +459,34 @@ export type NativeDownHookSession = {
  * what is still owed (after a frontend crash, or a down.after the frontend
  * never reached). A known `down.before` failure restores the claimed record so
  * an explicit later down may retry it, as on the Compose backend.
+ *
+ * `bootEnded`: the run's pool boot ended under it, so its services stopped
+ * with that boot (HACK-2715, real VM at efcec5d3). An `owed` record is then
+ * only the ready state a foreground start writes for its later stop, not a
+ * phase an earlier down left: no `down.before` runs on services that are gone.
+ * The record is retired here so no later down runs it either. A `down.after`
+ * that an earlier down left owed (`after-owed`) still runs once.
  */
 export async function openNativeDownHookSession(opts: {
   readonly scope: NativeProjectRunScope;
   readonly run: NativeProjectRun;
   readonly graphStopped: boolean;
   readonly configured: boolean;
+  readonly bootEnded?: boolean;
 }): Promise<NativeDownHookSession> {
-  const loaded = await loadNativeDownHookRecord(opts.scope);
+  let loaded = await loadNativeDownHookRecord(opts.scope);
   if (started(loaded)) {
     throw unknownCompletion();
+  }
+  if (
+    opts.bootEnded === true &&
+    loaded?.run === opts.run.run &&
+    loaded.state === "owed"
+  ) {
+    if (!(await replaceNativeDownHookRecord(opts.scope, loaded, null))) {
+      throw changed();
+    }
+    loaded = null;
   }
   // A record of another run is stale: it never authorizes this run's hooks.
   const current = loaded?.run === opts.run.run ? loaded : null;
@@ -480,7 +498,10 @@ export async function openNativeDownHookSession(opts: {
   });
   const claimBefore =
     current?.state === "owed" ||
-    (!opts.graphStopped && current === null && opts.configured);
+    (opts.bootEnded !== true &&
+      !opts.graphStopped &&
+      current === null &&
+      opts.configured);
   let afterFrom: NativeDownHookRecord | null =
     current?.state === "after-owed" ? current : null;
   let beforeDone = false;

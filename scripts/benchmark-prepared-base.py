@@ -831,7 +831,7 @@ class Trial:
             alias = None
         try:
             if self.home.exists():
-                code, body, _, _ = self.cli("runtime", "down", timeout=300)
+                code, body, _, _ = self.cli("runtime", "down", "--force", timeout=300)
                 result["down"] = body.get("phase") or body.get("code")
                 if code != 0:
                     # A down stopped at the deadline may or may not have stopped the pool.

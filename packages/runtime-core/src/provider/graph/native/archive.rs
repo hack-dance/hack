@@ -35,7 +35,12 @@ pub(super) fn load_inspection(
 ) -> Result<(Receipt, PathBuf), CandidateError> {
     let (root, archived) = inspection_directory(candidate, run)?.ok_or_else(refused)?;
     let (receipt, root) = journal::load_at(candidate, run, Some(owner), root)?;
-    if receipt.boot != boot || (archived && !eligible(&receipt)) {
+    // A removed run of an ended boot (recovered after `runtime down --force`, a crash or
+    // a host reboot, HACK-2715) holds nothing; its inspection observes in this boot that
+    // every resource it named is absent. Any other run of another boot is refused.
+    if (receipt.boot != boot && receipt.phase != Phase::Removed)
+        || (archived && !eligible(&receipt))
+    {
         return Err(refused());
     }
     if archived {

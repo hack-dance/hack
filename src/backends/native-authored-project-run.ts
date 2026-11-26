@@ -52,6 +52,7 @@ import {
 import type { NativeAuthoredProcessIncarnation } from "./native-authored-process-incarnation.ts";
 import {
   NativeAuthoredReservedStartError,
+  NativeAuthoredStopOwnerExitedError,
   NativeAuthoredStopUnavailableError,
 } from "./native-authored-stop-errors.ts";
 import {
@@ -442,8 +443,11 @@ async function storage<T>(
   } catch (error) {
     // Preserve only closed, value-free routing hints across the redaction boundary.
     // Recovery must still acquire its leases and prove the selected state itself.
+    // The owner-exited hint routes `hack down` to the dead-owner recovery in the
+    // same command (HACK-2715); the live stop raises it inside this storage.
     if (
       error instanceof NativeAuthoredStopUnavailableError ||
+      error instanceof NativeAuthoredStopOwnerExitedError ||
       error instanceof NativeAuthoredReservedStartError ||
       isNativeEnvironmentNameError(error)
     ) {

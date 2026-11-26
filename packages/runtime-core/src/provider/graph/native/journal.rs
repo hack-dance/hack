@@ -740,18 +740,19 @@ pub(super) fn ended_boot_recoverable(
 }
 /// Which boot a receipt belongs to, read from the pool's own record without a lock and
 /// without a running pool (HACK-2715). `Ended` only on positive evidence: the record is
-/// this receipt's pool owner and says the pool is not running, or running another boot,
-/// or still says running this boot while the provider it records is proven gone (a
-/// crash or a kill, HACK-2579 `process-exited`; review round 2). An absent or
-/// unreadable record, or a record of another owner, proves nothing and
-/// returns `Current`, so the caller keeps the strict same-boot rules. Callers that act
-/// on the run re-check the boot against the connected engine before any effect.
+/// this receipt's pool owner and records another boot, or a stopped phase, or still
+/// records this boot (running, or a transitional phase such as `quiescing`) while the
+/// provider it records is proven gone (a crash or a kill, HACK-2579 `process-exited`;
+/// review round 2). A transitional phase with a live provider, an absent or unreadable
+/// record, or a record of another owner proves nothing and returns `Current`, so the
+/// caller keeps the strict same-boot rules. Callers that act on the run re-check the
+/// boot against the connected engine before any effect.
 pub(super) fn pool_boot(candidate: &Candidate, receipt: &Receipt) -> ReceiptBoot {
     boot_of(candidate, &receipt.owner, &receipt.boot)
 }
 /// [`pool_boot`] for a pool owner token and guest boot id: `Ended` only on positive
-/// evidence that the pool record of this owner is not running that boot, or that the
-/// provider it records is gone.
+/// evidence that the pool record of this owner records another boot or a stopped phase,
+/// or that the provider it records is gone.
 pub(super) fn boot_of(candidate: &Candidate, owner: &str, boot: &str) -> ReceiptBoot {
     let Ok(pool) =
         state::read::<serde_json::Value>(&candidate.state_root.join("run/smolvm/owner.json"))
@@ -764,17 +765,29 @@ fn boot_in(pool: &serde_json::Value, owner: &str, boot: &str) -> ReceiptBoot {
     if pool["token"].as_str() != Some(owner) {
         return ReceiptBoot::Current;
     }
-    if pool["phase"] == "running" && pool["guest_boot_id"].as_str() == Some(boot) {
-        // A provider that died under the pool (a crash, or a kill) leaves its record
-        // `running` (HACK-2579 `process-exited`). Its guest is gone with it, so its boot
-        // has ended too: positive evidence only, when the recorded provider identity
-        // proves the process gone (HACK-2715 review round 2, Codex P2).
-        if recorded_provider_gone(pool) {
-            return ReceiptBoot::Ended;
-        }
-        ReceiptBoot::Current
-    } else {
+    // Another boot of this pool is recorded: this receipt's boot ended.
+    if pool["guest_boot_id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty() && id != boot)
+    {
+        return ReceiptBoot::Ended;
+    }
+    // A stopped phase is written only once the provider is proven gone.
+    let phase = pool["phase"].as_str().unwrap_or_default();
+    if crate::provider::lifecycle::STOPPED_PHASES.contains(&phase) || phase == "failed-boot-stopped"
+    {
+        return ReceiptBoot::Ended;
+    }
+    // `running` this boot, or a transitional phase (`quiescing`, `stopping`,
+    // `starting`): a `runtime down --force` that stalls or fails in quiesce leaves the
+    // provider and its containers running (HACK-2715 review, Codex P2), so only a
+    // recorded provider proven gone ends the boot. A provider that died under the pool
+    // (a crash, or a kill) leaves its record as it was (HACK-2579 `process-exited`);
+    // its guest is gone with it (review round 2).
+    if recorded_provider_gone(pool) {
         ReceiptBoot::Ended
+    } else {
+        ReceiptBoot::Current
     }
 }
 /// Whether the pool record names a provider process that is proven gone (exited, a
@@ -994,12 +1007,43 @@ mod pool_boot_tests {
                 "{pool}"
             );
         }
-        let mut stopped = record(live);
+        let mut stopped = record(live.clone());
         stopped["phase"] = json!("recovered-unclean");
         assert_eq!(boot_in(&stopped, "owner", "boot"), ReceiptBoot::Ended);
         assert_eq!(
-            boot_in(&record(gone), "owner", "another boot"),
+            boot_in(&record(gone.clone()), "owner", "another boot"),
             ReceiptBoot::Ended
         );
+        // HACK-2715 review (Codex P2): a stop that stalls or fails in a transitional
+        // phase leaves the provider and its containers running, so that phase proves
+        // nothing while the recorded provider lives; it ends the boot only with the
+        // provider proven gone, another boot recorded, or a stopped phase.
+        for phase in ["quiescing", "stopping", "starting"] {
+            let mut transitional = record(live.clone());
+            transitional["phase"] = json!(phase);
+            assert_eq!(
+                boot_in(&transitional, "owner", "boot"),
+                ReceiptBoot::Current,
+                "{phase}"
+            );
+            transitional["process"] = gone.clone();
+            assert_eq!(
+                boot_in(&transitional, "owner", "boot"),
+                ReceiptBoot::Ended,
+                "{phase}"
+            );
+            let mut replaced = record(live.clone());
+            replaced["phase"] = json!(phase);
+            replaced["guest_boot_id"] = json!("another boot");
+            assert_eq!(
+                boot_in(&replaced, "owner", "boot"),
+                ReceiptBoot::Ended,
+                "{phase}"
+            );
+        }
+        let mut failed = record(live);
+        failed["phase"] = json!("failed-boot-stopped");
+        failed["guest_boot_id"] = serde_json::Value::Null;
+        assert_eq!(boot_in(&failed, "owner", "boot"), ReceiptBoot::Ended);
     }
 }

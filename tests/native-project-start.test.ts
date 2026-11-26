@@ -9101,6 +9101,40 @@ test.each([
   expect(lost.message.includes("hack down --recover")).toBe(!withheld);
 });
 
+// HACK-2746 with the #1279 cause-line fix: a VM lost during the owner's own
+// stop at `cleanup-intent` names `hack down --recover` in both the advice and
+// the cause line only with `cross_boot_stop`; without it, neither names it.
+test.each([
+  { name: "finished across the boot", crossBootStop: true },
+  { name: "not finished", crossBootStop: false },
+])("a Ctrl-C stop lost with its VM names the down in advice and cause only when the runtime finishes it ($name)", async ({
+  crossBootStop,
+}) => {
+  const loss = await nativeLostStartRetirable({
+    loss: { stage: "ready" },
+    runtime: lostRuntime,
+    projectRoot: "/unused",
+    run: lostRun,
+    invoke: (async () =>
+      foregroundOwnerReply({
+        phase: "cleanup-intent",
+        cross_boot_relay: true,
+        cross_boot_stop: crossBootStop,
+      })) as unknown as Parameters<
+      typeof nativeLostStartRetirable
+    >[0]["invoke"],
+  });
+  expect(loss).toEqual({ stage: "ready", retirable: crossBootStop });
+  const end = { bootId: "b".repeat(32), providerPid: 4242 };
+  const cause = new Error(
+    "Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Run hack down --recover to resume this run's confirmed cleanup with data retained."
+  );
+  const lost = new NativeForegroundVmLostError({ end, loss, cause });
+  const [, , advice, causeLine] = lost.message.split("\n");
+  expect(advice?.includes("hack down --recover")).toBe(crossBootStop);
+  expect(causeLine?.includes("hack down --recover")).toBe(crossBootStop);
+});
+
 test("a ready run whose relay owner is unprovable is told no command", () => {
   const end = { bootId: "b".repeat(32) };
   const named = nativeForegroundPoolEndMessage(end, { stage: "ready" });

@@ -44,7 +44,11 @@ pub fn command(
                 environment,
             }),
         },
-        Duration::from_secs(options.timeout_seconds + 20),
+        // The owner first waits up to `COMMAND_LEASE_WAIT` for a briefly held
+        // provider lease (see `handle`), then runs the job for its timeout, then
+        // reads its output: read the answer for all three.
+        Duration::from_secs(options.timeout_seconds + 20)
+            + crate::provider::lifecycle::COMMAND_LEASE_WAIT,
     )
 }
 fn send(
@@ -115,21 +119,49 @@ pub(super) fn handle(
     stream: &std::os::unix::net::UnixStream,
     mut pending_cleanup: impl FnMut() -> bool,
 ) -> Result<Value, CandidateError> {
-    let selected = super::super::service_selection(candidate, run, &request.service)?;
-    // Selection must be supported by this live owner's admitted in-memory template.
-    runtime.job_template(&request.service)?;
-    let snapshot = super::super::inspect(candidate, run)?;
-    if snapshot.receipt.phase != "ready-observed" {
-        return Err(refused());
-    }
-    // A ready receipt alone cannot authorize traffic through a dependency that
-    // has rotated since startup. Check this owner's live endpoints before
-    // returning a selection or admitting a one-off container.
-    {
-        let engine = Engine::connect(candidate)?;
-        let (mut receipt, root) = super::super::load(candidate, &engine, run)?;
-        startup::Driver::verify(runtime, &engine, &mut receipt, &root)?;
-    }
+    // At a run's ready line the shared HTTPS owner verifies its acquire under the
+    // provider lease, beside `hack exec`, the dependency refresh and `hack down`.
+    // Every lease take here and in `begin` therefore waits out a brief holder,
+    // inside one shared bound of `COMMAND_LEASE_WAIT`, instead of refusing
+    // `provider_busy` (HACK-2669, row 3). Only acquisition is retried, all of it
+    // before the job reservation, so nothing is replayed. This runs on the
+    // owner's only loop thread, so for the length of the wait (at most
+    // `COMMAND_LEASE_WAIT`) the loop serves nothing else: a `hack down` request
+    // waits in the listener backlog (its request bound is far longer) and the
+    // restart tick runs late. Only a pending signal or this client's disconnect
+    // ends the wait early, before the next attempt; a lasting holder is still
+    // refused with the holder named.
+    let watch = transport::ClientWatch::half_closed(stream)?;
+    let check = || {
+        if signals::startup_pending() || watch.disconnected() {
+            Err(crate::provider::engine::acquisition_cancelled())
+        } else {
+            Ok(())
+        }
+    };
+    let lease_deadline = Instant::now() + crate::provider::lifecycle::COMMAND_LEASE_WAIT;
+    let selected = crate::provider::state::wait_for_acquisition(
+        lease_deadline,
+        &check,
+        || {
+            let selected = super::super::service_selection(candidate, run, &request.service)?;
+            // Selection must be supported by this live owner's admitted in-memory template.
+            runtime.job_template(&request.service)?;
+            let snapshot = super::super::inspect(candidate, run)?;
+            if snapshot.receipt.phase != "ready-observed" {
+                return Err(refused());
+            }
+            // A ready receipt alone cannot authorize traffic through a dependency that
+            // has rotated since startup. Check this owner's live endpoints before
+            // returning a selection or admitting a one-off container.
+            let engine = Engine::connect(candidate)?;
+            let (mut receipt, root) = super::super::load(candidate, &engine, run)?;
+            startup::Driver::verify(runtime, &engine, &mut receipt, &root)?;
+            Ok(selected)
+        },
+        crate::provider::state::acquisition_expired,
+    )?;
+    check()?;
     let Some(command) = request.command else {
         let mut result = serde_json::to_value(selected).map_err(|_| refused())?;
         result["ok"] = json!(true);
@@ -148,7 +180,6 @@ pub(super) fn handle(
         run,
         &request.service,
     )?;
-    let watch = transport::ClientWatch::half_closed(stream)?;
     let deadline = Instant::now() + Duration::from_secs(command.timeout_seconds);
     runtime.set_startup_cancellation(Some(signals::startup_pending));
     let active = one_off::runtime::begin(
@@ -158,6 +189,10 @@ pub(super) fn handle(
         &command.argv,
         command.workdir.as_deref(),
         &managed,
+        one_off::runtime::LeaseWait {
+            deadline: lease_deadline,
+            check: &check,
+        },
     );
     runtime.set_startup_cancellation(None);
     let result = match active {

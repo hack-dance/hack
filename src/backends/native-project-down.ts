@@ -1197,18 +1197,39 @@ async function nativeProjectDownOnce(opts: {
   }
   const wait = async () => {
     // The lifetime as last captured (it may have gained its HTTPS lease).
-    const token = finalization;
-    if (token === undefined) {
+    const captured = finalization;
+    if (captured === undefined) {
       return;
     }
+    let latest = captured;
     try {
-      await waitNativeProjectFinalization({
-        scope: opts.scope,
-        run,
-        token,
-        timeoutMs: frontendGone ? 1 : opts.finalizationTimeoutMs,
-      });
+      // A started return takes its HTTPS lease at the owner's ready line,
+      // beside this stop (HACK-2707): the same frontend may add the lease to
+      // its lifetime (version 2 to 3, same attempt) while we wait. Follow it
+      // once, then wait on the lifetime that now carries it.
+      for (;;) {
+        try {
+          await waitNativeProjectFinalization({
+            scope: opts.scope,
+            run,
+            token: latest,
+            timeoutMs: frontendGone ? 1 : opts.finalizationTimeoutMs,
+          });
+          break;
+        } catch (error) {
+          const current = await captureFinalization({
+            scope: opts.scope,
+            run,
+          }).catch(() => undefined);
+          if (!(current && nativeFinalizationLeaseAdded(latest, current))) {
+            throw error;
+          }
+          latest = current;
+          finalization = current;
+        }
+      }
     } catch {
+      const token = latest;
       // The wait just saw the frontend gone without completion; one unreadable
       // `ps` row under load must not turn that into "still running" (HACK-2372).
       if (token.version === 1 || !(await nativeFrontendGoneSettled(token))) {

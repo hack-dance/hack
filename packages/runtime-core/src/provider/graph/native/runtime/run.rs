@@ -295,7 +295,9 @@ pub(in crate::provider::graph::native) fn execute(
     }
     guard()?;
     let deadline = Instant::now() + Duration::from_secs(30);
-    let engine = Engine::connect_command_until(candidate, deadline)?;
+    // The owner loop's guard (signals, publication, pin) runs before every lease
+    // attempt, and the wait counts against this 30 s budget (HACK-2669).
+    let engine = Engine::connect_command_until(candidate, deadline, guard)?;
     let (receipt, root) = journal::load(
         candidate,
         expected.review.scope().run,

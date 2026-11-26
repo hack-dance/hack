@@ -52,6 +52,10 @@ import {
   recordNativeHttpsStartupFailure,
 } from "./native-https-startup-failure.ts";
 import { startNativeProjectHttps } from "./native-project-https.ts";
+import {
+  INSPECT_BUSY_WAIT_MS,
+  withNativeProviderBusyWait,
+} from "./native-project-inspect.ts";
 import { invokeNativeRuntime } from "./native-runtime-client.ts";
 
 type ReleaseProgress = { stage: NativeHttpsReleaseStage };
@@ -66,12 +70,21 @@ function markReleaseStage(
 type Frontend = Awaited<ReturnType<typeof startNativeProjectHttps>>;
 export interface NativeHttpsOwnerServerDependencies {
   readonly start: (binding: NativeHttpsOwnerBinding) => Promise<Frontend>;
+  /**
+   * Fresh graph observations for an acquire or a release. They read under the
+   * provider lease and wait out a brief holder (see
+   * {@link verifyNativeHttpsLeaseGraph}); `signal` is the owner's own shutdown.
+   */
   readonly verify: (
     binding: NativeHttpsOwnerBinding,
     lease: NativeHttpsLeaseRequest,
-    phase: "acquire" | "release"
+    phase: "acquire" | "release",
+    signal?: AbortSignal
   ) => Promise<void>;
-  readonly verifyIdle: (binding: NativeHttpsOwnerBinding) => Promise<void>;
+  readonly verifyIdle: (
+    binding: NativeHttpsOwnerBinding,
+    signal?: AbortSignal
+  ) => Promise<void>;
   /**
    * Whether the pool boot this owner is bound to has ended
    * (`native-https-pool-boot.ts`). A running owner checks it every
@@ -132,19 +145,44 @@ function verifyCleanGraphObservations(
   }
 }
 
-/** Binds release to fresh native graph and publication observations, not a disconnected client. */
+/**
+ * Binds release to fresh native graph and publication observations, not a disconnected client.
+ *
+ * `graph inspect`, `graph bridges` and `runtime publication-hostnames` read
+ * under the provider lease. The shared owner verifies an acquire exactly at a
+ * run's ready line, when `hack exec`, `hack run`, `hack down` and the ready
+ * owner's own restart tick take the same lease, and a release right after a
+ * stop, when a command that waited for the lease takes it. One nonblocking
+ * attempt per read turned any such brief holder into a refused acquire (the
+ * frontend then stopped the whole run) or an unconfirmed release (HACK-2669,
+ * HACK-2708, HACK-2709). Each read now waits out contention like the other
+ * inspections inside `up` and `down`: one shared deadline of
+ * {@link INSPECT_BUSY_WAIT_MS} for the whole verification. Only
+ * `provider_busy` is retried, so nothing past acquisition is replayed; a
+ * holder that outlasts the deadline is still refused, named by the last
+ * refusal. `signal` (the owner's own shutdown) ends the wait.
+ */
 export async function verifyNativeHttpsLeaseGraph(
   binding: NativeHttpsOwnerBinding,
   lease: NativeHttpsLeaseRequest,
   phase: "acquire" | "release",
-  invoke: typeof invokeNativeRuntime = invokeNativeRuntime
+  invoke: typeof invokeNativeRuntime = invokeNativeRuntime,
+  opts: { readonly signal?: AbortSignal; readonly busyWaitMs?: number } = {}
 ): Promise<void> {
+  const deadline =
+    performance.now() + (opts.busyWaitMs ?? INSPECT_BUSY_WAIT_MS);
   const call = (args: readonly string[]) =>
-    invoke({
-      runtime: binding.runtime,
-      cwd: binding.runtime.home,
-      args,
-      timeoutMs: 30_000,
+    withNativeProviderBusyWait({
+      deadline,
+      signal: opts.signal,
+      request: () =>
+        invoke({
+          runtime: binding.runtime,
+          cwd: binding.runtime.home,
+          args,
+          timeoutMs: 30_000,
+          signal: opts.signal,
+        }),
     });
   const status = await call(["runtime", "status", "--json"]);
   if (
@@ -283,6 +321,8 @@ export async function serveNativeHttpsOwner(opts: {
   let state: "starting" | "running" | "closing" | "closed" | "failed" =
     "starting";
   let queue = Promise.resolve();
+  // The owner's own shutdown (SIGTERM or SIGINT): ends any lease wait in progress.
+  const stopping = new AbortController();
   let endpointIdentity: NativeHttpsFileIdentity | undefined;
   let socketIdentity: { dev: number; ino: number } | undefined;
   let frontend: Frontend | undefined;
@@ -399,7 +439,7 @@ export async function serveNativeHttpsOwner(opts: {
     markReleaseStage(released?.progress, "owner-validation");
     await checkPaths();
     markReleaseStage(released?.progress, "idle-verification");
-    await opts.dependencies.verifyIdle(binding);
+    await opts.dependencies.verifyIdle(binding, stopping.signal);
     state = "closing";
     markReleaseStage(released?.progress, "frontend-close");
     await frontend?.close();
@@ -491,7 +531,12 @@ export async function serveNativeHttpsOwner(opts: {
         throw error;
       }
     }
-    await opts.dependencies.verify(binding, request.lease, "acquire");
+    await opts.dependencies.verify(
+      binding,
+      request.lease,
+      "acquire",
+      stopping.signal
+    );
     if (frontendFailed) {
       throw nativeHttpsOwnerRefused();
     }
@@ -527,7 +572,12 @@ export async function serveNativeHttpsOwner(opts: {
       throw nativeHttpsOwnerRefused();
     }
     progress.stage = "graph-verification";
-    await opts.dependencies.verify(binding, identity, "release");
+    await opts.dependencies.verify(
+      binding,
+      identity,
+      "release",
+      stopping.signal
+    );
     progress.stage = "lease-validation";
     try {
       await lstat(join(leaseRoot, `${identity.leaseId}.json`));
@@ -591,7 +641,12 @@ export async function serveNativeHttpsOwner(opts: {
       throw nativeHttpsOwnerRefused();
     }
     progress.stage = "graph-verification";
-    await opts.dependencies.verify(binding, entry.identity, "release");
+    await opts.dependencies.verify(
+      binding,
+      entry.identity,
+      "release",
+      stopping.signal
+    );
     if (leases.size === 1) {
       await retire({
         socket,
@@ -696,6 +751,9 @@ export async function serveNativeHttpsOwner(opts: {
     });
   });
   const onSignal = () => {
+    // A request waiting out provider-lease contention stops waiting at once,
+    // so failOwner (serialized behind it) is not held for the wait.
+    stopping.abort();
     void serialize(failOwner);
   };
   let startupTimer: ReturnType<typeof setTimeout> | undefined;
@@ -827,26 +885,51 @@ async function runPinnedNativeHttpsOwner(opts: {
     configurationPath: opts.configurationPath,
     dependencies: {
       start: (selected) => startNativeProjectHttps(selected),
-      verify: verifyNativeHttpsLeaseGraph,
+      verify: (selected, lease, phase, signal) =>
+        verifyNativeHttpsLeaseGraph(
+          selected,
+          lease,
+          phase,
+          invokeNativeRuntime,
+          { signal }
+        ),
       poolBootEnded: readNativeHttpsPoolBootEnded,
-      verifyIdle: async (selected) => {
-        const claims = await invokeNativeRuntime({
-          runtime: selected.runtime,
-          cwd: selected.runtime.home,
-          args: ["runtime", "publication-hostnames", "--json"],
-          timeoutMs: 30_000,
-        });
-        if (
-          !isRecord(claims) ||
-          claims.scope !== "durable-ownership-only" ||
-          !Array.isArray(claims.claims) ||
-          claims.claims.length !== 0
-        ) {
-          throw nativeHttpsOwnerRefused();
-        }
-      },
+      verifyIdle: (selected, signal) =>
+        verifyNativeHttpsOwnerIdle(selected, invokeNativeRuntime, { signal }),
     },
   });
+}
+
+/**
+ * The last release retires the owner only with no durable hostname claim left.
+ * The claims are read under the provider lease, so the read waits out a brief
+ * holder like {@link verifyNativeHttpsLeaseGraph}.
+ */
+export async function verifyNativeHttpsOwnerIdle(
+  binding: NativeHttpsOwnerBinding,
+  invoke: typeof invokeNativeRuntime = invokeNativeRuntime,
+  opts: { readonly signal?: AbortSignal; readonly busyWaitMs?: number } = {}
+): Promise<void> {
+  const claims = await withNativeProviderBusyWait({
+    deadline: performance.now() + (opts.busyWaitMs ?? INSPECT_BUSY_WAIT_MS),
+    signal: opts.signal,
+    request: () =>
+      invoke({
+        runtime: binding.runtime,
+        cwd: binding.runtime.home,
+        args: ["runtime", "publication-hostnames", "--json"],
+        timeoutMs: 30_000,
+        signal: opts.signal,
+      }),
+  });
+  if (
+    !isRecord(claims) ||
+    claims.scope !== "durable-ownership-only" ||
+    !Array.isArray(claims.claims) ||
+    claims.claims.length !== 0
+  ) {
+    throw nativeHttpsOwnerRefused();
+  }
 }
 
 export async function runNativeHttpsOwner(opts: {

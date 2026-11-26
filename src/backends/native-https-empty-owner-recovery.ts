@@ -408,7 +408,8 @@ async function noRecoveryClaims(
     }
   }
 }
-async function syncDirectory(path: string): Promise<void> {
+/** fsync a directory so entries created or renamed in it survive power loss. */
+export async function syncDirectory(path: string): Promise<void> {
   const file = await open(path, constants.O_RDONLY);
   try {
     await file.sync();

@@ -38,7 +38,8 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "The error's first line names the supported platform; use the Compose backend instead.",
   },
   E_DOCKER_UNAVAILABLE: {
-    meaning: "The container runtime CLI or engine cannot be reached.",
+    meaning:
+      "The container runtime CLI or engine cannot be reached, or the Docker Compose v2 plugin is missing.",
     readFirst: "`hack doctor --json`",
   },
   E_GLOBAL_INFRA_DOWN: {
@@ -173,6 +174,12 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
     meaning:
       "After start or restart, a service is neither running nor a successful one-shot.",
     readFirst: "`hack ps --json`",
+  },
+  E_SERVICE_EXITED: {
+    meaning:
+      "A native start failed because a service's own process exited before it was ready; the failed start was stopped. `error.detail.services` names each service and its exit code.",
+    readFirst:
+      "Read `error.detail.services`; a foreground `hack up` (without `-d`) failure also prints each service's last output lines.",
   },
   E_RECOVERY_REQUIRED: {
     meaning:

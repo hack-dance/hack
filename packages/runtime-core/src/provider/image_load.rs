@@ -6,6 +6,10 @@
 //! the complete stream has hashed to the same value; a file changed after validation
 //! cannot complete an import. Memory use is bounded by small metadata members, not by
 //! archive size.
+//!
+//! A cached archive is read twice on a load: the validating pass and the upload. An
+//! explicit archive is also hashed once before the provider lease, and a cached archive
+//! is hashed on its own only when a reused load receipt makes validation unnecessary.
 use super::{
     engine::{Engine, Observer},
     go_json::{GoJson, Unreadable},
@@ -65,6 +69,8 @@ fn verify_digest(
     expected: &str,
     limit: u64,
 ) -> Result<u64, CandidateError> {
+    #[cfg(test)]
+    tests::count_archive_pass();
     let mut reader = reader.take(limit + 1);
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
@@ -369,6 +375,8 @@ fn validated(
     if !image.strip_prefix("sha256:").is_some_and(hex) || !hex(expected_sha) {
         return Err(error("Invalid image identity or archive size."));
     }
+    #[cfg(test)]
+    tests::count_archive_pass();
     let mut hashing = Hashing::new(reader, archive_limit);
     let mut members = BTreeMap::new();
     let mut expanded = 0_u64;
@@ -775,7 +783,7 @@ fn load_cached_with(
     guest: &ImageGuest<'_>,
     read_image: impl FnOnce() -> Result<Value, CandidateError>,
     resolved_config: impl FnOnce() -> Result<String, CandidateError>,
-    load: impl FnOnce((File, u64)) -> Result<ImageReceipt, CandidateError>,
+    load: impl FnOnce(OpenedArchive) -> Result<ImageReceipt, CandidateError>,
 ) -> Result<ImageReceipt, CandidateError> {
     check_hashes(archive.sha, archive.image)?;
     if archive.bytes > policy.archive_limit {
@@ -815,17 +823,24 @@ fn load_cached_with(
             "Registry unavailable and the recorded image is not loaded in the guest.",
         ));
     }
-    // Image is absent, or a legacy receipt has no verified source pin. Read
-    // the entire archive before taking a mutation lease in either case.
-    load(open_verified(archive.path, archive.sha, policy)?)
+    // Image is absent, or a legacy receipt has no verified source pin. The archive is
+    // opened but not read here: `import` hashes and validates every byte in one
+    // streaming pass before any upload or load receipt, and checks the digest before
+    // any success that skips that pass.
+    load(open_archive(archive.path, policy)?)
 }
 
-fn open_verified(
-    path: &Path,
-    expected_sha: &str,
-    policy: &ImagePolicy,
-) -> Result<(File, u64), CandidateError> {
-    let mut file = OpenOptions::new()
+/// An archive file opened for `import`, and whether its whole content already hashed to
+/// the expected SHA-256.
+pub(super) struct OpenedArchive {
+    file: File,
+    length: u64,
+    hashed: bool,
+}
+
+/// Open a singly linked regular archive file within the policy's budget without reading it.
+fn open_archive(path: &Path, policy: &ImagePolicy) -> Result<OpenedArchive, CandidateError> {
+    let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
@@ -838,13 +853,42 @@ fn open_verified(
             "Image input must be a singly linked regular file within the configured image budget.",
         ));
     }
+    Ok(OpenedArchive {
+        file,
+        length: metadata.len(),
+        hashed: false,
+    })
+}
+
+/// Hash the whole archive from its start against `expected_sha` and its opened length.
+fn check_digest(
+    archive: &mut OpenedArchive,
+    expected_sha: &str,
+    policy: &ImagePolicy,
+) -> Result<(), CandidateError> {
+    archive
+        .file
+        .rewind()
+        .map_err(|_| error("Cannot rewind the image archive."))?;
     let length = measure(Step::ImageArchiveDigest, None, |_| {
-        verify_digest(&mut file, expected_sha, policy.archive_limit)
+        verify_digest(&mut archive.file, expected_sha, policy.archive_limit)
     })?;
-    if length != metadata.len() {
+    if length != archive.length {
         return Err(error("Image archive size changed during verification."));
     }
-    Ok((file, length))
+    archive.hashed = true;
+    Ok(())
+}
+
+/// Open an explicit archive and hash it before the caller takes the provider lease.
+fn open_verified(
+    path: &Path,
+    expected_sha: &str,
+    policy: &ImagePolicy,
+) -> Result<OpenedArchive, CandidateError> {
+    let mut archive = open_archive(path, policy)?;
+    check_digest(&mut archive, expected_sha, policy)?;
+    Ok(archive)
 }
 
 fn load_waiting(
@@ -865,7 +909,7 @@ fn load_waiting(
         path,
         sha: expected_sha,
         image,
-        bytes: file.1,
+        bytes: file.length,
         pin: "",
         recorded_config: None,
         require_present: false,
@@ -943,7 +987,7 @@ fn import(
     archive: &CachedArchive<'_>,
     source_pin: Option<&str>,
     policy: &ImagePolicy,
-    (mut file, file_length): (File, u64),
+    mut opened: OpenedArchive,
     engine: &impl ImportTarget,
 ) -> Result<ImageReceipt, CandidateError> {
     let guest = engine.identity();
@@ -964,6 +1008,11 @@ fn import(
             // not itself check, including when refreshing the boot ID.
             receipt.source_pin = receipt.source_pin.or(old.source_pin.clone());
             if present()? {
+                // This success skips validation, so an unread archive must still match
+                // its digest, as an explicit archive did before the lease.
+                if !opened.hashed {
+                    check_digest(&mut opened, expected_sha, policy)?;
+                }
                 if old.provider_boot_id == receipt.provider_boot_id
                     && old.source_pin == receipt.source_pin
                 {
@@ -984,17 +1033,25 @@ fn import(
     }
     // Validate exactly the bytes that hash to the expected value, then stream the same file;
     // the upload releases only re-read blocks that match the validated ones, and its final
-    // block only once the re-read stream hashes identically.
+    // block only once the re-read stream hashes identically. This pass is the digest check
+    // for a cached archive, which reaches here unread.
+    let OpenedArchive {
+        mut file,
+        length: file_length,
+        ..
+    } = opened;
     file.rewind()
         .map_err(|_| error("Cannot rewind the image archive."))?;
-    let validated = validated(
-        &mut file,
-        expected_sha,
-        image,
-        policy.archive_limit,
-        policy.expanded_limit,
-        platform,
-    )?;
+    let validated = measure(Step::ImageArchiveValidate, None, |_| {
+        validated(
+            &mut file,
+            expected_sha,
+            image,
+            policy.archive_limit,
+            policy.expanded_limit,
+            platform,
+        )
+    })?;
     let length = validated.length;
     if length != file_length {
         return Err(error("Image archive size changed during verification."));
@@ -1027,6 +1084,22 @@ fn import(
 pub(super) mod tests {
     use super::*;
     use std::io::{Cursor, Write};
+
+    thread_local! {
+        /// Full archive reads that hash content: digest checks and validation passes.
+        static ARCHIVE_PASSES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    pub(super) fn count_archive_pass() {
+        ARCHIVE_PASSES.with(|passes| passes.set(passes.get() + 1));
+    }
+
+    /// Run `operation` and count the full archive hashing passes it makes on this thread.
+    fn archive_passes<T>(operation: impl FnOnce() -> T) -> (T, u32) {
+        ARCHIVE_PASSES.with(|passes| passes.set(0));
+        let result = operation();
+        (result, ARCHIVE_PASSES.with(std::cell::Cell::get))
+    }
 
     #[derive(Clone, Copy)]
     pub(crate) enum Layer {
@@ -1910,6 +1983,137 @@ pub(super) mod tests {
         let old: ImageReceipt =
             state::read(&receipt_path(&fixture.candidate, archive.sha)).unwrap();
         assert_eq!(old.phase, "content-id-verified");
+    }
+
+    /// A guest whose image appears only once an archive is uploaded, or from the start.
+    struct RecordingGuest {
+        present: std::cell::Cell<bool>,
+        uploads: std::cell::Cell<u32>,
+    }
+
+    impl RecordingGuest {
+        fn new(present: bool) -> Self {
+            Self {
+                present: std::cell::Cell::new(present),
+                uploads: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl ImportTarget for RecordingGuest {
+        fn identity(&self) -> ImageGuest<'_> {
+            test_guest()
+        }
+        fn image(&self, image: &str) -> Result<Value, CandidateError> {
+            if !self.present.get() {
+                return no_image();
+            }
+            Ok(serde_json::json!({"Id":image,"Architecture":"arm64","Os":"linux"}))
+        }
+        fn load_archive(
+            &self,
+            _: reqwest::blocking::Body,
+            _: Duration,
+        ) -> Result<(), CandidateError> {
+            self.uploads.set(self.uploads.get() + 1);
+            self.present.set(true);
+            Ok(())
+        }
+    }
+
+    /// Change the last byte of the fixture's archive, inside the end-of-archive padding, so
+    /// the file keeps its length and tar structure but no longer has the expected digest.
+    fn change_last_byte(fixture: &CacheFixture) {
+        let mut bytes = std::fs::read(&fixture.path).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        std::fs::write(&fixture.path, bytes).unwrap();
+    }
+
+    fn cached_import(
+        fixture: &CacheFixture,
+        guest: &RecordingGuest,
+    ) -> (Result<ImageReceipt, CandidateError>, u32) {
+        let archive = fixture.archive();
+        let policy = ImagePolicy::default();
+        archive_passes(|| {
+            load_cached_with(
+                &fixture.candidate,
+                &archive,
+                &policy,
+                &test_guest(),
+                no_image,
+                || Ok(fixture.image.clone()),
+                |opened| {
+                    import(
+                        &fixture.candidate,
+                        &archive,
+                        Some(archive.pin),
+                        &policy,
+                        opened,
+                        guest,
+                    )
+                },
+            )
+        })
+    }
+
+    #[test]
+    fn a_cached_import_hashes_the_archive_only_in_its_validating_pass() {
+        let fixture = CacheFixture::new(false);
+        let guest = RecordingGuest::new(false);
+        let (loaded, passes) = cached_import(&fixture, &guest);
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.phase, "content-id-verified");
+        assert_eq!(loaded.archive_sha256, fixture.sha);
+        assert_eq!(guest.uploads.get(), 1);
+        // One full read before the upload: validation, which hashes every byte. The
+        // separate digest pass a cached archive used to take first is gone.
+        assert_eq!(passes, 1);
+    }
+
+    #[test]
+    fn a_changed_cached_archive_is_refused_by_validation_before_upload_or_receipt() {
+        let fixture = CacheFixture::new(false);
+        change_last_byte(&fixture);
+        let guest = RecordingGuest::new(false);
+        let (refused, passes) = cached_import(&fixture, &guest);
+        let refused = refused.err().unwrap();
+        assert_eq!(refused.code, "image_archive");
+        assert_eq!(refused.message, "Image archive digest mismatch.");
+        assert_eq!(passes, 1);
+        assert_eq!(guest.uploads.get(), 0);
+        assert!(!receipt_path(&fixture.candidate, &fixture.sha).exists());
+    }
+
+    #[test]
+    fn a_reused_load_receipt_still_requires_the_cached_archive_digest() {
+        let other = format!("docker.io/fixture/other@sha256:{}", "b".repeat(64));
+        let pin_of = |fixture: &CacheFixture| {
+            let receipt: ImageReceipt =
+                state::read(&receipt_path(&fixture.candidate, &fixture.sha)).unwrap();
+            receipt.source_pin
+        };
+
+        // A completed receipt for another pin, with the image already in the guest: the
+        // import succeeds without validation only once the archive matches its digest.
+        let fixture = CacheFixture::new(false);
+        fixture.completed(&other);
+        change_last_byte(&fixture);
+        let guest = RecordingGuest::new(true);
+        let (refused, passes) = cached_import(&fixture, &guest);
+        let refused = refused.err().unwrap();
+        assert_eq!(refused.message, "Image archive digest mismatch.");
+        assert_eq!(passes, 1);
+        assert_eq!(pin_of(&fixture).as_deref(), Some(other.as_str()));
+
+        let fixture = CacheFixture::new(false);
+        fixture.completed(&other);
+        let guest = RecordingGuest::new(true);
+        let (loaded, passes) = cached_import(&fixture, &guest);
+        assert_eq!(loaded.unwrap().phase, "content-id-verified");
+        assert_eq!(passes, 1);
+        assert_eq!(guest.uploads.get(), 0);
+        assert_eq!(pin_of(&fixture).as_deref(), Some(fixture.pin.as_str()));
     }
 
     #[test]

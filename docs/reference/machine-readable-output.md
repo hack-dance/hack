@@ -26,6 +26,12 @@ stops, `E_COMPOSE_FAILED` includes their IDs in `error.detail.stoppedContainerId
 and the receipt time in `error.detail.stoppedAt`. When inspect identified the
 execution before Stop, `error.detail.stoppedContainers` pairs the confirmed ID
 with its `startedAt`. Successful service stops include those fields in `data`.
+When a native `hack up` fails because a service's own process exited during
+startup, `E_SERVICE_EXITED` (exit 1) sets `error.detail.reason` to
+`service_exited`, lists `error.detail.services` as `{name, exitCode}` with the
+startup failure first, adds `error.detail.alsoFailed` for other failed services
+without an exit code, and keeps the runtime's own code in
+`error.detail.nativeCode` when it reported one.
 Unknown/offline state in an observation is still a successful observation;
 it is not a claim that the runtime is healthy.
 

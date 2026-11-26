@@ -153,6 +153,95 @@ fn observed_volume(
     Ok(observed)
 }
 
+fn lost_removal_refused() -> CandidateError {
+    CandidateError::new(
+        "graph_lost_removal",
+        "Removing graph containers again requires a stopped retained receipt that records them removed, a retired foreground owner, and each one stopped with its recorded identity; nothing was changed.",
+    )
+}
+
+/// Whether `graph cleanup` without data removal of a run whose foreground owner
+/// retired its publication is a lost-removal repair: its receipt, read without
+/// the provider lease, is the stopped retained one. Selection only; the repair
+/// rechecks everything under the lease. Any other receipt keeps the owner path.
+pub(super) fn lost_removal_selected(candidate: &Candidate, run: &str) -> bool {
+    crate::provider::state::Owner::load(candidate)
+        .ok()
+        .and_then(|owner| {
+            graph::load_at(graph::directory(candidate, run).ok()?, run, &owner.token).ok()
+        })
+        .is_some_and(|(receipt, _)| receipt.phase == "stopped-data-retained")
+}
+
+/// HACK-2719: remove again, keeping the data, the containers and networks a stopped
+/// retained receipt records removed and the guest engine lists again after a VM
+/// loss (the removal had not reached the guest disk; real VM, row 8). The retired
+/// owner's held operation lock keeps any restore out, the provider lease keeps
+/// every other graph operation out, and each removal is the ordinary owned removal
+/// of the recorded identity, which `inspect_resource` verifies by labels. Volumes
+/// are never touched, no hook replays, and the receipt is unchanged: it already
+/// says absent. Anything running, recorded present or unexpected refuses.
+pub(super) fn repair_lost_removals(
+    candidate: &Candidate,
+    run: &str,
+    guard: transport::Retired,
+) -> Result<Value, CandidateError> {
+    guard.verify()?;
+    let engine = Engine::connect_cleanup(candidate)?;
+    let (receipt, root) = graph::load(candidate, &engine, run)?;
+    for name in [
+        "state.pending",
+        "retired-data-removal.pending",
+        "retired-data-removal.json",
+        "live-owner-cleanup.pending",
+        "dead-owner-cleanup.pending",
+    ] {
+        no_pending(&root, name).map_err(|_| lost_removal_refused())?;
+    }
+    if receipt.phase != "stopped-data-retained" || receipt.relay_startup.is_none() {
+        return Err(lost_removal_refused());
+    }
+    let mut present = Vec::new();
+    for resource in receipt
+        .resources
+        .values()
+        .filter(|resource| matches!(resource.kind, Kind::Container | Kind::Network))
+    {
+        let Some(value) = graph::inspect_resource(&engine, &receipt, resource)? else {
+            continue;
+        };
+        if !lost_removal_admits(resource, &value) {
+            return Err(lost_removal_refused());
+        }
+        present.push(resource.clone());
+    }
+    // Containers first: a network is removed only once nothing is attached to it.
+    present.sort_by_key(|resource| resource.kind != Kind::Container);
+    for resource in &present {
+        graph::remove_owned_resource(&engine, &receipt, resource, || guard.verify())?;
+    }
+    if !present.is_empty() {
+        graph::storage_barrier(&engine)?;
+    }
+    guard.verify()?;
+    Ok(
+        json!({"ok":true,"run":run,"phase":receipt.phase,"receipt":receipt,"removed_again":present.len()}),
+    )
+}
+
+/// One brought-back resource: recorded removed, and for a container its recorded
+/// id, stopped and not restarting.
+fn lost_removal_admits(resource: &graph::Resource, observed: &Value) -> bool {
+    resource.phase == "absent"
+        && (resource.kind != Kind::Container
+            || (resource
+                .id
+                .as_deref()
+                .is_some_and(|id| observed["Id"] == id)
+                && observed["State"]["Running"] == false
+                && observed["State"]["Restarting"] != true))
+}
+
 pub(super) fn remove(
     candidate: &Candidate,
     run: &str,
@@ -340,6 +429,42 @@ mod tests {
     fn receipt() -> Receipt {
         serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"stopped-data-retained","readiness":{},"resources":{},"relay_startup":{"control_only":true,"guest_root":null,"control_root":"/private/owned","artifact":"e".repeat(64),"services":{}},"relay_cleanup":{"version":1,"runtime":vec![1;16],"boot":vec![2;16],"operation":vec![3;16],"effect":vec![4;32],"control_root":"/private/owned","phase":"confirmed"}})).unwrap()
     }
+    #[test]
+    fn a_lost_removal_is_repaired_only_for_a_stopped_recorded_removed_resource() {
+        // HACK-2719 (real VM, row 8): the engine lists the removed container again,
+        // exited with the code the stop recorded (137).
+        let container: graph::Resource = serde_json::from_value(json!({
+            "kind":"container","key":"web","name":"hkg-web","id":"f".repeat(64),
+            "image":null,"phase":"absent"
+        }))
+        .unwrap();
+        let exited = json!({"Id":"f".repeat(64),"State":{"Running":false,"Restarting":false,"ExitCode":137}});
+        assert!(lost_removal_admits(&container, &exited));
+        let mut running = exited.clone();
+        running["State"]["Running"] = json!(true);
+        assert!(!lost_removal_admits(&container, &running));
+        let mut restarting = exited.clone();
+        restarting["State"]["Restarting"] = json!(true);
+        assert!(!lost_removal_admits(&container, &restarting));
+        let mut replaced = exited.clone();
+        replaced["Id"] = json!("e".repeat(64));
+        assert!(!lost_removal_admits(&container, &replaced));
+        // The receipt must record it removed; a container it still records is the
+        // ordinary owner path's, never this repair's.
+        let mut recorded = container.clone();
+        recorded.phase = "started".into();
+        assert!(!lost_removal_admits(&recorded, &exited));
+        let mut unknown = container.clone();
+        unknown.id = None;
+        assert!(!lost_removal_admits(&unknown, &exited));
+        let network: graph::Resource = serde_json::from_value(json!({
+            "kind":"network","key":"default","name":"hkg-net","id":"1".repeat(64),
+            "image":null,"phase":"absent"
+        }))
+        .unwrap();
+        assert!(lost_removal_admits(&network, &json!({"Id":"1".repeat(64)})));
+    }
+
     #[test]
     fn recovery_selection_preserves_ordinary_ack_and_pins_retry_authority() {
         let mut receipt = receipt();

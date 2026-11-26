@@ -2726,6 +2726,11 @@ fn cleanup_owned_fenced(
         super::environment_recovery::retire(candidate, engine.guest(), &slot, None)?;
     }
     fence()?;
+    // HACK-2719: the receipt records the removals only once they are on the guest's
+    // persistent disk. Otherwise a VM lost seconds later boots the engine with the
+    // removed containers listed again while the receipt says they are absent.
+    storage_barrier(engine)?;
+    fence()?;
     receipt.set_phase(if remove_data {
         "removed"
     } else {
@@ -2736,6 +2741,52 @@ fn cleanup_owned_fenced(
     #[cfg(target_os = "macos")]
     crate::provider::interactive_session::after_cleanup(candidate, &receipt.run);
     Ok(receipt)
+}
+
+/// Flushes the guest's filesystems (the engine state on `/storage` included) and
+/// confirms the flush returned. The guest script itself first checks the boot,
+/// the pool owner and the ext4 `/storage` mount (`Guest::execute`).
+const STORAGE_BARRIER: &str = "sync\nprintf 'hack-storage-barrier-v1 synced\\n'\n";
+const STORAGE_BARRIER_DONE: &str = "hack-storage-barrier-v1 synced\n";
+
+/// Durability barrier for a cleanup that has removed guest resources: commit them
+/// to the guest disk before any host record says they are gone. A barrier that
+/// does not confirm leaves the receipt at `cleanup-intent`, which every recovery
+/// already resumes by reinspection.
+pub(super) fn storage_barrier(engine: &Engine<'_>) -> Result<(), CandidateError> {
+    storage_barrier_confirmed(&engine.guest().execute(STORAGE_BARRIER, &[], None)?)
+}
+
+fn storage_barrier_confirmed(output: &str) -> Result<(), CandidateError> {
+    if output == STORAGE_BARRIER_DONE {
+        return Ok(());
+    }
+    Err(error(
+        "graph_cleanup_uncertain",
+        "The guest did not confirm that the removed graph resources reached its disk; cleanup is not confirmed.",
+    ))
+}
+
+#[cfg(test)]
+mod storage_barrier_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_exact_confirmation_commits_a_cleanup() {
+        assert!(STORAGE_BARRIER.starts_with("sync\n"));
+        storage_barrier_confirmed(STORAGE_BARRIER_DONE).unwrap();
+        for output in [
+            "",
+            "hack-storage-barrier-v1 synced",
+            "hack-storage-barrier-v1 synced\n\n",
+            "sync: error\nhack-storage-barrier-v1 synced\n",
+        ] {
+            assert_eq!(
+                storage_barrier_confirmed(output).unwrap_err().code,
+                "graph_cleanup_uncertain"
+            );
+        }
+    }
 }
 
 /// The compiled `Healthcheck` to compare with a container's, accepting one created before

@@ -24,11 +24,16 @@
 \* `leftover`: a VM lost seconds after a `hack down` removed the recorded
 \* run's containers may bring them back on the next boot, stopped, because the
 \* guest engine's removal had not reached its disk (real-VM row 8).
+\* `ports`: the project publishes a port, so its run holds bridge routes once
+\* ready. A run without one has no route to prove its relay owner by, only the
+\* relay owner's own publication, which the owner's unwind removes (HACK-2711).
 \*
 \* Constants select the code:
-\*   MessageRule = "stage": this fix. Preparing names `hack down --recover`,
+\*   MessageRule = "recover": this fix. As "stage", except that a recorded run
+\*     lost at Requested names down, then up (HACK-2714).
+\*   "stage": PR #1253 as merged. Preparing names `hack down --recover`,
 \*     then `hack up` (a fresh `up`: `hack up` alone); Requested names no
-\*     command (HACK-2714); GraphReady and Serving name down, then up.
+\*     command; GraphReady and Serving name down, then up.
 \*   "graph": PR #1253 at a6c4cba: down, then up once the graph was ready, and
 \*     no command before it, Preparing included.
 \*   "intent": the stage rule, except that a run lost once ready names
@@ -44,7 +49,16 @@
 \*   RetireIntent: `hack down --recover` retires a cleaned restart intent once
 \*     the run is stopped with data kept, when the restart lock is free.
 \*   RepairLeftover: `hack down --recover` removes containers the receipt
-\*     records removed that a lost VM brought back.
+\*     records removed that a lost VM brought back (HACK-2719: without the
+\*     owner, under its retirement lock).
+\*   StorageBarrier: a cleanup flushes the guest disk before it records the
+\*     removal, so a lost VM brings nothing back (HACK-2719).
+\*   CrossBootStart: the runtime's cross-boot dead-owner recovery also
+\*     retires a start lost before ready (`failed-retained`, HACK-2714); FALSE
+\*     is the runtime before this fix, which admitted only a ready run.
+\*   RouteProof = "exit": a run with no route proves its dead owner's relay by
+\*     the relay's clean exit (HACK-2711); "pinned": only a still-published
+\*     relay endpoint counts, which a no-port run's unwound owner no longer has.
 \*   ClassifyRule = "veto": a start error counts as a lost VM from the pool
 \*     record (a gone provider pid in any phase, or an ended boot); only a
 \*     `running` record with a live pid vetoes a lost-provider code (this
@@ -60,12 +74,12 @@
 EXTENDS Naturals, Sequences
 
 CONSTANTS MessageRule, ErrorRule, ReleaseLock, RetireIntent, RepairLeftover,
-          ClassifyRule
+          ClassifyRule, StorageBarrier, CrossBootStart, RouteProof
 
-VARIABLES kind, recorded, start, lostAt, endedBy, leftover, stale, receipt,
-          intent, lock, msg, todo, outcome
-vars == <<kind, recorded, start, lostAt, endedBy, leftover, stale, receipt,
-          intent, lock, msg, todo, outcome>>
+VARIABLES kind, recorded, ports, start, lostAt, endedBy, leftover, stale,
+          receipt, intent, lock, msg, todo, outcome
+vars == <<kind, recorded, ports, start, lostAt, endedBy, leftover, stale,
+          receipt, intent, lock, msg, todo, outcome>>
 
 Commands == {"down", "up", "restart"}
 Stages == {"Preparing", "Requested", "GraphReady", "Serving"}
@@ -73,6 +87,7 @@ Stages == {"Preparing", "Requested", "GraphReady", "Serving"}
 TypeOK ==
     /\ kind \in {"up", "restart"}
     /\ recorded \in BOOLEAN
+    /\ ports \in BOOLEAN
     /\ start \in Stages \cup {"Dead", "Lost"}
     /\ lostAt \in Stages \cup {"none"}
     /\ endedBy \in {"none", "watch", "error", "ordinary"}
@@ -94,6 +109,7 @@ Init ==
     /\ kind \in {"up", "restart"}
     /\ recorded \in BOOLEAN
     /\ kind = "restart" => recorded
+    /\ ports \in BOOLEAN
     /\ start = "Preparing" /\ lostAt = "none" /\ endedBy = "none"
     /\ leftover = FALSE /\ stale = FALSE
     /\ receipt = IF recorded THEN "stopped" ELSE "none"
@@ -101,7 +117,8 @@ Init ==
     /\ lock = (kind = "restart")
     /\ msg = "none" /\ todo = <<>> /\ outcome = "pending"
 
-Frozen == <<kind, recorded, endedBy, leftover, stale, msg, todo, outcome>>
+Frozen == <<kind, recorded, ports, endedBy, leftover, stale, msg, todo,
+            outcome>>
 
 \* The first service of this run is requested (`graph.onRequested`).
 Request ==
@@ -125,17 +142,18 @@ Serve ==
     /\ UNCHANGED <<lostAt, receipt>> /\ UNCHANGED Frozen
 
 \* The provider VM dies under the start. A recorded run lost before any
-\* service was requested may get its removed containers back (row 8). The
-\* record may still say `running`, or be stuck in a transitional phase
-\* (`stale`) that still names the boot.
+\* service was requested may get its removed containers back (row 8), unless
+\* the down that removed them flushed the guest disk first. The record may
+\* still say `running`, or be stuck in a transitional phase (`stale`) that
+\* still names the boot.
 Die ==
     /\ start \in Stages
     /\ start' = "Dead" /\ lostAt' = start
-    /\ leftover' \in IF recorded /\ start = "Preparing"
+    /\ leftover' \in IF recorded /\ start = "Preparing" /\ ~StorageBarrier
                      THEN BOOLEAN ELSE {FALSE}
     /\ stale' \in BOOLEAN
-    /\ UNCHANGED <<kind, recorded, endedBy, receipt, intent, lock, msg, todo,
-                   outcome>>
+    /\ UNCHANGED <<kind, recorded, ports, endedBy, receipt, intent, lock, msg,
+                   todo, outcome>>
 
 ByIntent == IF intent = "cleaned" THEN "downRestart" ELSE "downUp"
 
@@ -144,8 +162,14 @@ StageMessage(at) ==
       [] at = "Requested" -> "inspect"
       [] OTHER -> "downUp"
 
+\* This fix: a recorded run lost at Requested is retired like one lost once
+\* ready; a fresh `up` lost there has no record for the down to find.
+RecoverMessage(at) ==
+    IF at = "Requested" /\ recorded THEN "downUp" ELSE StageMessage(at)
+
 Message(at) ==
-    CASE MessageRule = "stage" -> StageMessage(at)
+    CASE MessageRule = "recover" -> RecoverMessage(at)
+      [] MessageRule = "stage" -> StageMessage(at)
       [] MessageRule = "graph" ->
             IF at \in {"GraphReady", "Serving"} THEN "downUp" ELSE "inspect"
       [] MessageRule = "intent" ->
@@ -171,7 +195,8 @@ End(by, m, lockAfter) ==
     /\ msg' = m /\ todo' = Steps(m)
     /\ lock' = lockAfter
     /\ outcome' = IF Steps(m) = <<>> THEN "ok" ELSE "pending"
-    /\ UNCHANGED <<kind, recorded, lostAt, leftover, stale, receipt, intent>>
+    /\ UNCHANGED <<kind, recorded, ports, lostAt, leftover, stale, receipt,
+                   intent>>
 
 \* The pool watch sees the lost VM, prints the message, runs `beforeLostExit`
 \* (the restart's lock release) and exits 1; nothing else of the start runs.
@@ -201,16 +226,25 @@ OrdinaryFail ==
     /\ start' = "Lost" /\ lostAt' = start /\ endedBy' = "ordinary"
     /\ todo' = <<>> /\ outcome' = "ok"
     /\ lock' = FALSE
-    /\ UNCHANGED <<kind, recorded, leftover, stale, receipt, intent>>
+    /\ UNCHANGED <<kind, recorded, ports, leftover, stale, receipt, intent>>
 
 \* `hack down --recover` depends on where the start was lost, not on what the
 \* message said. Lost while preparing, the record (if any) is still the
-\* stopped retained run, and a fresh `up` has none (`not_started`); lost once
-\* ready and mapped, the run is stopped with data kept. Lost in between, no
-\* cross-boot retirement exists yet (HACK-2714). Containers a lost VM brought
-\* back fail the confirmation unless the down removes them again.
+\* stopped retained run, and a fresh `up` has none (`not_started`). Otherwise
+\* the down starts the pool and the runtime retires the run across the boot,
+\* with data kept: once ready and mapped always, and lost in between only a
+\* recorded run, with the recovery of a lost start (CrossBootStart, HACK-2714).
+\* Either needs the dead owner's relay proved: by the run's routes, or with no
+\* published port by the relay's clean exit (RouteProof, HACK-2711).
+\* Containers a lost VM brought back fail the confirmation unless the down
+\* removes them again.
+RelayProved == ports \/ RouteProof = "exit"
+Retirable ==
+    CASE lostAt = "Preparing" -> TRUE
+      [] lostAt = "Requested" -> recorded /\ CrossBootStart /\ RelayProved
+      [] OTHER -> RelayProved
 DownAccepts ==
-    /\ lostAt \in {"Preparing", "GraphReady", "Serving"}
+    /\ Retirable
     /\ leftover => RepairLeftover
 \* `hack up` refuses a pending restart, a run that is not stopped, and a
 \* mapping whose cleanup is unconfirmed.
@@ -239,7 +273,8 @@ Step ==
             /\ intent' = IF c = "down" /\ RetireIntent /\ ~lock
                          THEN "none"
                          ELSE IF c = "restart" THEN "none" ELSE intent
-    /\ UNCHANGED <<kind, recorded, start, lostAt, endedBy, stale, lock, msg>>
+    /\ UNCHANGED <<kind, recorded, ports, start, lostAt, endedBy, stale, lock,
+                   msg>>
 
 Next == Request \/ GraphReady \/ Serve \/ Die \/ Watch \/ StartFails
         \/ OrdinaryFail \/ Step
@@ -248,8 +283,12 @@ Spec == Init /\ [][Next]_vars
 \* Every command the message names, run in order, is accepted.
 NoRefusedAdvice == outcome # "refused"
 \* The message withholds a command only when none can work: the run was lost
-\* after its services were requested and before it was ready and mapped.
-NoNeedlessWithholding == msg = "inspect" => lostAt = "Requested"
+\* after its services were requested and before it was ready and mapped, and
+\* no cross-boot recovery retires it (a fresh `up`, or the runtime before
+\* HACK-2714).
+NoNeedlessWithholding ==
+    msg = "inspect" =>
+        lostAt = "Requested" /\ ~(recorded /\ CrossBootStart)
 \* Reachability witness (expected to fail): a lost restart is recovered by
 \* following its message.
 NoRestartRecovery ==

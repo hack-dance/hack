@@ -29,6 +29,12 @@ fn published_owner_refused(candidate: &Candidate, run: &str) -> CandidateError {
             "graph_foreground_owner_exited_unadmitted",
             "The previous foreground owner of this run exited before its restore was admitted and did not retire its publication. Data is retained. Run hack down --recover to retire that attempt, then hack up.",
         ),
+        // HACK-2714: a start that failed (or was still preparing) when its owner died
+        // is retired by `hack down --recover`, in its own boot or a later one.
+        Ok(PublishedOwner::Exited) if exited_unconfirmed_start(candidate, run) => error(
+            "graph_foreground_owner_exited_unadmitted",
+            "The previous foreground owner of this run exited before its services were ready and did not retire its publication. Data is retained. Run hack down --recover to retire that attempt, then hack up.",
+        ),
         Ok(PublishedOwner::Exited) => error(
             "graph_foreground_owner_exited_unadmitted",
             "The previous foreground owner of this run exited before its start was confirmed and did not retire its publication. Data is retained, but no supported command can prove and retire that attempt yet; keep the native home unchanged for inspection.",
@@ -64,6 +70,15 @@ fn exited_unadmitted_retained(candidate: &Candidate, run: &str) -> bool {
         .ok()
         .and_then(|owner| load_at(directory(candidate, run).ok()?, run, &owner.token).ok())
         .is_some_and(|(receipt, _)| receipt.phase == "stopped-data-retained")
+}
+
+/// A start the cross-boot dead-owner recovery admits (`failed-retained` or
+/// `preparing` with a settled relay startup). Presentation only, as above.
+fn exited_unconfirmed_start(candidate: &Candidate, run: &str) -> bool {
+    Owner::load(candidate)
+        .ok()
+        .and_then(|owner| load_at(directory(candidate, run).ok()?, run, &owner.token).ok())
+        .is_some_and(|(receipt, _)| super::dead_owner_cleanup::unconfirmed_start(&receipt))
 }
 
 fn no_file(root: &Path, name: &str) -> Result<(), CandidateError> {
@@ -740,6 +755,22 @@ pub(in crate::provider::graph) mod tests {
         let error = preflight(&fixture.candidate, &fixture.run).unwrap_err();
         assert_eq!(error.code, "graph_foreground_owner_exited_unadmitted");
         assert!(!error.message.contains("hack down --recover"));
+        // HACK-2714: the same failed start with a settled relay startup is what the
+        // cross-boot dead-owner recovery retires, so the refusal names it, then up.
+        let fixture = Fixture::new();
+        let mut receipt = fixture.receipt();
+        receipt.phase = "failed-retained".into();
+        receipt.relay_startup = Some(
+            serde_json::from_value(json!({"control_only":true,"guest_root":null,
+                "control_root":"/private/owned","artifact":"e".repeat(64),"services":{}}))
+            .unwrap(),
+        );
+        state::write(&fixture.graph().join("state.json"), &receipt).unwrap();
+        foreground::transport::fixture_exited_publication(&fixture.candidate, &fixture.run);
+        let error = preflight(&fixture.candidate, &fixture.run).unwrap_err();
+        assert_eq!(error.code, "graph_foreground_owner_exited_unadmitted");
+        assert!(error.message.contains("hack down --recover"));
+        assert!(error.message.contains("then hack up"));
         // An owner that is ending (a publication that cannot be classified for a
         // moment) has its own code, which a caller may wait on.
         let fixture = Fixture::new();

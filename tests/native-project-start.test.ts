@@ -8084,8 +8084,9 @@ test("the foreground lost-VM bound covers one pool check and the grace", () => {
  * - `ready-unmapped`: a started return whose runtime frame came, but whose
  *   mapping save is still running (review L4). `down` would find no run, so
  *   it is still the requested stage, not the ready one.
- * - `starting`: services requested, lost before the graph was ready, which no
- *   command can retire yet (HACK-2714), so the message names none.
+ * - `starting`: services requested by a fresh `up`, lost before the graph
+ *   was ready. No run record exists for `hack down --recover` to find, so the
+ *   message names no command (a resumed run's names down, then up: HACK-2714).
  * - `preparing` / `preparing-restore`: lost during image pulls, before any
  *   service was requested (review M1). A fresh `up` has no run record, so the
  *   message names `hack up` alone; a restore (a restart's replacement, or a
@@ -8428,10 +8429,10 @@ test.each([
       "Run hack down --recover to retire the interrupted start with the run's data kept, then hack up to start it again."
     );
   } else if (stage === "requested" || stage === "started") {
-    expect(lost.loss).toEqual({ stage: "requested" });
+    expect(lost.loss).toEqual({ stage: "requested", recorded: false });
     expect(advice).not.toContain("hack down");
     expect(advice).toContain("Keep this native home unchanged");
-    // HACK-2714: nothing retires the run, so the cause names no step either.
+    // A fresh `up` has no run to retire, so the cause names no step either.
     expect(causeLine).not.toContain("hack down");
   } else {
     expect(lost.loss).toEqual({ stage: "ready" });
@@ -8646,7 +8647,7 @@ test("a restart preflight's loss stage follows the restart it retries", () => {
   ).toEqual({ stage: "preparing", recorded: true });
   expect(
     restartPreflightLossStage({ cleanedRetry: false, preparedRetry: true })
-  ).toEqual({ stage: "requested" });
+  ).toEqual({ stage: "requested", recorded: false });
 });
 
 /**

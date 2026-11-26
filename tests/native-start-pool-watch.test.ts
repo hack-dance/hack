@@ -344,20 +344,35 @@ test("a run lost after its graph was ready names down --recover, then hack up", 
   }
 });
 
-test("a run lost after its services were requested and before ready names no command that refuses it", () => {
-  // HACK-2714: neither `hack down --recover` nor `hack up` can retire a run
-  // whose VM was lost after its services were requested and before it was
-  // ready and mapped, so the message sends the user to neither, and says to
-  // keep the home for inspection.
+test("a recorded run lost after its services were requested and before ready names down --recover, then up", () => {
+  // HACK-2714: the start's owner leaves `failed-retained` (or `preparing`), and
+  // `hack down --recover` now starts the pool and retires it across the boot
+  // with its data kept, so `hack up` then starts it again.
   const message = nativeForegroundPoolEndMessage(
     { bootId: boot, providerPid: 4242 },
-    { stage: "requested" }
+    { stage: "requested", recorded: true }
   );
   expect(message).toContain("pid 4242");
   expect(message).toContain("exit code 1");
+  expect(message).toContain("lost before its services were ready");
+  expect(message.match(/hack down --recover/g)).toHaveLength(1);
+  expect(message).toContain(
+    "Run hack down --recover to retire the interrupted start with the run's data kept, then hack up to start it again."
+  );
+  expect(message).not.toContain("hack restart");
+  expect(message).not.toContain("Keep this native home unchanged");
+});
+
+test("a fresh run lost after its services were requested and before ready names no command", () => {
+  // No run record exists for `hack down --recover` to find before the mapping
+  // is saved, so the message sends the user to no command that refuses.
+  const message = nativeForegroundPoolEndMessage(
+    { bootId: boot, providerPid: 4242 },
+    { stage: "requested", recorded: false }
+  );
+  expect(message).toContain("exit code 1");
   expect(message).not.toContain("hack down");
   expect(message).not.toContain("hack up");
-  expect(message).not.toContain("hack restart");
   expect(message).toContain("Keep this native home unchanged");
   expect(message).toContain("hack ps --json");
 });
@@ -552,9 +567,9 @@ test("only a running record with a live provider vetoes; a dead pid is lost in a
   ).toBeUndefined();
 });
 
-test("a cause line for a stage no command retires drops the cause's down --recover advice", () => {
-  // Real-VM row 2 (HACK-2714): the cause quoted "Run hack down --recover …",
-  // a step that refuses in that state.
+test("a cause line for the requested stage drops the cause's own down --recover advice", () => {
+  // Real-VM row 2 (HACK-2714): the cause quoted its own "Run hack down
+  // --recover …"; the stage advice names that step once, in order with up.
   const cause = new Error(
     "Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Run hack down --recover to resume this run's confirmed cleanup with data retained. Startup diagnostic: Native graph startup failed (process_identity_unavailable)."
   );

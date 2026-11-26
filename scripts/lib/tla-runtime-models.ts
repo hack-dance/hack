@@ -3602,10 +3602,13 @@ const contracts: readonly ModelContract[] = [
     // brought-back containers unrepaired); keep-intent, leak-lock,
     // intent-message, generic-error and keep-leftover each restore one old
     // rule, and withhold-preparing is a6c4cba (no command before ready).
+    // pinned-relay (HACK-2711), no-cross-boot (HACK-2714) and
+    // withhold-requested (#1253's message on the fixed runtime) restore one
+    // rule of the runtime or message before the VM-loss recovery fix.
     // restart-recovers is the reachability witness of a recovered restart.
     name: "foreground-loss-recovery",
     module: "ForegroundLossRecovery",
-    states: 176,
+    states: 360,
     invariant: "NoRefusedAdvice",
     fields: ['outcome = "refused"', 'lostAt = "Preparing"'],
     alternativeWitnesses: [['outcome = "refused"', 'lostAt = "Requested"']],
@@ -3685,6 +3688,50 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NoNeedlessWithholding",
         fields: ['msg = "inspect"', 'lostAt = "Preparing"'],
+      },
+      {
+        // HACK-2711 (real VM): a run with no published port proves its dead
+        // owner's relay only by a still-published endpoint, which the owner's
+        // unwind removed, so `hack down --recover` refuses
+        // (`relay_owner_refused`) once the run was requested.
+        name: "pinned-relay",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          "ports = FALSE",
+          'msg = "downUp"',
+          'lostAt = "Requested"',
+        ],
+        alternativeWitnesses: [
+          [
+            'outcome = "refused"',
+            "ports = FALSE",
+            'msg = "downUp"',
+            'lostAt = "GraphReady"',
+          ],
+        ],
+      },
+      {
+        // HACK-2714 (real VM, row 2): no cross-boot retirement of a start lost
+        // before ready, so the down keeps `runtime_not_running`.
+        name: "no-cross-boot",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          "recorded = TRUE",
+          'msg = "downUp"',
+          'lostAt = "Requested"',
+        ],
+      },
+      {
+        // PR #1253's Requested message once the runtime retires that run: a
+        // recorded run is told no command though down --recover works.
+        name: "withhold-requested",
+        negative: true,
+        invariant: "NoNeedlessWithholding",
+        fields: ['msg = "inspect"', 'lostAt = "Requested"', "recorded = TRUE"],
       },
       {
         name: "restart-recovers",

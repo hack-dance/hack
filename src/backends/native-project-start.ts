@@ -3569,7 +3569,8 @@ async function startNativeProjectAttempt(
     readonly onSelected?: (recorded: boolean) => void;
     /**
      * The first service of this run is being requested from the runtime. A
-     * run lost from here until `onReady` has no retirement yet (HACK-2714).
+     * run lost from here until `onReady` is retired across the boot by
+     * `hack down --recover` from the start its owner left (HACK-2714).
      */
     readonly onRequested?: () => void;
     /**
@@ -3580,7 +3581,7 @@ async function startNativeProjectAttempt(
      * (HACK-2096). A fresh `up` that is ready but not yet mapped is still
      * `requested`: `down` would find no run. So is a started return before
      * its owner's ready line: it is mapped, but the runtime has not confirmed
-     * the start, and a loss there is HACK-2714's unadmitted owner.
+     * the start, and a loss there is HACK-2714's lost start.
      */
     readonly onReady?: () => void;
     /**
@@ -5142,7 +5143,10 @@ export async function startNativeProject(
           loss = { stage: "preparing", recorded };
         },
         onRequested: () => {
-          loss = { stage: "requested" };
+          loss = {
+            stage: "requested",
+            recorded: loss.stage === "preparing" && loss.recorded,
+          };
         },
         onReady: () => {
           loss = { stage: "ready" };
@@ -5253,7 +5257,9 @@ export function restartPreflightLossStage(opts: {
   if (opts.cleanedRetry) {
     return { stage: "preparing", recorded: true };
   }
-  return opts.preparedRetry ? { stage: "requested" } : { stage: "ready" };
+  return opts.preparedRetry
+    ? { stage: "requested", recorded: false }
+    : { stage: "ready" };
 }
 
 /**

@@ -149,6 +149,17 @@ const RECOVERABLE_LIVE_PHASES: ReadonlySet<string> = new Set([
   "reconciled-cleanup-only",
 ]);
 
+/**
+ * Phases of a start lost before it was ready that the runtime's cross-boot
+ * dead-owner recovery also retires once the pool is started again (HACK-2714):
+ * the owner's own unwind leaves `failed-retained`; an owner killed while
+ * starting leaves `preparing`. A restore or restart in progress is not one.
+ */
+const CROSS_BOOT_START_PHASES: ReadonlySet<string> = new Set([
+  "failed-retained",
+  "preparing",
+]);
+
 /** What `graph foreground-owner` selected; it grants no recovery authority. */
 type ForegroundOwnerSelection = {
   readonly phase: string;
@@ -786,13 +797,16 @@ export const NATIVE_RESTART_INTENT_UNREADABLE_NOTE =
  * Whether the lock-free `graph foreground-owner` selection (host files only;
  * it needs no running pool) shows an exited owner whose run the recovery after a
  * boot can still recover. Starting the pool begins a new boot, so only the
- * cross-boot dead-owner recovery applies: a ready run, or an interrupted
- * dead-owner recovery resuming by its own selection. The same-boot recoveries
- * (`recover-live-owner`, which a recoverable failed start and an interrupted
- * live-owner recovery use) need the original boot's relay identity and cannot run
- * after it, so those cases, an exited owner of a start that was never confirmed
- * (`preparing`, `restoring`), a live, absent or uncertain owner, a retained stop
- * (whose unadmitted owner is retired without the pool) and an unreadable
+ * cross-boot dead-owner recovery applies: a ready run, a start lost before it
+ * was ready (`failed-retained` after the owner's own unwind, or `preparing`;
+ * HACK-2714), or an interrupted dead-owner recovery resuming by its own
+ * selection. The runtime admits a lost start only with a settled relay startup
+ * and no cleanup marker, and revalidates the dead owner and the ended boot. The
+ * same-boot recoveries (`recover-live-owner`, which an interrupted live-owner
+ * recovery uses) need the original boot's relay identity and cannot run after
+ * it, so that case, an exited owner of a restore or restart in progress
+ * (`restoring`, `restarting`), a live, absent or uncertain owner, a retained
+ * stop (whose unadmitted owner is retired without the pool) and an unreadable
  * selection are all false: the caller keeps its refusal and never starts a pool
  * it could not then use.
  */
@@ -813,6 +827,7 @@ async function deadOwnerOfLiveRun(opts: {
     if (
       selection.foreground === "exited" &&
       (RECOVERABLE_LIVE_PHASES.has(selection.phase) ||
+        CROSS_BOOT_START_PHASES.has(selection.phase) ||
         selection.deadOwnerRecovery !== null)
     ) {
       return true;
@@ -929,6 +944,10 @@ class ExitedPoolRecovered extends Error {
  * unconfirmed") and `hack up` refused the mapping. Only this exact shape is
  * repaired, by the runtime's own `graph cleanup` of the receipt's resources
  * (exact ids, volumes kept); anything running, uncertain or unrecorded is not.
+ * The run's owner retired its publication when that down finished, so the
+ * runtime removes them under that retirement's lock, without an owner
+ * (HACK-2719). A cleanup also flushes the guest disk before it records the
+ * removal now, so a new down no longer leaves this shape behind.
  */
 function lostContainerRemovals(snapshot: unknown): boolean {
   if (
@@ -961,13 +980,22 @@ function lostContainerRemovals(snapshot: unknown): boolean {
 }
 
 /**
- * The refusal when the brought-back containers cannot be removed (real-VM row
- * 8): the run's cleanup must go through its foreground owner, which is gone,
- * and the runtime offers no owner-less removal that keeps data yet. It names
- * no command that would fail, and none that would discard the data.
+ * The refusal when the runtime does not remove the brought-back containers
+ * (real-VM row 8): its owner-less repair needs the owner's publication retired
+ * and each container exactly as recorded and stopped (`graph_lost_removal`), and
+ * without a retired publication the cleanup goes to an owner that is gone
+ * (`graph_owner_recovery`). Since HACK-2719 an ordinary row 8 is repaired, so
+ * this is shown only when one of those proofs fails. It names no command that
+ * would fail, and none that would discard the data.
  */
 export const NATIVE_LOST_REMOVAL_UNREPAIRABLE =
-  "This run is stopped with its data kept and nothing of it is running, but stopped containers that an earlier hack down had removed are listed again, most likely because the VM was lost seconds after that down, before the removal reached its disk. This run's cleanup goes through its foreground owner, which is gone, so no hack command can remove them while keeping the data yet, and hack up refuses the run until they are gone. Keep this native home unchanged for inspection; hack ps --json shows the stopped containers.";
+  "This run is stopped with its data kept and nothing of it is running, but stopped containers that an earlier hack down had removed are listed again, most likely because the VM was lost seconds after that down, before the removal reached its disk. The runtime could not prove that this run's foreground owner retired and that each container is the stopped one it recorded, so it did not remove them, and hack up refuses the run until they are gone. Keep this native home unchanged for inspection; hack ps --json shows the stopped containers.";
+
+/** Runtime codes for which the lost-removal repair proved nothing it could remove. */
+const LOST_REMOVAL_REFUSALS: ReadonlySet<string> = new Set([
+  "graph_owner_recovery",
+  "graph_lost_removal",
+]);
 
 /** Shown when `hack down --recover` removed containers a lost VM brought back. */
 export const NATIVE_LOST_REMOVAL_NOTE =
@@ -1354,12 +1382,12 @@ async function nativeProjectDownOnce(opts: {
         timeoutMs: 590_000,
       });
     } catch (error) {
-      // Real-VM row 8 at c624229e: a relay-enrolled receipt's cleanup goes
-      // through its foreground owner, which is gone, and the runtime has no
-      // owner-less removal that keeps data yet. Say exactly that.
+      // Real-VM row 8: the runtime removes them without the owner once the
+      // owner's publication is retired (HACK-2719). When it cannot prove that,
+      // or the containers' identities, say exactly that.
       if (
         error instanceof NativeRuntimeRequestError &&
-        error.nativeCode === "graph_owner_recovery"
+        LOST_REMOVAL_REFUSALS.has(error.nativeCode ?? "")
       ) {
         throw new ClosedCliError(NATIVE_LOST_REMOVAL_UNREPAIRABLE);
       }

@@ -846,6 +846,13 @@ pub fn cleanup_request(
         if let Some(removed) = remove_without_live_owner(candidate, run)? {
             return Ok(removed);
         }
+    } else if retained_data::lost_removal_selected(candidate, run) {
+        // A stopped run's owner retired its publication, so there is no owner to
+        // ask. The only retaining effect left is removing containers a lost VM
+        // brought back (HACK-2719), under the retirement lock.
+        if let Some(guard) = transport::Retired::acquire(candidate, run)? {
+            return retained_data::repair_lost_removals(candidate, run, guard);
+        }
     }
     request(candidate, run, Some(remove_data))
 }

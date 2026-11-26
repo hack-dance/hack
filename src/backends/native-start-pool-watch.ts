@@ -64,13 +64,14 @@ export type NativeStartPoolEnd = {
  *   this `up` resumes, or the old run of a `hack restart`. A fresh `up` has
  *   none, so that down would only say `not_started`.
  * - `requested`: services were requested, and the graph is not yet both
- *   reported ready by the runtime and mapped.
+ *   reported ready by the runtime and mapped. `recorded` as for `preparing`:
+ *   a resumed retained run or a restart's replacement has a run record.
  * - `ready`: the runtime reported the graph ready (receipt `ready-observed`)
  *   and the run mapping is saved.
  */
 export type NativeForegroundLossStage =
   | { readonly stage: "preparing"; readonly recorded: boolean }
-  | { readonly stage: "requested" }
+  | { readonly stage: "requested"; readonly recorded: boolean }
   | { readonly stage: "ready" };
 
 /**
@@ -88,9 +89,13 @@ export type NativeForegroundLossStage =
  *   whether or not this start was a restart's replacement.
  * - `preparing` without a run record (a fresh `up`): nothing was requested
  *   and nothing is recorded, so `hack up` alone starts it again.
- * - `requested`: no hack command retires a run lost there yet (HACK-2714);
- *   `hack down --recover` and `hack up` both refuse it, so the message names
- *   neither and says to keep the native home for inspection.
+ * - `requested` with a run record: `hack down --recover`, then `hack up`
+ *   (HACK-2714). The down starts the pool, and the runtime's cross-boot
+ *   dead-owner recovery retires the start its owner left `failed-retained` (or
+ *   `preparing`), data kept.
+ * - `requested` without one (a fresh `up`, or a restart retry whose old run's
+ *   stop was never confirmed): the down finds no run it can retire, so the
+ *   message names no command and says to keep the native home for inspection.
  */
 export function nativeForegroundPoolEndMessage(
   end: NativeStartPoolEnd,
@@ -110,9 +115,14 @@ export function nativeForegroundPoolEndMessage(
   return [
     lost,
     "This foreground start ends now with exit code 1; the run's data is kept.",
-    LOSS_ADVICE[loss.stage],
+    loss.stage === "requested" && !loss.recorded
+      ? UNRECORDED_REQUESTED_ADVICE
+      : LOSS_ADVICE[loss.stage],
   ].join("\n");
 }
+
+const UNRECORDED_REQUESTED_ADVICE =
+  "It was lost before its services were ready, and no hack command can retire a run lost at that point yet. Keep this native home unchanged for inspection; hack ps --json shows what the run left.";
 
 const LOSS_ADVICE: Readonly<
   Record<NativeForegroundLossStage["stage"], string>
@@ -120,7 +130,7 @@ const LOSS_ADVICE: Readonly<
   preparing:
     "It was lost before any of its services were requested. Run hack down --recover to retire the interrupted start with the run's data kept, then hack up to start it again.",
   requested:
-    "It was lost before its services were ready, and no hack command can retire a run lost at that point yet. Keep this native home unchanged for inspection; hack ps --json shows what the run left.",
+    "It was lost before its services were ready. Run hack down --recover to retire the interrupted start with the run's data kept, then hack up to start it again.",
   ready:
     "Run hack down --recover to retire this run with its data kept, then hack up to start it again.",
 };

@@ -15,7 +15,8 @@ ENV MISE_DATA_DIR=/opt/mise MISE_CONFIG_DIR=/opt/mise-config MISE_CACHE_DIR=/tmp
     TLA2TOOLS_JAR=/opt/tla/tla2tools-1.7.4.jar HUSKY=0
 WORKDIR /app
 COPY mise.toml /app/mise.toml
-RUN mise install && mise exec -- bun --version && mise exec -- cargo --version
+COPY scripts/mise-install-retry.sh /usr/local/bin/mise-install-retry
+RUN sh /usr/local/bin/mise-install-retry && mise exec -- bun --version && mise exec -- cargo --version
 RUN mkdir -p /opt/tla && curl -fsSL https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar -o "$TLA2TOOLS_JAR" \
     && echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  $TLA2TOOLS_JAR" | sha256sum -c -
 COPY .hack/toolchain/run.sh /usr/local/bin/hack-toolchain

@@ -68,6 +68,12 @@ import {
   nativeBuilderMissingDetachedRefusal,
 } from "./native-image-builder.ts";
 import {
+  isNativeExitedServices,
+  NATIVE_SERVICE_EXITED,
+  type NativeExitedService,
+  NativeServiceExitedError,
+} from "./native-service-exited.ts";
+import {
   NATIVE_AUTHORED_ATTEMPT_LIMIT,
   NativeAuthoredAttemptLimitError,
   nativeStartOutcomeUnknown,
@@ -110,6 +116,8 @@ type StartupFailure = {
   readonly service?: string;
   /** Names only: services whose process failed during startup. Never their output. */
   readonly failedServices?: readonly string[];
+  /** Only with `code: "service_exited"`: names and exit codes, never output. */
+  readonly exitedServices?: readonly NativeExitedService[];
   readonly startupPhase?: "static-preflight";
 };
 let publishFailure: ((failure: StartupFailure) => Promise<void>) | undefined;
@@ -457,10 +465,28 @@ export async function nativeDetachedUpFailure(error: unknown): Promise<void> {
     await publishFailure({ code: NATIVE_AUTHORED_ATTEMPT_LIMIT });
     return;
   }
+  let runtimeError = error;
+  if (error instanceof NativeServiceExitedError) {
+    const failure: StartupFailure = {
+      code: NATIVE_SERVICE_EXITED,
+      exitedServices: error.exited,
+      ...(error.alsoFailed.length > 0
+        ? { failedServices: error.alsoFailed }
+        : {}),
+      ...(error.nativeCode ? { causeCode: error.nativeCode } : {}),
+    };
+    if (isStartupFailure(failure)) {
+      await publishFailure(failure);
+      return;
+    }
+    // Not admissible over IPC: report the runtime failure it replaced, as
+    // before the service-exited reason existed.
+    runtimeError = error.original;
+  }
   const { nativeRuntimeFailure } = await import(
     "../backends/native-runtime-client.ts"
   );
-  const failure = nativeRuntimeFailure(error);
+  const failure = nativeRuntimeFailure(runtimeError);
   if (isStartupFailure(failure)) {
     await publishFailure(
       failedStartupServices.length > 0 && failure.service === undefined
@@ -471,7 +497,7 @@ export async function nativeDetachedUpFailure(error: unknown): Promise<void> {
   }
   // Before any VM work, a closed refusal is exactly what the foreground would
   // print (HACK-2339); anything else, and anything later, stays unconfirmed.
-  const refusal = prestart ? prestartRefusal(error) : undefined;
+  const refusal = prestart ? prestartRefusal(runtimeError) : undefined;
   if (refusal && isPrestartRefusal(refusal)) {
     await publishPrestartRefusal?.(refusal);
   }
@@ -487,9 +513,15 @@ function isStartupFailure(value: unknown): value is StartupFailure {
         "message",
         "service",
         "failedServices",
+        "exitedServices",
         "startupPhase",
       ].includes(key)
     ) &&
+    // Exited services belong to exactly the service-exited reason.
+    (value.exitedServices === undefined
+      ? value.code !== NATIVE_SERVICE_EXITED
+      : value.code === NATIVE_SERVICE_EXITED &&
+        isNativeExitedServices(value.exitedServices)) &&
     typeof value.code === "string" &&
     FAILURE_CODE.test(value.code) &&
     (value.causeCode === undefined ||
@@ -541,11 +573,34 @@ function startupFailureMessage(value: unknown): StartupFailure | undefined {
     : undefined;
 }
 
+/** The launcher's error for an owner's service-exited report (HACK-2194). */
+function serviceExitedError(
+  failure: StartupFailure
+): NativeServiceExitedError | undefined {
+  if (failure.code !== NATIVE_SERVICE_EXITED || !failure.exitedServices) {
+    return;
+  }
+  // The owner confirmed the failed start's cleanup before reporting it.
+  return new NativeServiceExitedError({
+    exited: failure.exitedServices,
+    ...(failure.failedServices ? { alsoFailed: failure.failedServices } : {}),
+    ...(failure.causeCode ? { nativeCode: failure.causeCode } : {}),
+    detached: true,
+    // As every other detached startup failure says: the pool outlives it.
+    note: NATIVE_IDLE_POOL_NOTE,
+  });
+}
+
 function startupFailureError(failure: StartupFailure): HackCliError {
   noteActivityFailedServices([
+    ...(failure.exitedServices?.map((exited) => exited.service) ?? []),
     ...(failure.failedServices ?? []),
     failure.service,
   ]);
+  const exited = serviceExitedError(failure);
+  if (exited) {
+    return exited;
+  }
   if (failure.code === NATIVE_AUTHORED_ATTEMPT_LIMIT) {
     return new NativeAuthoredAttemptLimitError();
   }

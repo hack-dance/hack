@@ -120,7 +120,10 @@ export async function refreshNativeProjectDependencies(opts: {
         mapping.run,
         "--json",
       ],
-      timeoutMs: 180_000,
+      // Up to 15 s waiting for a briefly held provider lease (HACK-2669), 5 s to
+      // send, then 175 s reading the owner's answer. Killing the request first
+      // would disconnect it, and a disconnect cancels the owner's rebind.
+      timeoutMs: 200_000,
     });
     if (
       !isRecord(response) ||

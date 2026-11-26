@@ -170,6 +170,8 @@ import { preflightNativeProjectSource } from "../backends/native-project-source-
 import {
   NativeStartupCanceledError,
   type NativeStartupProgress,
+  restartPreflightLossStage,
+  routeNativeLostVm,
   startNativeProject,
 } from "../backends/native-project-start.ts";
 import {
@@ -283,6 +285,13 @@ import {
   HackCliError,
   okResult,
 } from "../lib/cli-result.ts";
+import {
+  type ComposeClientCapture,
+  openComposeClientCapture,
+  writeComposeClientFailure,
+  writeComposeClientQuestions,
+  writeComposeClientWarnings,
+} from "../lib/compose-client-output.ts";
 import { runningComposeDirectAccess } from "../lib/compose-direct-access.ts";
 import {
   buildComposeDownFailure,
@@ -349,8 +358,10 @@ import {
   shouldResolveComposeProjectName,
 } from "../lib/compose-project-name.ts";
 import {
+  composeEnvPlainValues,
   composeEnvValuesToRedact,
   composePsTextFallbackAllowed,
+  composeQuoteRedactValues,
   parseComposePsJson,
   readComposePs,
   readComposePsResult,
@@ -470,6 +481,7 @@ import {
 } from "../lib/logs.ts";
 import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import { nativeAppendRollbackMessage } from "../lib/native-append-cancellation.ts";
+import { withNativeCommandTimings } from "../lib/native-command-timings.ts";
 import {
   readNativeComposeDocument,
   refuseNativeComposeBackendFeatures,
@@ -881,6 +893,20 @@ const upOptions = [
     description: "Mark this project for machine-local autostart and start it",
   } as const),
 ] as const;
+const optCommandTimings = defineOption({
+  name: "timings",
+  type: "boolean",
+  long: "--timings",
+  description: "Native backend: print the command timeline to stderr",
+} as const);
+const optCommandTimingsFile = defineOption({
+  name: "timingsFile",
+  type: "string",
+  long: "--timings-file",
+  valueHint: "<file>",
+  description:
+    "Native backend: write command timing records to a new JSONL file",
+} as const);
 const downOptions = [
   optPath,
   optProject,
@@ -923,6 +949,8 @@ const downOptions = [
     description:
       "Explicitly reconcile an interrupted native stop, or stop the services of a native run whose foreground owner exited, while retaining data",
   } as const),
+  optCommandTimings,
+  optCommandTimingsFile,
 ] as const;
 const restartOptions = [
   optPath,
@@ -958,6 +986,8 @@ const psOptions = [
   optBranch,
   optProfile,
   optJson,
+  optCommandTimings,
+  optCommandTimingsFile,
 ] as const;
 const optWorkdir = defineOption({
   name: "workdir",
@@ -2201,6 +2231,8 @@ export async function resolveModernComposeEnvOverrides(opts: {
     Record<string, Readonly<Record<string, string>>>
   >;
   readonly effectiveEnvName: string | null;
+  /** See composeEnvPlainValues; absent means every added value is redacted. */
+  readonly plainValues?: readonly string[];
 } | null> {
   const modern = await resolveProjectEnvConfig({
     projectRoot: opts.project.projectRoot,
@@ -2258,6 +2290,17 @@ export async function resolveModernComposeEnvOverrides(opts: {
     : modern.globalEnv;
   // Fail closed before any write or spawn when Compose could not start.
   assertComposeSpawnEnvFits({ env: composeEnv });
+  const plainValues = composeEnvPlainValues({
+    scopes: [
+      { env: modern.globalEnv, metadata: modern.effectiveMetadata.global },
+      ...Object.entries(modern.serviceEnv).map(([service, env]) => ({
+        env,
+        metadata: Object.hasOwn(modern.effectiveMetadata, service)
+          ? modern.effectiveMetadata[service]
+          : undefined,
+      })),
+    ],
+  });
   if (override === null) {
     if (opts.persist !== false) {
       await clearComposeEnvOverride({
@@ -2270,6 +2313,7 @@ export async function resolveModernComposeEnvOverrides(opts: {
       lifecycleEnv,
       preflightEnvByService,
       effectiveEnvName: modern.selection.effectiveEnv,
+      plainValues,
     };
   }
 
@@ -2285,6 +2329,7 @@ export async function resolveModernComposeEnvOverrides(opts: {
     lifecycleEnv,
     preflightEnvByService,
     effectiveEnvName: modern.selection.effectiveEnv,
+    plainValues,
   };
 }
 
@@ -2377,6 +2422,8 @@ async function resolveComposeEnvOverrides(opts: {
     Record<string, Readonly<Record<string, string>>>
   >;
   readonly effectiveEnvName: string | null;
+  /** See composeEnvPlainValues; absent means every added value is redacted. */
+  readonly plainValues?: readonly string[];
 }> {
   await maybePromptLegacyProjectEnvMigration({
     project: opts.project,
@@ -7547,34 +7594,45 @@ async function restartNativeImageProject({
             }),
         }
       : undefined,
-    preflight: async (run, { cleanedRetry, preparedRetry, signal }) => {
-      await preflightNativeProjectSource({
-        runtime: native,
-        projectRoot: startup.scope.projectRoot,
-      });
-      // The replacement start pins exactly the build images checked here,
-      // so nothing is built after the old graph stopped (HACK-2533).
-      verifiedBuildImages = await preflightNativeRestart({
+    // A VM lost during the preflight (its image pulls, before the restart saves
+    // its intent or stops anything) gets the stage message (HACK-2096 real-VM
+    // row 6). The old run is still the live run, so a loss is retired like a
+    // ready one; a retry of a cleaned restart has its old run stopped; a
+    // prepared one has an unconfirmed stop, which no command retires yet.
+    preflight: async (run, { cleanedRetry, preparedRetry, signal }) =>
+      await routeNativeLostVm({
+        home: startup.runtime.home,
         signal,
-        runtime: native,
-        scope: startup.scope,
-        composeFile: startup.composeFile,
-        adaptationFile: startup.adaptationFile,
-        adaptationFileByEnv: startup.adaptationFileByEnv,
-        dependencyFile: startup.dependencyFile,
-        dependencyFileByEnv: startup.dependencyFileByEnv,
-        internalExtraHosts: startup.internalExtraHosts,
-        dependencyOwners: startup.dependencyOwners,
-        internalExtraHostSources: startup.internalExtraHostSources,
-        allowedHosts: startup.allowedHosts,
-        runtimeMetadata: startup.runtimeMetadata,
-        httpsPort: startup.https?.httpsPort ?? null,
-        run,
-        cleanedRetry,
-        preparedRetry,
-        recoverStopped: recovery !== undefined,
-      });
-    },
+        loss: restartPreflightLossStage({ cleanedRetry, preparedRetry }),
+        run: async () => {
+          await preflightNativeProjectSource({
+            runtime: native,
+            projectRoot: startup.scope.projectRoot,
+          });
+          // The replacement start pins exactly the build images checked here,
+          // so nothing is built after the old graph stopped (HACK-2533).
+          verifiedBuildImages = await preflightNativeRestart({
+            signal,
+            runtime: native,
+            scope: startup.scope,
+            composeFile: startup.composeFile,
+            adaptationFile: startup.adaptationFile,
+            adaptationFileByEnv: startup.adaptationFileByEnv,
+            dependencyFile: startup.dependencyFile,
+            dependencyFileByEnv: startup.dependencyFileByEnv,
+            internalExtraHosts: startup.internalExtraHosts,
+            dependencyOwners: startup.dependencyOwners,
+            internalExtraHostSources: startup.internalExtraHostSources,
+            allowedHosts: startup.allowedHosts,
+            runtimeMetadata: startup.runtimeMetadata,
+            httpsPort: startup.https?.httpsPort ?? null,
+            run,
+            cleanedRetry,
+            preparedRetry,
+            recoverStopped: recovery !== undefined,
+          });
+        },
+      }),
     down: async () => {
       dropEnvFingerprint();
       const code = await handleDown({
@@ -7602,6 +7660,8 @@ async function restartNativeImageProject({
             yes: false,
             recoverNativeCompose: false,
             progress: false,
+            timings: false,
+            timingsFile: undefined,
           },
           positionals: {},
           raw: args.raw,
@@ -7616,12 +7676,22 @@ async function restartNativeImageProject({
       }
     },
     progress,
-    start: ({ run, onReady, signal, onStopSignals, onStopRequested }) =>
+    start: ({
+      run,
+      onReady,
+      signal,
+      onStopSignals,
+      onStopRequested,
+      releaseLock,
+    }) =>
       startNativeProject({
         ...startup,
         ...nativeRestartSelection({ run }),
         restore: run,
         verifiedBuildImages,
+        // A replacement that ends the process on a lost VM must not leave the
+        // restart's operation lock held (HACK-2096).
+        beforeLostExit: releaseLock,
         // The restart's own bookkeeping first, then the startup's ready
         // report: a detached owner (`restart --json`) tells its launcher here.
         onReady: async (services, addresses) => {
@@ -9163,6 +9233,7 @@ async function runResolvedComposeUp({
     });
   lifecycleSignalCleanup?.dispose();
   let signalCleanup = installOperationSignalCleanup();
+  let clientOutput: ComposeClientCapture | undefined;
   try {
     // After `up.before` hooks, which may start the engine, open the tunnel
     // DOCKER_HOST needs or create a shared network, and before any pull: name
@@ -9249,6 +9320,13 @@ async function runResolvedComposeUp({
     if (!progress) {
       reportComposeStartupBudget({ budgets, detach });
     }
+    // Human detached starts print Hack's rows instead of the client's lines.
+    clientOutput = progress ? openComposeClientCapture() : undefined;
+    // The quoted lines keep values the env layers mark non-secret.
+    const quoteRedactValues = composeQuoteRedactValues({
+      redactValues: preflightRedactValues,
+      plainValues: envOverrides.plainValues,
+    });
     const upPhase = trackComposeStartupPhase();
     const launch = async (localFiles: readonly string[]) => {
       const composeFilesWithEnv = remoteStartup
@@ -9313,11 +9391,15 @@ async function runResolvedComposeUp({
                 ? resolveAutostartTrustedTlsBinds
                 : undefined,
             beforeCreate: async () => {
-              await verifyOwnership();
-              await scopedMutation?.stage();
-              await publishRuntimeSelection();
-              await recordLaunchCheckout();
-              await engine.verify();
+              const prepare = async () => {
+                await verifyOwnership();
+                await scopedMutation?.stage();
+                await publishRuntimeSelection();
+                await recordLaunchCheckout();
+                await engine.verify();
+              };
+              // Its warnings must not land on the transient `images` wait.
+              await (progress ? progress.quiet(prepare) : prepare());
             },
             onCreateDispatched: () => {
               composeDispatched = true;
@@ -9366,13 +9448,18 @@ async function runResolvedComposeUp({
             startupTimeoutMs,
             imageTimeoutMs: budgets.imageTimeoutMs,
             startupCeilingMs: budgets.startupCeilingMs,
-            onStartupPhase: upPhase.onStartupPhase,
+            onStartupPhase: (phase) => {
+              upPhase.onStartupPhase(phase);
+              progress?.phase(phase);
+            },
             onStartupProgress: upPhase.onStartupProgress,
             onStartupStalled: upPhase.onStartupStalled,
+            onStartupNotice: progress?.notice,
             composeFiles: composeFilesWithEnv,
             composeProject: composeProjectName,
             profiles,
             detach,
+            clientOutput,
             cwd: dirname(project.composeFile),
             env: envOverrides.env,
             routeStdoutToStderr: json,
@@ -9408,6 +9495,7 @@ async function runResolvedComposeUp({
       });
     };
     const guarded = await launchWithEnv().finally(async () => {
+      progress?.settle();
       foregroundReceiptStop.abort();
       try {
         await settlePublication();
@@ -9496,8 +9584,25 @@ async function runResolvedComposeUp({
           exitCode: upCode,
         });
       }
+      if (clientOutput && upCode !== 130 && upCode !== 143) {
+        // Enough of the client's own words to diagnose the failure.
+        writeComposeClientFailure({
+          capture: clientOutput,
+          phase: upPhase.phase(),
+          redactValues: quoteRedactValues,
+        });
+      }
       logger.error({ message: failure.message });
       return upCode;
+    }
+    if (clientOutput) {
+      writeComposeClientWarnings(
+        clientOutput.warnings({ redactValues: quoteRedactValues })
+      );
+      // Compose went on with its default answer to each of these.
+      writeComposeClientQuestions(
+        clientOutput.questions({ redactValues: quoteRedactValues })
+      );
     }
 
     const containersStartedAt = performance.now();
@@ -9721,6 +9826,8 @@ async function runResolvedComposeUp({
     } finally {
       foregroundTermination.guard?.dispose();
       signalCleanup.dispose();
+      // Every Compose phase that fed the capture has settled by now.
+      clientOutput?.close();
     }
   }
 }
@@ -9922,6 +10029,17 @@ async function nativeDownRequest(opts: {
 }
 
 async function handleDown(
+  input: Parameters<typeof handleDownUnlocked>[0]
+): Promise<number> {
+  return await withNativeCommandTimings({
+    command: "down",
+    timings: input.args.options.timings,
+    timingsFile: input.args.options.timingsFile,
+    run: () => handleDownSelected(input),
+  });
+}
+
+async function handleDownSelected(
   input: Parameters<typeof handleDownUnlocked>[0]
 ): Promise<number> {
   validateComposeExpectation(input.args.options);
@@ -14206,7 +14324,19 @@ async function maybeManageProjectLogsAfterDown(opts: {
   });
 }
 
-async function handlePs({
+async function handlePs(input: {
+  readonly ctx: CliContext;
+  readonly args: PsArgs;
+}): Promise<number> {
+  return await withNativeCommandTimings({
+    command: "ps",
+    timings: input.args.options.timings,
+    timingsFile: input.args.options.timingsFile,
+    run: () => handlePsSelected(input),
+  });
+}
+
+async function handlePsSelected({
   ctx,
   args,
 }: {

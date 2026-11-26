@@ -29,7 +29,11 @@ esac
 archive="cargo-nextest-${version}-${target}.tar.gz"
 destination=$1
 mkdir -p "$destination"
+# GitHub's release CDN sometimes answers 403 or drops the transfer (curl 56,
+# HACK-2717); retry every error. --max-time applies to each attempt, and the
+# checksum below still gates whatever arrives.
 curl --fail --location --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 \
+  --retry 4 --retry-all-errors --retry-delay 2 \
   "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${version}/${archive}" \
   -o "$destination/$archive"
 if command -v shasum >/dev/null 2>&1; then

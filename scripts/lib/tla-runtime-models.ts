@@ -48,6 +48,23 @@ function runtimeServiceEither(first: ClientFields, ...others: ClientFields[]) {
   };
 }
 
+// foreground-loss-recovery: a lost restart told `hack down --recover`, then
+// `hack up`, whose `hack up` refuses the intent the down could not retire
+// (kept, or the lock still held). Shortest while preparing; also once ready.
+function pendingRestartRefused(lock: "TRUE" | "FALSE") {
+  const at = (lostAt: string) => [
+    'outcome = "refused"',
+    `lostAt = "${lostAt}"`,
+    'kind = "restart"',
+    'intent = "cleaned"',
+    `lock = ${lock}`,
+  ];
+  return {
+    fields: at("Preparing"),
+    alternativeWitnesses: [at("GraphReady")],
+  };
+}
+
 // Bounds and witnesses are reviewed contracts, not learned from each run.
 const laterIncompleteMissingLockStages = [
   "temp",
@@ -330,6 +347,38 @@ const contracts: readonly ModelContract[] = [
           "snapshot = TRUE",
           "legacy = TRUE",
           "deferred = FALSE",
+        ],
+      },
+    ],
+  },
+  {
+    // HACK-2188: without resume, a rerun refuses a restore that was only
+    // interrupted after moving the step's output aside.
+    name: "upgrade-restore",
+    module: "Restore",
+    states: 613,
+    invariant: "InterruptedRestoreResumes",
+    fields: [
+      'target = "none"',
+      'aside = <<"S">>',
+      'outcome = "conflict"',
+      'phase = "idle"',
+      "force = FALSE",
+    ],
+    additionalControls: [
+      {
+        // Review of HACK-2188: when a completed restore keeps the step
+        // output keyed, a plain rerun after the user deletes the restored
+        // file adopts it and recreates the path without overwrite.
+        name: "kept-keys",
+        negative: true,
+        invariant: "DeletionKept",
+        fields: [
+          "emptied = TRUE",
+          'outcome = "restored"',
+          "force = FALSE",
+          'aside = <<"S">>',
+          "consumed = 0",
         ],
       },
     ],
@@ -1962,6 +2011,144 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // HACK-2669: a service command (exec, and the dependency refresh before
+    // exec and run) waits out the ready owner's brief lease holds instead of
+    // refusing provider_busy. The negative control is the old nonblocking
+    // acquisition.
+    name: "native-command-lease",
+    module: "CommandLease",
+    states: 74,
+    invariant: "BriefHolderNeverRefuses",
+    fields: ['cmd = "refused"', 'lease = "owner"', "elapsed = 0"],
+    additionalControls: [
+      {
+        // Review finding: a waiter on an owner's loop thread that passed no
+        // check held a pending signal across the wait.
+        name: "unchecked-signal",
+        negative: true,
+        invariant: "SignalNotHeld",
+        fields: [
+          'cmd = "waiting"',
+          "signal = TRUE",
+          "sigAt = 0",
+          "elapsed = 1",
+        ],
+      },
+      {
+        // Without the check, a signal that arrived during the wait could
+        // still be followed by admission.
+        name: "unchecked-admission",
+        negative: true,
+        invariant: "NoAdmissionAfterSignal",
+        fields: ['cmd = "admitted"', "signal = TRUE", 'lease = "command"'],
+      },
+      {
+        // The wait stays bounded: a holder that keeps the lease past it is
+        // still refused, with the holder named.
+        name: "long-holder",
+        negative: true,
+        fields: ['cmd = "refused"', 'lease = "owner"', "elapsed = 4"],
+      },
+      {
+        name: "admitted-after-wait",
+        negative: true,
+        invariant: "NeverAdmittedAfterWait",
+        fields: ['cmd = "admitted"', 'lease = "command"', "elapsed = 1"],
+      },
+    ],
+  },
+  {
+    // HACK-2669 rows 1, 3, 4, HACK-2707, HACK-2708, HACK-2709: the warm-up
+    // window after `up -d`. The shared HTTPS owner's startup, acquire and
+    // release contend for the provider lease with commands and a stop. The
+    // negative control is the old single nonblocking graph read at the ready
+    // line: a brief holder made the acquire refuse and the run was torn down.
+    name: "native-warmup-window",
+    module: "WarmupWindow",
+    states: 272,
+    invariant: "NoTeardownByBriefHolder",
+    fields: ["torn = TRUE", 'https = "refused"', 'lease = "cmd"'],
+    additionalControls: [
+      {
+        // HACK-2708: the release after Ctrl-C read once while an exec that
+        // waited for the lease held it.
+        name: "nonblocking-release",
+        negative: true,
+        invariant: "NoRecoveryRequired",
+        fields: ['fin = "unconfirmed"', 'https = "retained"', 'lease = "cmd"'],
+      },
+      {
+        // HACK-2707: the authority gave up on the lease a `hack down` held
+        // for its stop, leaving the shared owner's startup failure retained.
+        name: "short-authority-wait",
+        negative: true,
+        invariant: "NoRecoveryRequired",
+        fields: ['fin = "unconfirmed"', 'https = "startupFailed"'],
+      },
+      {
+        // #1260 review, M3: a stop that holds the lease longer than the
+        // authority's wait (StopHold > AuthorityWait) still ends confirmed:
+        // recovery retires the owner generation that admitted nothing.
+        name: "long-stop",
+        negative: false,
+        states: 510,
+      },
+      {
+        // #1260 review, M3: the same long stop with the startup failure
+        // retained (the head before this fix) needs recovery.
+        name: "long-stop-retained",
+        negative: true,
+        invariant: "NoRecoveryRequired",
+        fields: [
+          'run = "stopped"',
+          "torn = FALSE",
+          'fin = "unconfirmed"',
+          'https = "startupFailed"',
+        ],
+      },
+      {
+        // HACK-2707: cleanup did not wait for the in-flight acquisition.
+        name: "cleanup-before-settled",
+        negative: true,
+        invariant: "NoRecoveryRequired",
+        fields: ['fin = "unconfirmed"', 'https = "authority"'],
+        alternativeWitnesses: [['fin = "unconfirmed"', 'https = "verify"']],
+      },
+      {
+        // The same omission could acknowledge a lifetime whose acquisition
+        // had not even started its intent.
+        name: "acquire-after-cleanup",
+        negative: true,
+        invariant: "NoAcquisitionAfterCleanup",
+        fields: ['fin = "confirmed"', 'https = "pending"'],
+        alternativeWitnesses: [
+          ['fin = "confirmed"', 'https = "authority"'],
+          ['fin = "confirmed"', 'https = "verify"'],
+        ],
+      },
+      {
+        // The waits stay bounded: a holder that outlasts the read's wait
+        // still makes the acquire refuse.
+        name: "long-holder",
+        negative: true,
+        invariant: "NoTeardownByBriefHolder",
+        fields: ["torn = TRUE", 'https = "refused"', 'lease = "cmd"'],
+      },
+      {
+        // Reachability: a stop during warm-up ends with a refused acquire,
+        // a verified release and confirmed cleanup.
+        name: "released-after-refusal",
+        negative: true,
+        invariant: "NeverReleasedAfterRefusal",
+        fields: [
+          'fin = "confirmed"',
+          'https = "released"',
+          "refusedSeen = TRUE",
+        ],
+      },
+    ],
+  },
+  {
     name: "stopped-pool-startup",
     module: "Resume",
     states: 71,
@@ -3033,6 +3220,35 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // HACK-2097: `down --recover` after a lost foreground whose graph owner
+    // still runs and then stops itself (its publication reading `uncertain`
+    // mid-retirement), dies at any point of its run or its stop, or loses its
+    // publication. `negative` is the code before: a running selection whose
+    // stop found the owner gone refused without naming a working step.
+    // `no-settle` reselects without the bounded wait and refuses an owner
+    // still exiting. `unconfirmed-absent` accepts a retired publication
+    // without the stopped-receipt check and reports a false success.
+    name: "native-down-lost-frontend",
+    module: "DownLostFrontend",
+    states: 57,
+    invariant: "NoDeadEnd",
+    fields: ['pc = "refused"', 'why = "unnamed"', "reselected = FALSE"],
+    additionalControls: [
+      {
+        name: "no-settle",
+        negative: true,
+        invariant: "NoDeadEnd",
+        fields: ['pc = "refused"', 'why = "unnamed"', "reselected = TRUE"],
+      },
+      {
+        name: "unconfirmed-absent",
+        negative: true,
+        invariant: "DoneIsStopped",
+        fields: ['pc = "done"', 'graph = "ready"', "vanished = TRUE"],
+      },
+    ],
+  },
+  {
     // HACK-2456: a pool that stops or dies under a live run. Positive: the
     // stopped-pool recovery plus recovery from any earlier boot of the pool,
     // with every fault (other boots, a stop between a recovery's boot and its
@@ -3186,6 +3402,134 @@ const contracts: readonly ModelContract[] = [
           "grace = 2",
           "graph = 3",
           "stopped = 3",
+        ],
+      },
+    ],
+  },
+  {
+    // HACK-2096: a foreground start outlives its lost VM by at most the check
+    // and the grace, and never ends as a lost VM once its graph has stopped.
+    // The negative control is the old unwatched foreground; armed-finishing
+    // keeps the watch armed while the start finishes after its graph stopped.
+    name: "foreground-pool-watch",
+    module: "ForegroundPoolWatch",
+    states: 117,
+    invariant: "BoundedExit",
+    fields: ['phase = "Serving"', "live = FALSE", "watching = FALSE", "t = 4"],
+    alternativeWitnesses: [
+      ['phase = "Starting"', "live = FALSE", "watching = FALSE", "t = 4"],
+      ['phase = "Stopping"', "live = FALSE", "watching = FALSE", "t = 4"],
+    ],
+    additionalControls: [
+      {
+        name: "armed-finishing",
+        negative: true,
+        invariant: "NoExitAfterGraphStopped",
+        fields: ['phase = "Exited"', "graphStopped = TRUE", "watching = TRUE"],
+      },
+    ],
+  },
+  {
+    // HACK-2096: after a foreground up or restart loses its VM, every command
+    // its message names is accepted in order, and it withholds a command only
+    // where none works, whether the pool watch or the start's own error ends
+    // the start. The negative control is PR #1253 at cd0ebff10 (restart named
+    // by intent everywhere, lock left held, intent kept, generic error text,
+    // brought-back containers unrepaired); keep-intent, leak-lock,
+    // intent-message, generic-error and keep-leftover each restore one old
+    // rule, and withhold-preparing is a6c4cba (no command before ready).
+    // restart-recovers is the reachability witness of a recovered restart.
+    name: "foreground-loss-recovery",
+    module: "ForegroundLossRecovery",
+    states: 176,
+    invariant: "NoRefusedAdvice",
+    fields: ['outcome = "refused"', 'lostAt = "Preparing"'],
+    alternativeWitnesses: [['outcome = "refused"', 'lostAt = "Requested"']],
+    additionalControls: [
+      {
+        // a8705a39 on a real VM: the start's error wins the race with its
+        // own text, and `hack up` (image preparation's advice) refuses.
+        name: "generic-error",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          'endedBy = "error"',
+          'msg = "genericUp"',
+          'lostAt = "Preparing"',
+        ],
+      },
+      {
+        // 38347515 (round-4 review): a lost-provider code alone counts as a
+        // lost VM, so an ordinary failure on a healthy VM gets lost-VM advice.
+        name: "code-without-veto",
+        negative: true,
+        invariant: "NoFalseLoss",
+        fields: ['endedBy = "ordinary"', 'lostAt = "Preparing"'],
+      },
+      {
+        // c624229e (round-5 review): only a running record's pid was read and
+        // any record naming the boot vetoed, so a provider that died with the
+        // record stuck mid-stop got the start error's own text.
+        name: "transitional-veto",
+        negative: true,
+        invariant: "NoMissedLoss",
+        fields: ['endedBy = "error"', "stale = TRUE", 'lostAt = "Preparing"'],
+      },
+      {
+        // Real-VM row 8: containers a lost VM brought back are not removed,
+        // so `hack down --recover` cannot confirm the cleanup.
+        name: "keep-leftover",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          "leftover = TRUE",
+          'msg = "downUp"',
+          'lostAt = "Preparing"',
+        ],
+      },
+      {
+        name: "keep-intent",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        ...pendingRestartRefused("FALSE"),
+      },
+      {
+        name: "leak-lock",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        ...pendingRestartRefused("TRUE"),
+      },
+      {
+        // Only the intent rule differs, and only once ready: the restart lost
+        // at GraphReady is told `hack restart`, which refuses after down
+        // --recover retired its intent.
+        name: "intent-message",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          'kind = "restart"',
+          'msg = "downRestart"',
+          'lostAt = "GraphReady"',
+          'intent = "none"',
+        ],
+      },
+      {
+        name: "withhold-preparing",
+        negative: true,
+        invariant: "NoNeedlessWithholding",
+        fields: ['msg = "inspect"', 'lostAt = "Preparing"'],
+      },
+      {
+        name: "restart-recovers",
+        negative: true,
+        invariant: "NoRestartRecovery",
+        fields: ['kind = "restart"', 'outcome = "ok"', 'lostAt = "Preparing"'],
+        alternativeWitnesses: [
+          ['kind = "restart"', 'outcome = "ok"', 'lostAt = "GraphReady"'],
+          ['kind = "restart"', 'outcome = "ok"', 'lostAt = "Serving"'],
         ],
       },
     ],
@@ -3511,6 +3855,14 @@ const contracts: readonly ModelContract[] = [
           'recorded = "expired"',
           'chose = "recorded"',
         ],
+      },
+      {
+        // HACK-2534. Restores the separate digest pass a cached archive took
+        // before import; import's validation already hashes every byte.
+        name: "early-digest",
+        negative: true,
+        invariant: "CachedSingleRead",
+        fields: ['source = "cached"', "reads = 2"],
       },
       {
         name: "eviction",

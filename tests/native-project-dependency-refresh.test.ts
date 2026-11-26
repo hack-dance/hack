@@ -99,7 +99,7 @@ test("refresh validates the owned no-op or bounded changed slots with one public
             run.run,
             "--json",
           ],
-          timeoutMs: 180_000,
+          timeoutMs: 200_000,
         });
         return { ...response(), changed_slots: changedSlots };
       },

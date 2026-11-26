@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   nativeAppendRollback,
+  nativeAppendRollbackMessage,
   readNativeAppendRollback,
 } from "../src/lib/native-append-cancellation.ts";
 
@@ -61,4 +62,13 @@ test("the detached launcher admits the largest bounded serial budget", () => {
   expect(
     readNativeAppendRollback({ services: 32, waitMs: 1_005_001 })
   ).toBeUndefined();
+});
+
+test("the rollback notice says a second Ctrl-C stops waiting", () => {
+  expect(nativeAppendRollbackMessage(1)).toBe(
+    "Cancelling, rolling back 1 service… Press Ctrl-C again to stop waiting (the outcome will be unknown)."
+  );
+  expect(nativeAppendRollbackMessage(2)).toStartWith(
+    "Cancelling, rolling back 2 services… Press Ctrl-C again"
+  );
 });

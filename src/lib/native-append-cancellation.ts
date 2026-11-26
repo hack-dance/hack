@@ -3,7 +3,10 @@ import { isRecord } from "./guards.ts";
 // Match the native graph's admitted StopTimeout range and whole-second rounding.
 const NATIVE_APPEND_MAX_STOP_SECONDS = 30;
 const NATIVE_APPEND_MAX_SERVICES = 32;
-// The owner checks for cancellation between provider requests, which can take 40 s.
+// The owner checks for cancellation between extend steps. This allows for one
+// in-flight engine request (the 40 s transport timeout), not one whole step:
+// storage creation and image verification send several requests with no
+// cancellation check between them, so a slow engine can delay notice further.
 const NATIVE_APPEND_NOTICE_MS = 40_000;
 const NATIVE_APPEND_ROLLBACK_MARGIN_MS = 5000;
 const NATIVE_APPEND_WAIT_OVERHEAD_MS =
@@ -78,6 +81,10 @@ export function readNativeAppendRollback(
   return undefined;
 }
 
+/**
+ * The first Ctrl-C waits for the owner to confirm rollback, which can take over
+ * a minute. A second Ctrl-C stops waiting; the outcome is then unknown.
+ */
 export function nativeAppendRollbackMessage(count: number): string {
-  return `Cancelling, rolling back ${count} service${count === 1 ? "" : "s"}…`;
+  return `Cancelling, rolling back ${count} service${count === 1 ? "" : "s"}… Press Ctrl-C again to stop waiting (the outcome will be unknown).`;
 }

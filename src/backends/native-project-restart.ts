@@ -126,6 +126,13 @@ export async function restartNativeProject(opts: {
      * start that then returns stopped its new run with confirmed cleanup.
      */
     onStopRequested: () => void;
+    /**
+     * Releases the restart's operation lock early, for a start that ends the
+     * process on a lost VM (HACK-2096): the exit would otherwise leave the lock
+     * held and every later `hack restart` refused. The pending intent stays;
+     * `hack down --recover` retires it with the run once its old run was cleaned.
+     */
+    releaseLock: () => Promise<void>;
   }) => Promise<number>;
   /**
    * Stop lines for a restart canceled before its new run started; a cancel
@@ -391,6 +398,7 @@ async function startOrStop(opts: {
       onStopRequested: () => {
         stopRequested = true;
       },
+      releaseLock: opts.release,
       onReady: async () => {
         await deps.remove({ ...context.scope, expected: selected });
         removed = true;

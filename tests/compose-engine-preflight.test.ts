@@ -7,7 +7,9 @@ import {
 import { HackCliError } from "../src/lib/cli-result.ts";
 import {
   type ComposeEnginePreflightDeps,
+  inspectComposePlugin,
   preflightComposeEngine,
+  preflightComposePlugin,
   preflightSharedNetworks,
   sharedExternalNetworks,
 } from "../src/lib/compose-engine-preflight.ts";
@@ -197,6 +199,31 @@ describe("preflightComposeEngine", () => {
       problem:
         "v2 plugin missing · install docker-compose-v2 or docker-compose-plugin on debian or ubuntu",
     });
+  });
+
+  test("the plugin check alone reports the version or the missing plugin (HACK-2673)", async () => {
+    const working = fakeDocker({
+      "docker compose version": { exitCode: 0, stdout: "2.40.3\n", stderr: "" },
+    });
+    expect(await inspectComposePlugin({ deps: working.deps })).toEqual({
+      ok: true,
+      version: "2.40.3",
+    });
+    expect(working.calls).toEqual(["docker compose version --short"]);
+    expect(await preflightComposePlugin({ deps: working.deps })).toBeNull();
+
+    const missing = fakeDocker({
+      "docker compose version": {
+        exitCode: 1,
+        stdout: "",
+        stderr: "docker: unknown command: docker compose\n",
+      },
+    });
+    const error = await preflightComposePlugin({ deps: missing.deps });
+    expect(error?.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(error?.message).toContain("Docker Compose v2 plugin");
+    expect(error?.message).toContain("docker-compose-plugin");
+    expect(error?.message).not.toContain("443");
   });
 
   test("a working engine and plugin pass", async () => {

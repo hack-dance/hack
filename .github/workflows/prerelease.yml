@@ -173,14 +173,27 @@ jobs:
           add_shims_to_path: false
           cache: false
           env: false
+      # A restored pin needs no remote version lookup. On a miss, retry
+      # installs so mise can pick another community mirror. Keep this loop
+      # inline because source_revision may predate scripts/mise-install-retry.sh.
       - name: Install or use cached Zig
+        timeout-minutes: 15
         env:
-          MISE_HTTP_TIMEOUT: "60s"
+          MISE_HTTP_TIMEOUT: "90s"
           MISE_HTTP_RETRIES: "4"
-        # A restored pin needs no remote version lookup. Explicit install retries signature requests.
         run: |
           if ! mise where zig >/dev/null; then
-            mise install zig
+            for attempt in 1 2 3 4; do
+              if mise install zig; then
+                break
+              fi
+              if [ "$attempt" -eq 4 ]; then
+                echo "mise install zig failed 4 times" >&2
+                exit 1
+              fi
+              echo "mise install zig failed (attempt $attempt of 4); retrying in $((attempt * 15))s" >&2
+              sleep "$((attempt * 15))"
+            done
           fi
           mise exec zig -- zig version
       - run: bun install --frozen-lockfile

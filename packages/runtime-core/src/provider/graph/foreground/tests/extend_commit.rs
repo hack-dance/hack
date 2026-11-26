@@ -84,6 +84,18 @@ fn fake_engine(
 
 #[test]
 fn extend_run_commits_combined_provenance_with_cleared_intent() {
+    extend_commit_case(false);
+}
+
+/// A running service whose authored definition changed since `up` drops the
+/// CLI's offered full-file review before it is tried. The append still commits
+/// with the owner's own serialization, and the reply says so.
+#[test]
+fn extend_run_reports_owner_fallback_when_a_running_definition_changed() {
+    extend_commit_case(true);
+}
+
+fn extend_commit_case(change_web: bool) {
     let (_home, candidate, run) = fixture();
     let fixture = graph::tests::Fixture::new();
     let project = &fixture.0;
@@ -95,7 +107,12 @@ fn extend_run_commits_combined_provenance_with_cleared_intent() {
     let selected = json!({"services":{"redis":redis}}).to_string();
     // Preserve the file's order in the CLI identity. Serde's sorted-key bytes
     // give a different identity, even though they represent the same services.
-    let full = format!(r#"{{"services":{{"web":{web},"redis":{redis}}}}}"#);
+    let full_web = if change_web {
+        json!({"image":image,"network_mode":"none","volumes":["./src:/app:ro"],"environment":{"MODE":"changed"}})
+    } else {
+        web.clone()
+    };
+    let full = format!(r#"{{"services":{{"web":{full_web},"redis":{redis}}}}}"#);
     fs::create_dir(project.join("src")).unwrap();
     fs::write(project.join("src/marker"), "source").unwrap();
     fs::write(project.join(file), &old).unwrap();
@@ -308,6 +325,19 @@ fn extend_run_commits_combined_provenance_with_cleared_intent() {
             )
             .unwrap();
             assert_eq!(result.services, BTreeSet::from(["redis".into()]));
+            // `changed` names only selected services that were already
+            // running; web is a running dependency witness, not selected.
+            assert!(result.changed.is_empty());
+            if change_web {
+                assert_eq!(
+                    result.combined_review,
+                    graph::extend::CombinedReview::OwnerFallback
+                );
+                assert_eq!(result.combined_review.reply_field(), Some("owner_fallback"));
+            } else {
+                assert_eq!(result.combined_review, graph::extend::CombinedReview::Cli);
+                assert_eq!(result.combined_review.reply_field(), None);
+            }
             (input, reviewed.plan_id, contract)
         },
     );
@@ -340,9 +370,18 @@ fn extend_run_commits_combined_provenance_with_cleared_intent() {
         saved.extending.is_empty(),
         "the combined receipt must clear append intent"
     );
-    assert_eq!(saved.normalized_input, Some(input));
-    assert_eq!(saved.input_plan_id, Some(plan_id));
-    assert_eq!(saved.source.unwrap().shared_contract, Some(contract));
+    if change_web {
+        // The owner's serialization keeps web's admitted definition, so the
+        // recorded review is not the CLI's full-file review.
+        assert_ne!(saved.normalized_input, Some(input));
+        assert_ne!(saved.input_plan_id, Some(plan_id));
+        assert!(saved.normalized_input.is_some());
+        assert!(saved.input_plan_id.is_some());
+    } else {
+        assert_eq!(saved.normalized_input, Some(input));
+        assert_eq!(saved.input_plan_id, Some(plan_id));
+        assert_eq!(saved.source.unwrap().shared_contract, Some(contract));
+    }
     assert_eq!(saved.resources["container:web"].id, Some(web_id));
     assert_eq!(saved.resources["container:redis"].id, Some(redis_id));
     assert!(!root.join("state.pending").exists());

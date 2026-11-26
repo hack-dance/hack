@@ -328,7 +328,9 @@ preflight. Raw runtime stderr and startup output are not configuration findings.
   `environment_delivery`, `native_runtime_setup`, `shared_source_grant_required`,
   `route_probe_required`, `too_many_bridges`, `gcloud_adc_grant_required` (consent),
   `gcloud_adc_mount_refused`, `native_source_over_limit` and
-  `native_source_unmeasured`. Runtime findings use the
+  `native_source_unmeasured`. `build_requires_opt_in` keeps its name from when
+  native builds were opt-in: it now means `HACK_NATIVE_BUILDS=0` turned builds off
+  for a service that builds an image. Runtime findings use the
   review's own diagnostic codes, for example `privileged_service` or
   `invalid_mount`, and `review_incompatible` when the review does not admit the
   project and gives no finding this version can show. A code this version has
@@ -397,7 +399,7 @@ Compose backend. Native support for them is planned after v5.
 | Foreign external network | Exact external names `hack-dev` and `hack-logging` map to fresh native-owned project bridges, including logical aliases; they do not attach to Docker networks or share cross-project container DNS. Native publishes routes independently of Docker’s global Caddy. Other external networks stay refused by name. A top-level network sets `external: true` or `external: {name: ...}`. A reviewed `x-hack-isolated: true` replacement is not external: it creates an owned internal bridge. A network that the selected adaptation (`HACK_NATIVE_ADAPTATION` or the committed `.hack/native/adaptation.json`; see [Native settings files](#native-settings-files)) lists in `isolatedNetworks` gets the same replacement, so it is not external either. |
 | Duplicate Hack network aliases | Two logical declarations name the same `hack-dev` or `hack-logging` identity. Keep one declaration and attach its services to that declaration; native refuses instead of silently splitting connectivity. |
 | External volume | A top-level volume sets `external: true` or `external: {name: ...}`. The native runtime only creates volumes it owns, and there is no native replacement for an external volume. |
-| Build outside the basic form | A service `build` is not the basic form that [`hack config import --dry-run`](../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`), or the service also sets `image`. Build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. With `HACK_NATIVE_BUILDS=1` (see below), only a build field other than `context`, `dockerfile`, `target` and `args`, or `image` together with `build`, counts; native build admission reviews the values of those four fields itself. |
+| Build outside the basic form | With native builds on (the default; see below), a service `build` field other than `context`, `dockerfile`, `target` and `args`, or `image` together with `build`. Native build admission reviews the values of those four fields itself. With `HACK_NATIVE_BUILDS=0`, any `build` outside the basic form that [`hack config import --dry-run`](../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`) counts, and so does `image` together with `build`; build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. |
 | Non-native platform | A service sets a `platform` other than `linux/arm64` or `linux/arm64/v8`, for example `linux/amd64`. The native VM runs Linux arm64. A missing or `null` `platform` is unset and passes. `linux/amd64` passes only for a service that the `HACK_NATIVE_ADAPTATION` selection opts in to [amd64 emulation](#amd64-emulation-with-rosetta-2); every other platform value stays on the Compose backend. |
 
 Native `hack up` and `hack restart` check for these features after selecting the
@@ -463,10 +465,14 @@ volumes. On the native backend it refuses before reading anything and names the
 rerun: `HACK_RUNTIME_BACKEND=compose hack config adopt --dry-run`. See
 [Legacy Compose adoption](../reference/native-compose-adoption.md).
 
-Native image-project `up` builds Compose `build:` services only when you opt in
-with `HACK_NATIVE_BUILDS=1` (and the usual `HACK_NATIVE_SHARED_SOURCE=1`). Without
-it, a `build:` service refuses before any hook or VM effect and names the variable.
-With it:
+Native image-project `up` builds Compose `build:` services by default (with the
+usual `HACK_NATIVE_SHARED_SOURCE=1`). `HACK_NATIVE_BUILDS=0` is the only off switch:
+with it, a `build:` service refuses before any hook or VM effect and names the
+variable. Only the exact value `0` turns builds off. Any other value keeps them on,
+including the earlier opt-in `HACK_NATIVE_BUILDS=1` and words such as `false`, `off`
+or `no`. Launches that do not read your shell profile, such as login autostart and
+the daemon's lifecycle restarts, do not see a `HACK_NATIVE_BUILDS=0` set only there,
+so they build. With builds on:
 
 - Accepted forms are `build: <context>` and a mapping of `context`, `dockerfile`,
   `target` and `args`. Paths follow Compose (the context is relative to the Compose
@@ -475,7 +481,7 @@ With it:
   interpolation, a list item without `=` (host variable inheritance), `null`, other
   build keys (`secrets`, `ssh`, `cache_from`, `platforms`, `network` and the rest),
   remote contexts and `image` together with `build` refuse. Values are never shown.
-  With `HACK_NATIVE_BUILDS=1`, `up` names the first such service and the field in the
+  With builds on, `up` names the first such service and the field in the
   three-line form, for example `! build  web uses build.ssh (SSH agent forwarding into
   a native build is not supported)`, then the Compose-backend command. Only Compose's
   own build field names are printed; any other key is not.
@@ -646,14 +652,14 @@ the same adaptation selection as native `up` without `--env` before it reports. 
 finds an external network, the message also names the `isolatedNetworks` selection
 above, which keeps that network's project on native.
 
-A basic build is not one of these features, but without `HACK_NATIVE_BUILDS=1`
-native image-project `up` refuses it, so doctor does not report it as ok then. On the
-native backend the check warns, names the variable and the next steps (set
-`HACK_NATIVE_BUILDS=1`, preview the authored native conversion with
-`hack config import --dry-run`, or select the Compose backend), and its JSON adds
-`composeBackend.nativeUpRefusals: ["basic_build"]`. On the Compose backend the same
-note is informational. With `HACK_NATIVE_BUILDS=1` set, doctor classifies builds the
-way native builds admit them and reports no basic-build refusal.
+A basic build is not one of these features. By default doctor classifies builds the
+way native builds admit them and reports no basic-build refusal. With
+`HACK_NATIVE_BUILDS=0`, native image-project `up` refuses a basic build, so doctor
+does not report it as ok then. On the native backend the check warns, names the
+variable and the next steps (unset `HACK_NATIVE_BUILDS`, preview the authored native
+conversion with `hack config import --dry-run`, or select the Compose backend), and
+its JSON adds `composeBackend.nativeUpRefusals: ["basic_build"]`. On the Compose
+backend the same note is informational.
 
 Publication control tokens are delivered to the relay through a one-shot inherited
 pipe (`--control-fd 0`), never through process arguments. The relay reads exactly
@@ -1491,7 +1497,7 @@ no tree and keeps its private `-repairing-` staging directory. Without a kept ar
 refuses (`provider_repair_unavailable`); prepare a fresh candidate home instead.
 
 The pins also name a BuildKit client (`buildx`, `darwin-arm64`), the image builder
-for native image builds (`HACK_NATIVE_BUILDS=1`). `runtime setup` installs it, as
+for native image builds (on by default). `runtime setup` installs it, as
 described above. The manual command stays for offline and manual homes:
 
 ```sh
@@ -1539,7 +1545,9 @@ record without hashing the builder, so bytes changed under an intact record stil
 read as `prepared` there; setup and builds verify the bytes. `hack doctor` on
 the native backend adds a `native image builder` check: a warning with the same
 remedy when the project has a `build:` service and the home has no image builder,
-or one whose record does not match the pinned release.
+or one whose record does not match the pinned release. With `HACK_NATIVE_BUILDS=0`
+the check is ok without asking the runtime: builds are off, so the project does not
+need the builder (`nativeBuilder.builder` is `not_checked`).
 Doctor never installs or downloads it, with `--fix` either.
 
 Every message about the image builder names one setup command: the `hack up`
@@ -1553,8 +1561,8 @@ path. Other printed commands are unchanged and name a candidate launcher by its
 full path ([printed commands](candidate-install.md#printed-commands-name-your-launcher)).
 
 `runtime build-image --request <file> --json` builds one image in the running
-runtime's engine with that client. Native `up` calls it for `build:` services when
-`HACK_NATIVE_BUILDS=1` is set; you can also run it directly. The request is a private
+runtime's engine with that client. Native `up` calls it for `build:` services unless
+`HACK_NATIVE_BUILDS=0` turns builds off; you can also run it directly. The request is a private
 JSON file (a singly linked, mode-`0600` file owned by you):
 
 ```json
@@ -1595,7 +1603,7 @@ JSON file (a singly linked, mode-`0600` file owned by you):
   `rebuild` always builds. The key (version 2) covers the Dockerfile and
   `.dockerignore` bytes, target, arguments and versions, and every context entry the
   ignore file lets the build read: its path, kind, permission bits, contents, symlink
-  target and hard-link group, as described with `HACK_NATIVE_BUILDS` above. It does
+  target and hard-link group, as described with native builds above. It does
   not cover network responses, cache mounts or a moved base-image tag.
 - The runtime must have network egress and the isolated build network that a runtime
   started by this version sets up. An older runtime refuses with
@@ -2639,6 +2647,74 @@ notices that its provider's process is gone and ends as for an ended boot, and
 with the recorded provider proven gone by its identity), say so in one line, and
 continue as after any pool stop (HACK-2579).
 
+A foreground `hack up` (or `hack restart`) watches its pool the same way
+(HACK-2096). When its provider VM dies or the pool stops under it, it prints which
+VM was lost (the provider's pid, or the boot that ended), that it ends with exit
+code 1, and what to run next, which depends on how far the start got:
+
+- Ready (the runtime reported the run's graph ready and the run mapping is
+  saved): `hack down --recover`, which retires the run with its data kept
+  (running `runtime recover` first when the provider exited), then `hack up`,
+  which starts it again.
+- Before any service was requested (while it resolved, reviewed, built or
+  pulled images, or selected the restore): for a run with a record (a resumed
+  stopped run, or a restart's old run), the same `hack down --recover`, then
+  `hack up`. A fresh `hack up` has no record yet, so the message names only
+  `hack up`.
+- After its services were requested and before it was ready and mapped: no
+  supported retirement yet (HACK-2714: `hack down --recover` and `hack up` refuse
+  it), so the message names neither command and says to keep the native home
+  for inspection. A plain `hack up` that returned at "Project started" is in
+  this stage until its services report ready: the runtime has not confirmed
+  that start yet.
+
+A `hack restart` lost while it checks and pulls the new images, before it
+stops anything, gets the ready-stage message: its old run is still the live
+run. The same sequence follows a lost `hack restart`: if its replacement was lost
+before the restart finished, its old run was already stopped, so `hack down
+--recover` also retires the pending restart (it says so in one line) and `hack
+up` resumes the retained data; a `hack restart` then would refuse, because
+nothing is running to restart. The replacement releases the restart's operation
+lock before it exits, so a later `hack restart` is never refused as "already
+owned". If that lock is still held when `hack down --recover` runs (by another
+restart, recovery or data removal), the down keeps the pending restart and names
+the lock in one line; if the pending restart cannot be read, the down still
+stops the run and says the restart was not retired. An `up.after` command still
+running when the VM is lost is not waited for: it can outlive the exit until it
+finishes.
+
+The start's own error often comes first: a runtime request, image preparation
+or the start's unwind fails within about a second of the provider's death
+(`process_identity_unavailable`). That error ends the start with the same
+message, chosen by how far the start got, not by which error fired, followed
+by the start's own error on one `(cause: …)` line. The pool record decides: a
+provider pid it names that is gone proves the loss in any phase, including a
+stop that died part way (`quiescing` or `stopping`); an error on a pool still
+recorded `running` with a live provider keeps its own message, even when it
+carries that code, because the runtime also reports it for failures on a
+healthy VM. A VM lost
+seconds after a `hack down` can also bring that down's removed containers back,
+stopped, on the next boot (the guest engine's removal had not reached its
+disk). Where the runtime can remove them without the run's foreground owner,
+`hack down --recover` removes them again, says so in one line, and then
+confirms the run stopped with its data kept; a plain `hack down` still refuses
+that state, and nothing is removed while any of them runs. A run whose cleanup
+goes through its foreground owner (a relay-enrolled run) cannot yet: the owner
+is gone, and the runtime has no owner-less removal that keeps data. `hack down
+--recover` then says so, names no command, and leaves the data and the home as
+they are for inspection; `hack up` refuses that run until the containers are
+gone. This is a runtime gap, not fixed here.
+
+The start exits within about a
+second once it is ready, or about 11 seconds later while it is still starting or
+stopping; earlier versions waited on the lost VM and never exited. Once the
+run's graph has stopped, the pool counts as idle and may stop under the start
+while it still runs `down.after` and its cleanup; that is not a lost VM, and the
+start finishes on its own. A lost-VM exit ends the process as a crash would: the
+run's receipt, finalization and recovery evidence stay for `hack down
+--recover`, and so does the advisory env fingerprint record (which `hack exec`
+uses to report stale env; the next `hack up` writes a new one).
+
 Each such recovery moves the run's earlier completed recovery record aside as history
 (`dead-owner-cleanup-retired-<digest>.json`; failed-start recoveries keep
 `interrupted-start-cleanup-retired-<selection>.json` the same way). A run keeps the
@@ -3536,8 +3612,10 @@ A component acknowledgement is not application readiness, and this recovery does
 not diagnose or fix an upstream engine panic. Changed or incomplete evidence
 remains available for inspection; do not remove journals or ownership pins to retry.
 
-Native `hack exec` and `hack run` make this request once with a 180-second frontend
-budget before selecting their command or reading managed environment values.
+Native `hack exec` and `hack run` make this request once with a 200-second frontend
+budget before selecting their command or reading managed environment values. Both
+the request and the owner's answer first wait up to 15 seconds for a briefly held
+provider lease instead of refusing `provider_busy` at once.
 If refresh refuses, the frontend preserves only reviewed native error identifiers
 such as `provider_busy` or `graph_owner_recovery: graph_dependency_rebind_incomplete`.
 Subprocess text and unknown codes remain omitted. These diagnostics do not confirm
@@ -4681,6 +4759,42 @@ alone never proves that services stopped.
 is still running, including when its frontend was lost. It does not treat a live
 owner as dead or bypass its cleanup checks.
 
+After a lost foreground `up`, the owner's own stop races the `down --recover`
+that follows (HACK-2097). When the authenticated stop finds the owner it selected
+as running already gone (`graph_owner_recovery`), `down --recover` (and plain
+`down`) selects the owner again. While the owner is still running or its
+publication reads `uncertain` (a retirement in progress), it waits up to 15 s,
+says so on one line, and selects again every 250 ms; it never treats such an
+owner as dead. Then it acts on what it finds. An owner that retired its
+publication after its own stop leaves a stopped receipt, which the command
+confirms (receipt `stopped-data-retained`, containers absent) without replaying
+cleanup or hooks. An owner that died before its stop is recovered with the
+same-boot `graph recover-live-owner` for the newly selected receipt, and one that
+died after its stop wrote the retained receipt is retired with
+`graph retire-unadmitted-owner`. In each case the lost frontend's shutdown is
+then recovered as below, so `hack up` starts the run again with its data. An
+owner still running or retiring when the wait ends is refused with the next
+step: wait for it to exit, then run the same command again. An owner that died
+during its own stop (receipt `cleanup-intent`) is refused by name: the same-boot
+recovery does not resume that stop, and the refusal points to the explicit
+`graph recover-cleanup` across a pool stop described below, whose `prepare`
+admits `cleanup-intent`. Refusals name the command that ran, `down` or
+`down --recover`. The sequence is checked as the TLA+ model
+`tests/models/tla/native-down-lost-frontend`.
+
+![down --recover after a lost foreground](../reference/native-down-lost-frontend.svg)
+
+If the runtime still cannot prove a same-boot recovery
+(`graph_live_owner_recovery`), the refusal keeps data and evidence and names the
+next step: wait for an owner that is still running or stopping, then run
+`hack down --recover` again. If it still refuses after the owner exited, the run
+cannot be recovered in this boot. A start that failed or never finished
+(`failed-retained`, `preparing`) or an owner that died during its own stop
+(`cleanup-intent`) uses the explicit `graph recover-cleanup` across a pool stop
+described below. That cleanup refuses a restore or restart in progress
+(`restoring`, `restarting`): an owner that died there has no supported
+retirement, and the refusal says so instead of naming it.
+
 `hack up` and `hack restart` refuse a run whose foreground publication is still
 present and name the next step: a running owner must be stopped with Ctrl-C or
 `hack down`; an owner that exited while its services were running is stopped by
@@ -5032,7 +5146,14 @@ the current owned project/branch mapping, preserves binary stdout/stderr and the
 command exit code, and never falls back to Compose. With piped input/output or
 `HACK_NO_INTERACTIVE=1`, it uses finite exec with a 30-second observation budget;
 a timeout may leave the command running and is not
-retried. When fresh values are delivered through private stdin, output that is still arriving
+retried. A ready foreground owner holds the provider lease briefly and often, so exec,
+and the dependency refresh it sends first, wait up to 15 seconds for another holder
+to release that lease before refusing with `provider_busy` naming the holder. For
+compose-backed exec the 30-second budget starts after that wait; an authored project's
+exec and one-off `run` count the wait inside their own 30-second budget. A compose
+project's one-off `run` waits the same way before its job is reserved, within one
+15-second bound for its selection and admission. A pending
+Ctrl-C or `hack down` ends the wait at once without starting the command. When fresh values are delivered through private stdin, output that is still arriving
 or already queued when that budget ends is read to the end, so a command that finished on a
 busy host returns its exit code (see below). `--env` and `--profile` changes are refused. A command name such as `bun`
 uses the selected container's PATH; no host PATH or implicit shell is used. For
@@ -5132,11 +5253,38 @@ On the built current-branch runtime and CLI, exercise authored and adopted servi
 Linux PTY and fake-Engine tests do not qualify these real Engine/VM effects.
 
 
-Managed HTTPS authority startup uses the same five-second provider-lock admission
-budget as ordinary pool startup. This lets a brief concurrent graph inspection
-finish before admission. Pool identity, socket ownership and certificate admission
-are checked only after the lock is acquired; expiry refuses with `provider_busy`
-and no authority is published. Serving and cleanup are never replayed.
+Managed HTTPS authority startup waits up to 30 seconds for the provider lock, as
+owned cleanup does. A routed run started with `hack up -d` takes its shared HTTPS
+lease at the owner's ready line, which is exactly when that run's first `hack exec`
+or `hack run` and a `hack down` arrive; a `hack down` holds the lock for its whole
+graph stop. The wait ends early once the authority's owner is gone: before every
+attempt it reads its stdin FIFO without blocking and stops at end of file, on macOS
+as on Linux. Pool identity,
+socket ownership and certificate admission are checked only after the lock is
+acquired; expiry refuses with `provider_busy` and no authority is published.
+Serving and cleanup are never replayed.
+
+The shared owner's graph reads for a lease acquire or release, and its idle check
+before retiring, read under the provider lock too. Each waits out a holder for up
+to 15 seconds (one deadline per verification) instead of refusing at once, so a
+command or a stop during route warm-up no longer makes the acquire refuse (which
+stopped the whole run) or the release unconfirmed. Only `provider_busy` is
+retried; a holder that outlasts the wait is still refused. Every frontend that
+connects to a starting shared owner waits for its whole startup (about 55
+seconds; a recorded startup failure ends the wait at once), including a second
+project that found the owner already starting. A frontend's cleanup waits for an
+acquisition still in flight before it releases or recovers the lease, so a
+`hack down` during warm-up stops the run with confirmed cleanup.
+
+A graph stop can hold the provider lock longer than the authority's 30 seconds,
+for example for a service with a long `stop_grace_period`. The shared owner's
+startup then fails with `authority-ready: provider_busy`, having admitted no
+lease. When that run's lease is recovered (by its frontend after the graph
+stopped, or by `hack down`), the failed owner generation is retired: its
+owner directory, diagnostic included, moves beside a retired-owner record
+(`native-https/released-leases/<generation>/failed-owner`), the release is still verified
+against the stopped graph, and the next `up` starts a new shared owner. `down`
+does not fail and the next `up` needs no recovery because of it.
 
 An authority child that exits before readiness can supply a bounded structured
 native error code without exposing its stderr. Malformed, oversized or missing
@@ -5151,7 +5299,9 @@ reviewed startup stage and an allowlisted native error code; child output, paths
 and application values are omitted. If lease cleanup also fails, the original
 acquisition diagnostic remains visible alongside the unconfirmed cleanup status.
 This record is diagnostic evidence only: it does not acknowledge retirement or
-permit a replacement owner. A missing record (including a helper crash before
+permit a replacement owner. The one exception is the expired authority lease wait
+described above (`authority-ready: provider_busy` with child cleanup confirmed and
+no endpoint published), which a lease recovery retires. A missing record (including a helper crash before
 publication) leaves the cause unknown. Preserve the retained owner and finalization
 records for inspection; do not delete them to force another startup.
 

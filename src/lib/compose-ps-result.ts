@@ -201,6 +201,49 @@ export function composeEnvValuesToRedact(opts: {
 }
 
 /**
+ * Values the project's env layers declare non-secret, under names that do not
+ * look secret (see {@link sensitiveInheritedValues}). An entry without
+ * metadata counts as secret, and a value that any secret entry also holds is
+ * left out, so the set errs toward redaction.
+ *
+ * Quoting callers subtract these from {@link composeEnvValuesToRedact} for a
+ * multi-line diagnostic tail, where redacting a port or a service-like user
+ * name (`Bind for 0.0.0.0:3000`, `shop-postgres-1`) hides what the tail is
+ * there to show.
+ */
+export function composeEnvPlainValues(opts: {
+  readonly scopes: Iterable<{
+    readonly env: Readonly<Record<string, string>> | undefined;
+    readonly metadata:
+      | Readonly<Record<string, { readonly secret: boolean } | undefined>>
+      | undefined;
+  }>;
+}): string[] {
+  const plain = new Set<string>();
+  const secret = new Set<string>();
+  for (const scope of opts.scopes) {
+    for (const [key, value] of Object.entries(scope.env ?? {})) {
+      const entry = scope.metadata?.[key];
+      if (entry?.secret === false && !SENSITIVE_ENV_NAME.test(key)) {
+        plain.add(value);
+      } else {
+        secret.add(value);
+      }
+    }
+  }
+  return [...plain].filter((value) => !secret.has(value));
+}
+
+/** `redactValues` without the `plainValues` of {@link composeEnvPlainValues}. */
+export function composeQuoteRedactValues(opts: {
+  readonly redactValues: readonly string[];
+  readonly plainValues: readonly string[] | undefined;
+}): string[] {
+  const plain = new Set(opts.plainValues ?? []);
+  return opts.redactValues.filter((value) => !plain.has(value));
+}
+
+/**
  * Parse Compose ps JSON strictly. Compose v2.21+ prints one object per line;
  * older v2 releases print one JSON array. Returns null when any non-empty
  * line is not an object or an array of objects.
@@ -354,12 +397,28 @@ export function engineErrorLine(opts: {
   readonly redactValues?: Iterable<string>;
 }): string | null {
   const source = cleanLines(opts.stderr).find(
-    (line) => !isWarningLine(line) && opts.matches(line.toLowerCase())
+    (line) => !isComposeWarningLine(line) && opts.matches(line.toLowerCase())
   );
   if (source === undefined) {
     return null;
   }
-  let line = source.replace(
+  return redactComposeOutputLine({
+    line: source,
+    redactValues: opts.redactValues,
+  });
+}
+
+/**
+ * One line of Docker or Compose client output made safe to quote: URL
+ * credentials and each `redactValues` entry (4 characters or longer, longest
+ * first) become `[REDACTED]`, and the line is cut to a bounded length. The
+ * caller removes escapes and control characters first.
+ */
+export function redactComposeOutputLine(opts: {
+  readonly line: string;
+  readonly redactValues?: Iterable<string>;
+}): string {
+  let line = opts.line.replace(
     URL_USERINFO,
     (_match, scheme: string) => `${scheme}[REDACTED]@`
   );
@@ -374,14 +433,14 @@ export function engineErrorLine(opts: {
     : line;
 }
 
+/** Compose/Docker warning lines: `WARN[0000] …`, `level=warning …`, `warning: …`. */
+export function isComposeWarningLine(line: string): boolean {
+  return WARNING_LINE.test(line);
+}
+
 function cleanLines(text: string): string[] {
   return text
     .split("\n")
     .map((raw) => raw.replace(ANSI_ESCAPE, "").trim())
     .filter((line) => line.length > 0);
-}
-
-/** Compose/Docker warning lines: `WARN[0000] …`, `level=warning …`, `warning: …`. */
-function isWarningLine(line: string): boolean {
-  return WARNING_LINE.test(line);
 }

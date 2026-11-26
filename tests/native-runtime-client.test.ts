@@ -197,6 +197,8 @@ if (process.argv.includes("plan-change-unsafe")) { console.error(JSON.stringify(
 if (process.argv.includes("structured")) { console.error(JSON.stringify({code:"source_conflict",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("foreground-stopped")) { console.error(JSON.stringify({code:"native_graph_foreground",cause_code:"runtime_not_running",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("foreground-other")) { console.error(JSON.stringify({code:"native_graph_foreground",cause_code:"engine_protocol",message:"synthetic-secret-diagnostic"})); process.exit(23); }
+if (process.argv.includes("foreground-run-lease")) { console.error(JSON.stringify({code:"native_graph_foreground",cause_code:"graph_authored_run_lease_busy",message:"synthetic-secret-diagnostic"})); process.exit(23); }
+if (process.argv.includes("foreground-not-started")) { console.error(JSON.stringify({code:"native_graph_foreground",cause_code:"graph_authored_command_not_started",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("foreground-exec-lease")) { console.error(JSON.stringify({code:"native_graph_foreground",cause_code:"graph_authored_exec_lease_busy",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("one-off-fail")) { console.error(JSON.stringify({code:"graph_one_off_failed",cause_code:"graph_one_off_cancelled",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("one-off-unsafe")) { console.error(JSON.stringify({code:"graph_one_off_failed",cause_code:"synthetic-secret-diagnostic",message:"synthetic-secret-diagnostic"})); process.exit(23); }
@@ -1266,6 +1268,17 @@ bunTest.each([
     argument: "foreground-exec-lease",
     stopped: false,
     cause: "graph_authored_exec_lease_busy",
+  },
+  // HACK-2742: the owner's run lease and refused-check codes.
+  {
+    argument: "foreground-run-lease",
+    stopped: false,
+    cause: "graph_authored_run_lease_busy",
+  },
+  {
+    argument: "foreground-not-started",
+    stopped: false,
+    cause: "graph_authored_command_not_started",
   },
 ])(
   "authored control failure preserves only its closed causes: $argument",

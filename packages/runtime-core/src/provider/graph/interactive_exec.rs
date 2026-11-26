@@ -15,6 +15,19 @@ pub struct Options<'a> {
     pub expected_container: Option<&'a str>,
     pub expected_generation: Option<&'a str>,
 }
+/// Send this process's lease-wait report (`hack.lease-wait:begin <holder>`, then
+/// `hack.lease-wait:end`) to `sink` instead of stderr, which an interactive exec
+/// shares with the user's terminal (HACK-2742). False if a sink was already set.
+pub fn report_lease_waits_to(sink: Box<dyn Fn(&str) + Send + Sync>) -> bool {
+    crate::provider::state::report_lease_waits_to(sink)
+}
+
+/// The closed holder token an expired lease wait names, for the value-free
+/// refusal report (HACK-2742). `None` for any other refusal or an unknown holder.
+pub fn lease_refusal_holder(error: &CandidateError) -> Option<&'static str> {
+    crate::provider::state::lease_refusal_holder(error)
+}
+
 fn refused() -> CandidateError {
     CandidateError::new(
         "interactive_exec_refused",

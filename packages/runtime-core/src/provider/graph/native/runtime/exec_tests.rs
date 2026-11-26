@@ -177,48 +177,142 @@ fn finite_exec_refuses_changed_member_or_data_before_command_and_withholds_resta
     }
 }
 
-/// HACK-2739: only the owner's expired lease wait gets the pre-effect code, and
-/// that code passes the requester's closed reply-code filter unchanged.
+/// HACK-2739 and HACK-2742: only the owner's expired lease wait and its own
+/// refused check get pre-effect codes, and those codes pass the requester's
+/// closed reply-code filter unchanged.
 #[test]
-fn the_owners_exec_lease_refusal_has_its_own_pre_effect_code() {
-    let mapped = exec::owner_lease_refusal(CandidateError::new("provider_busy", "held"));
-    assert_eq!(mapped.code, exec::OWNER_EXEC_LEASE_BUSY);
-    assert!(
-        (1..=64).contains(&mapped.code.len())
-            && mapped
-                .code
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-    );
+fn the_owners_wait_refusals_have_their_own_pre_effect_codes() {
+    use exec::{OwnerCommand, owner_wait_refusal};
+    let busy = || CandidateError::new("provider_busy", "held");
+    let cases = [
+        (
+            owner_wait_refusal(busy(), false, OwnerCommand::Exec),
+            exec::OWNER_EXEC_LEASE_BUSY,
+        ),
+        (
+            owner_wait_refusal(busy(), false, OwnerCommand::Run),
+            exec::OWNER_RUN_LEASE_BUSY,
+        ),
+        // A refused check wins: the wait ended because of it, before any effect.
+        (
+            owner_wait_refusal(busy(), true, OwnerCommand::Run),
+            exec::OWNER_COMMAND_NOT_STARTED,
+        ),
+        (
+            owner_wait_refusal(refused(), true, OwnerCommand::Exec),
+            exec::OWNER_COMMAND_NOT_STARTED,
+        ),
+    ];
+    for (mapped, code) in cases {
+        assert_eq!(mapped.code, code);
+        assert!(
+            (1..=64).contains(&mapped.code.len())
+                && mapped
+                    .code
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        );
+    }
     for code in [
         "provider_acquisition_cancelled",
         "native_graph_foreground",
         "managed_environment_expired",
+        "runtime_not_running",
     ] {
-        assert_eq!(
-            exec::owner_lease_refusal(CandidateError::new(code, "kept")).code,
-            code
-        );
+        for command in [OwnerCommand::Exec, OwnerCommand::Run] {
+            assert_eq!(
+                owner_wait_refusal(CandidateError::new(code, "kept"), false, command).code,
+                code
+            );
+        }
     }
 }
 
-/// HACK-2739: the owner's own wait, on a real flock held as a project stop, ends in
-/// that code (scaled: a 300 ms budget for the owner's 15 s bound).
+/// HACK-2739 and HACK-2742: the owner's own wait, on a real flock held as a
+/// project stop, ends in each command's lease code (scaled: a 300 ms budget for
+/// the owner's 15 s bound).
 #[cfg(target_os = "macos")]
 #[test]
-fn the_owners_exec_lease_wait_expires_with_the_pre_effect_code() {
+fn the_owners_lease_wait_expires_with_each_commands_pre_effect_code() {
     use crate::provider::engine::command_lease_tests::{hold_lease_as_project_stop, running_pool};
     let (_home, candidate) = running_pool();
     let (release, holder) = hold_lease_as_project_stop(&candidate, Duration::from_secs(30));
-    let refused = Engine::connect_command_until(
-        &candidate,
-        Instant::now() + Duration::from_millis(300),
-        &|| Ok(()),
-    )
-    .map_err(exec::owner_lease_refusal)
-    .err()
-    .unwrap();
-    assert_eq!(refused.code, exec::OWNER_EXEC_LEASE_BUSY);
+    for (command, code) in [
+        (exec::OwnerCommand::Exec, exec::OWNER_EXEC_LEASE_BUSY),
+        (exec::OwnerCommand::Run, exec::OWNER_RUN_LEASE_BUSY),
+    ] {
+        let refused = exec::owner_command_engine(
+            &candidate,
+            Instant::now() + Duration::from_millis(300),
+            &|| Ok(()),
+            command,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(refused.code, code);
+    }
     release.send(()).unwrap();
     holder.join().unwrap();
+}
+
+/// HACK-2742: a pending signal or `hack down` (the owner's check refusing) ends the
+/// owner's wait within one backoff step, and the answer says nothing started
+/// instead of the plain `refused()` that the CLI reported as "unconfirmed". A
+/// check that refuses before the wait gets the same code.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_refused_owner_check_ends_the_wait_as_not_started() {
+    use crate::provider::engine::command_lease_tests::{
+        hold_lease_as_project_stop, refuses_after, running_pool,
+    };
+    let (_home, candidate) = running_pool();
+    let (release, holder) = hold_lease_as_project_stop(&candidate, Duration::from_secs(30));
+    for command in [exec::OwnerCommand::Exec, exec::OwnerCommand::Run] {
+        let started = Instant::now();
+        let guard = refuses_after(Duration::from_millis(200), "native_graph_foreground");
+        let ended = exec::owner_command_engine(
+            &candidate,
+            started + Duration::from_secs(30),
+            &guard,
+            command,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(ended.code, exec::OWNER_COMMAND_NOT_STARTED);
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the check did not end the wait: {:?}",
+            started.elapsed()
+        );
+        let at_once = exec::owner_command_engine(
+            &candidate,
+            Instant::now() + Duration::from_secs(30),
+            &|| Err(refused()),
+            command,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(at_once.code, exec::OWNER_COMMAND_NOT_STARTED);
+    }
+    release.send(()).unwrap();
+    holder.join().unwrap();
+}
+
+/// HACK-2742: once the lease is free, a later failure keeps its own code (this
+/// fixture's post-acquisition liveness refusal), so only the wait is relabelled.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_failure_after_acquisition_keeps_its_code() {
+    use crate::provider::engine::command_lease_tests::{PAST_ACQUISITION, running_pool};
+    let (_home, candidate) = running_pool();
+    let refused = exec::owner_command_engine(
+        &candidate,
+        Instant::now() + Duration::from_secs(30),
+        &|| Ok(()),
+        exec::OwnerCommand::Run,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(refused.code, PAST_ACQUISITION, "{}", refused.message);
 }

@@ -1,4 +1,3 @@
-import { noteNativeExitConfirmed } from "../lib/background-command/native-exit.ts";
 import { isRecord } from "../lib/guards.ts";
 import { keys } from "../lib/native-compose-private-state.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
@@ -18,10 +17,8 @@ import {
   withPinnedRuntimeBinary,
 } from "./native-authored-runtime-binary.ts";
 import {
-  isNativeCommandLeaseRefusal,
-  isNativeOwnerAuthoredExecLeaseRefusal,
-  NATIVE_COMMAND_LEASE_WAIT_SECONDS,
-  nativeCommandLeaseRefusal,
+  NATIVE_AUTHORED_COMMAND_REQUEST_TIMEOUT_MS,
+  nativeAuthoredCommandNotRun,
   nativeCommandLeaseWaitReporter,
 } from "./native-command-lease.ts";
 import {
@@ -42,44 +39,7 @@ const CONTAINER = /^[a-f0-9]{64}$/;
  * and a 5 s margin. It was 45 s before that wait.
  */
 export const NATIVE_AUTHORED_EXEC_REQUEST_TIMEOUT_MS =
-  (NATIVE_COMMAND_LEASE_WAIT_SECONDS + 5 + 40 + 5) * 1000;
-
-/**
- * The plain refusal for a request whose lease wait expired before anything ran
- * (HACK-2739), or undefined. Two refusals are pre-effect: the requesting
- * process's own wait, which ends before anything is sent (a raw
- * `provider_busy` that names the holder), and the owner's own wait, which is
- * the first thing the owner does for the exec (its code, forwarded as the
- * cause of `native_graph_foreground`, names no holder). Every other failure
- * keeps the unconfirmed report. No guest process exists for a command that
- * never ran, so this also releases a native background command's admission
- * slot, as the Compose exec does.
- */
-async function authoredExecLeaseRefusal(
-  error: unknown
-): Promise<NativeRuntimeRequestError | undefined> {
-  if (
-    !(
-      isNativeCommandLeaseRefusal(error) ||
-      isNativeOwnerAuthoredExecLeaseRefusal(error)
-    )
-  ) {
-    return;
-  }
-  const refusal = nativeCommandLeaseRefusal({
-    nativeMessage: isNativeCommandLeaseRefusal(error)
-      ? error.nativeMessage
-      : undefined,
-    command: "hack exec",
-    stage: "authored",
-    // The wire codes as they arrived: the requester's raw `provider_busy`, or
-    // the owner's code as the cause of `native_graph_foreground`.
-    nativeCode: error.nativeCode,
-    nativeCauseCode: error.nativeCauseCode,
-  });
-  await noteNativeExitConfirmed();
-  return refusal;
-}
+  NATIVE_AUTHORED_COMMAND_REQUEST_TIMEOUT_MS;
 
 function refused(): never {
   throw new Error(
@@ -291,7 +251,7 @@ export async function nativeAuthoredProjectExec(input: {
         } catch (error) {
           // Returned, not thrown: the held saved-status owner reports any
           // failure thrown inside it as an unconfirmed artifact failure.
-          const notRun = await authoredExecLeaseRefusal(error);
+          const notRun = await nativeAuthoredCommandNotRun(error, "hack exec");
           if (notRun) {
             return notRun;
           }

@@ -293,11 +293,12 @@ pub(in crate::provider::graph::native) fn execute(
     if !selected.valid() {
         return Err(refused());
     }
-    guard()?;
     let deadline = Instant::now() + Duration::from_secs(30);
     // The owner loop's guard (signals, publication, pin) runs before every lease
-    // attempt, and the wait counts against this 30 s budget (HACK-2669).
-    let engine = Engine::connect_command_until(candidate, deadline, guard)?;
+    // attempt, and the wait counts against this 30 s budget (HACK-2669). The
+    // requester waited out a longer holder before it sent this, and the wait's
+    // failures carry pre-effect codes (HACK-2742): no record or container exists yet.
+    let engine = exec::owner_command_engine(candidate, deadline, guard, exec::OwnerCommand::Run)?;
     let (receipt, root) = journal::load(
         candidate,
         expected.review.scope().run,

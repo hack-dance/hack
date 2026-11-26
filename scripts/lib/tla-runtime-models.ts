@@ -2382,6 +2382,38 @@ const contracts: readonly ModelContract[] = [
         invariant: "NeverRanAfterStop",
         fields: ['report = "ran"', "sent = TRUE", "held = 31"],
       },
+      {
+        // HACK-2742: the owner's check (a pending signal, its own
+        // `hack down`) may end its wait. That refusal sent nothing and is
+        // reported as not run; "unconfirmed" still only follows a send. The
+        // same shape covers authored `hack run` and interactive `hack exec`.
+        name: "authored-cancel",
+        module: "ExecStopWait",
+        negative: false,
+        states: 335,
+      },
+      {
+        // The report before the fix: the owner's plain refusal read as
+        // "unconfirmed" although nothing was sent.
+        name: "authored-cancel-old",
+        module: "ExecStopWait",
+        negative: true,
+        invariant: "UnconfirmedOnlyAfterSend",
+        fields: [
+          "cancelled = TRUE",
+          'phase = "refused"',
+          'report = "unconfirmed"',
+          "sent = FALSE",
+        ],
+      },
+      {
+        // The owner's check ending its wait is reachable, as not run.
+        name: "authored-cancel-reach",
+        module: "ExecStopWait",
+        negative: true,
+        invariant: "NeverCancelled",
+        fields: ["cancelled = TRUE", 'report = "not-run"', "sent = FALSE"],
+      },
     ],
   },
   {

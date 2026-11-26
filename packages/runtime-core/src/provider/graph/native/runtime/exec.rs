@@ -75,16 +75,86 @@ impl ServiceExec {
 /// `provider_busy` from anywhere else keeps its own code.
 pub(super) const OWNER_EXEC_LEASE_BUSY: &str = "graph_authored_exec_lease_busy";
 
-/// Maps only the owner's expired lease wait to [`OWNER_EXEC_LEASE_BUSY`].
-pub(super) fn owner_lease_refusal(error: CandidateError) -> CandidateError {
-    if error.code == "provider_busy" {
+/// [`OWNER_EXEC_LEASE_BUSY`] for an authored one-off `hack run` (HACK-2742).
+pub(super) const OWNER_RUN_LEASE_BUSY: &str = "graph_authored_run_lease_busy";
+
+/// The owner's answer code when its own check ended an authored command before
+/// it took the lease (HACK-2742): a pending signal (its `hack down`, a Ctrl-C of
+/// the foreground owner), or a changed publication or pin. The check runs before
+/// the wait and before every lease attempt, so nothing was read, touched or
+/// started. Without this code the owner's plain `refused()` reached the CLI as
+/// "unconfirmed".
+pub(super) const OWNER_COMMAND_NOT_STARTED: &str = "graph_authored_command_not_started";
+
+/// The owner's pre-effect wait code that `code` names, if it is one.
+pub(in crate::provider::graph::native) fn owner_pre_effect_code(
+    code: &str,
+) -> Option<&'static str> {
+    [
+        OWNER_EXEC_LEASE_BUSY,
+        OWNER_RUN_LEASE_BUSY,
+        OWNER_COMMAND_NOT_STARTED,
+    ]
+    .into_iter()
+    .find(|known| *known == code)
+}
+
+/// Which authored command the owner answers, for its lease code.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum OwnerCommand {
+    /// Finite and interactive `hack exec`.
+    Exec,
+    /// One-off `hack run`.
+    Run,
+}
+
+/// The pre-effect code for a failure of the owner's own wait: its check refused
+/// (`guard_refused`), or the lease stayed busy. Any other failure keeps its code.
+pub(super) fn owner_wait_refusal(
+    error: CandidateError,
+    guard_refused: bool,
+    command: OwnerCommand,
+) -> CandidateError {
+    if guard_refused {
         CandidateError::new(
-            OWNER_EXEC_LEASE_BUSY,
-            "The owner's authored exec could not acquire the provider lease; nothing ran.",
+            OWNER_COMMAND_NOT_STARTED,
+            "The owner's check ended an authored command before it took the provider lease; nothing ran.",
+        )
+    } else if error.code == "provider_busy" {
+        CandidateError::new(
+            match command {
+                OwnerCommand::Exec => OWNER_EXEC_LEASE_BUSY,
+                OwnerCommand::Run => OWNER_RUN_LEASE_BUSY,
+            },
+            "The owner's authored command could not acquire the provider lease; nothing ran.",
         )
     } else {
         error
     }
+}
+
+/// The owner's guard and lease wait for one authored command, with their
+/// pre-effect codes (HACK-2739, HACK-2742). The guard runs first, then before
+/// every lease attempt and once after acquisition, so a pending signal ends the
+/// wait within one backoff step. The wait counts against the command's fixed
+/// `deadline` and is capped at `COMMAND_LEASE_WAIT`: it runs on the owner's only
+/// loop, and the requester has already waited out a longer holder before it
+/// sent the request. Nothing before the returned engine has an effect.
+#[cfg(target_os = "macos")]
+pub(super) fn owner_command_engine<'a>(
+    candidate: &'a Candidate,
+    deadline: Instant,
+    guard: &dyn Fn() -> Result<(), CandidateError>,
+    command: OwnerCommand,
+) -> Result<Engine<'a>, CandidateError> {
+    let guard_refused = Cell::new(false);
+    let checked = || {
+        guard().inspect_err(|_| guard_refused.set(true))?;
+        Ok(())
+    };
+    checked().map_err(|error| owner_wait_refusal(error, true, command))?;
+    Engine::connect_command_until(candidate, deadline, &checked)
+        .map_err(|error| owner_wait_refusal(error, guard_refused.get(), command))
 }
 
 #[cfg(target_os = "macos")]
@@ -97,14 +167,12 @@ pub(in crate::provider::graph::native) fn execute(
     if !selected.valid() {
         return Err(refused());
     }
-    guard()?;
     let deadline = Instant::now() + Duration::from_secs(30);
     // The owner loop's guard (signals, publication, pin) runs before every lease
     // attempt, and the wait counts against this 30 s budget (HACK-2669). The
     // requester already waited out a longer holder before it sent this
     // (HACK-2739), so this wait only covers a holder that took the lease since.
-    let engine =
-        Engine::connect_command_until(candidate, deadline, guard).map_err(owner_lease_refusal)?;
+    let engine = owner_command_engine(candidate, deadline, guard, OwnerCommand::Exec)?;
     let (receipt, _) = journal::load(
         candidate,
         expected.review.scope().run,
@@ -211,11 +279,12 @@ pub(in crate::provider::graph::native) fn interactive(
     if !selected.valid() {
         return Err(refused());
     }
-    guard()?;
     let deadline = Instant::now() + Duration::from_secs(30);
-    // The owner loop's guard (signals, publication, pin) runs before every lease
-    // attempt, and the wait counts against this 30 s budget (HACK-2669).
-    let engine = Engine::connect_command_until(candidate, deadline, guard)?;
+    // The owner loop's guard (signals, publication, pin, client disconnect) runs
+    // before every lease attempt, and the wait counts against this 30 s budget
+    // (HACK-2669). Its failures are pre-intent: no session receipt exists yet,
+    // so they carry their own codes (HACK-2742).
+    let engine = owner_command_engine(candidate, deadline, guard, OwnerCommand::Exec)?;
     let (receipt, _) = journal::load(
         candidate,
         expected.review.scope().run,

@@ -666,6 +666,13 @@ pub fn one_off(
     if !selected.valid() {
         return Err(refused());
     }
+    // HACK-2742: as for exec (HACK-2739), wait out another project's stop here,
+    // before anything is sent; the owner's own wait stays short.
+    #[cfg(target_os = "macos")]
+    crate::provider::lifecycle::await_free_command_lease(
+        candidate,
+        Instant::now() + crate::provider::lifecycle::COMMAND_REQUEST_LEASE_WAIT,
+    )?;
     request_selected(candidate, run, Action::Run, None, None, Some(selected))
 }
 /// The live owner creates and starts under its normal guards, then returns the
@@ -698,6 +705,15 @@ pub(in crate::provider) fn interactive(
     {
         return Err(refused());
     }
+    // HACK-2742: wait out another project's stop before anything is sent, as a
+    // finite exec does (HACK-2739). The frontend's leash ends the wait. A
+    // refusal here comes before dispatch, so it carries no session.
+    #[cfg(target_os = "macos")]
+    crate::provider::lifecycle::await_free_command_lease_checked(
+        candidate,
+        Instant::now() + crate::provider::lifecycle::COMMAND_REQUEST_LEASE_WAIT,
+        &|| leash.check(),
+    )?;
     let mut stream = pin.connect()?;
     let _lifetime = leash.watch_control(&stream)?;
     let input = Request {
@@ -744,6 +760,10 @@ pub(in crate::provider) fn interactive(
             result.map_err(|_: CandidateError| CandidateError::new("session_cleanup_uncertain", "Interactive session handoff changed; the session was retained and no start was replayed.").with_session(&session.session))
         }
         Outcome::InteractiveRefused { session } if session == options.session => Err(CandidateError::new("session_cleanup_uncertain", "Interactive admission ended after its durable intent; the session was retained and no start was replayed.").with_session(&session)),
+        // HACK-2742: the owner's pre-effect wait refusals keep their own code,
+        // because the interactive report carries only one code and the CLI
+        // reads it as "nothing ran". Every other pre-intent refusal is wrapped.
+        Outcome::Refused { code, .. } if descriptor.is_none() && runtime::owner_pre_effect_code(&code).is_some() => Err(CandidateError::new(runtime::owner_pre_effect_code(&code).ok_or_else(refused)?, "The owner refused the interactive exec before it started; nothing ran.")),
         Outcome::Refused { code, .. } if descriptor.is_none() => Err(refused().with_cause_code(code)),
         _ => Err(uncertain(refused())),
     }

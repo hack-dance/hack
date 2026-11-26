@@ -223,9 +223,40 @@ pub(super) fn wait_for_acquisition<T>(
             LEASE_WAIT_REPORT_AFTER,
             &mut |line| eprintln!("{line}"),
         )
+    } else if let Some(sink) = LEASE_WAIT_SINK.get() {
+        wait_reporting(
+            deadline,
+            before_attempt,
+            acquire,
+            expired,
+            LEASE_WAIT_REPORT_AFTER,
+            &mut |line| sink(line),
+        )
     } else {
         wait_quietly(deadline, before_attempt, acquire, expired)
     }
+}
+
+type LeaseWaitSink = Box<dyn Fn(&str) + Send + Sync>;
+
+/// Where this process's lease-wait report goes when its stderr is not the
+/// frontend's (HACK-2742). `graph exec-interactive` inherits the user's terminal
+/// as stderr, so it sends the same two report lines to its private control
+/// channel instead, where the CLI prints the one progress line. Set at most once,
+/// before any wait; the environment's stderr report takes precedence.
+static LEASE_WAIT_SINK: std::sync::OnceLock<LeaseWaitSink> = std::sync::OnceLock::new();
+
+/// Install [`LEASE_WAIT_SINK`]; false if one was already installed.
+pub(crate) fn report_lease_waits_to(sink: LeaseWaitSink) -> bool {
+    LEASE_WAIT_SINK.set(sink).is_ok()
+}
+
+/// The closed holder token a lease refusal names (`project-stop`, …), or `None`
+/// for any other error or an unknown holder.
+pub(crate) fn lease_refusal_holder(error: &CandidateError) -> Option<&'static str> {
+    (error.code == "provider_busy")
+        .then(|| holder_token(&error.message))
+        .filter(|token| *token != "unknown")
 }
 
 /// How long a reporting waiter waits out contention before it says so: longer

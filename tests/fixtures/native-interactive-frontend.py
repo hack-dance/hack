@@ -91,7 +91,7 @@ root = sys.argv[1]
 protected_keys = json.loads(sys.argv[2])
 command = sys.argv[3:]
 assert all(os.environ.get(key) == "synthetic-parent-key-canary" for key in protected_keys)
-for mode in ("normal", "child-kill", "frontend-kill", "cancel", "refused", "old-launcher", "retained", "retained-zero", "cleared"):
+for mode in ("normal", "child-kill", "frontend-kill", "cancel", "refused", "old-launcher", "retained", "retained-zero", "cleared", "native-lease", "native-not-started"):
     for name in ("reader.pid", "reader.closed", "session.queried", "session.cleared"):
         try:
             os.unlink(os.path.join(root, name))
@@ -172,6 +172,18 @@ for mode in ("normal", "child-kill", "frontend-kill", "cancel", "refused", "old-
             assert b"session_cleanup_uncertain" not in output, repr(output)
             if mode in ("normal", "retained", "retained-zero"):
                 assert output == b"child-ready\n", repr(output)
+        elif mode in ("native-lease", "native-not-started"):
+            # HACK-2742: one progress line from the fd-3 event, then a refusal
+            # that says nothing ran; no session was created or queried.
+            assert not os.path.exists(os.path.join(root, "session.queried"))
+            assert output.count(b"Waiting for the native runtime lock, held by a project stop.") == 1, repr(output)
+            assert b"nothing ran." in output, repr(output)
+            assert b"could not confirm admission or completion" not in output, repr(output)
+            assert b"session_cleanup_uncertain" not in output, repr(output)
+            if mode == "native-lease":
+                assert b"Holder: project stop." in output, repr(output)
+            else:
+                assert b"graph_authored_command_not_started" in output, repr(output)
         elif mode == "cleared":
             assert b"No receipt is currently retained for session" in output
             assert b"without a result" not in output
@@ -242,4 +254,4 @@ for selection, expected in (("foreground", True), ("disabled", False),
         control.close()
         os.close(master)
         os.close(slave)
-print("Frontend PTY: nine lifetime and five selection cases passed")
+print("Frontend PTY: eleven lifetime and five selection cases passed")

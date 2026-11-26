@@ -40,6 +40,17 @@ with open("reader.pid", "w") as file:
     file.write(str(os.getpid()))
 os.write(1, b"child-ready\n")
 mode = sys.argv[-1]
+if mode in ("native-lease", "native-not-started"):
+    # HACK-2742: an authored exec's lease-wait event comes first on fd 3, then
+    # its pre-dispatch refusal (no session) with the holder's closed token.
+    assert "--native" in sys.argv
+    control.sendall(json.dumps({"version": 1, "event": "lease-wait", "holder": "project-stop"}).encode() + b"\n")
+    if mode == "native-lease":
+        report = {"version": 1, "outcome": "refused", "code": "provider_busy", "session": None, "holder": "project-stop"}
+    else:
+        report = {"version": 1, "outcome": "refused", "code": "graph_authored_command_not_started", "session": None}
+    control.sendall(json.dumps(report).encode() + b"\n")
+    sys.exit(1)
 if mode in ("refused", "old-launcher"):
     code = "graph_service_exec_launcher" if mode == "old-launcher" else "interactive_exec_refused"
     control.sendall(json.dumps({"version": 1, "outcome": "refused", "code": code, "session": None}).encode() + b"\n")

@@ -26,6 +26,7 @@ import {
   loadNativeRestartIntent,
   type NativeRestartIntent,
   removeNativeRestartIntent,
+  retireCleanedNativeRestart,
   saveNativeProjectRun,
   saveNativeRestartIntent,
   withNativeRestartLock,
@@ -2998,5 +2999,68 @@ test("aggregate private delivery refuses restart before stopping the current gra
       expect(f.events).toContain("start");
     }
     expect(String(error)).not.toContain("synthetic-shell-private-");
+  }
+});
+
+/**
+ * HACK-2096: a replacement start that loses its VM ends the process from its
+ * pool watch, so the restart's `finally` never runs. Before, that left the
+ * owner-less operation lock held for good: every later `hack restart` refused
+ * as "already owned or was interrupted", and `hack up` refused the pending
+ * intent. The start now releases the lock (`releaseLock`) before it exits; the
+ * cleaned intent stays until `hack down --recover` retires it with the run.
+ */
+test("a replacement that ends the process on a lost VM leaves the restart lock free and the intent cleaned", async () => {
+  const projectRoot = await realpath(
+    await mkdtemp(join(tmpdir(), "hack-restart-lost-vm-"))
+  );
+  try {
+    const projectDir = join(projectRoot, ".hack");
+    const nativeHome = join(projectRoot, "candidate");
+    await mkdir(projectDir);
+    await mkdir(nativeHome, { mode: 0o700 });
+    const lostScope = { projectRoot, projectDir, nativeHome, branch: null };
+    await saveNativeProjectRun({ ...lostScope, run });
+    const f = fixture();
+    let lockFree: boolean | undefined;
+    let retired: boolean | undefined;
+    const code = await restartNativeProject({
+      ...f.options,
+      scope: lostScope,
+      start: async ({ releaseLock }) => {
+        // What the start does on a lost VM, just before process.exit(1).
+        await releaseLock();
+        // After the exit: the next hack restart (or recovery) can take the
+        // lock, and the intent is still the cleaned one.
+        lockFree = await withNativeRestartLock(lostScope, async () => true);
+        expect((await loadNativeRestartIntent(lostScope))?.phase).toBe(
+          "cleaned"
+        );
+        // `hack down --recover` then retires it once the run is stopped.
+        retired = await retireCleanedNativeRestart({
+          ...lostScope,
+          run: run.run,
+        });
+        // The real process has exited by now; the fixture just returns.
+        return 1;
+      },
+      dependencies: {
+        ...f.options.dependencies,
+        load: loadNativeProjectRun,
+        pending: loadNativeRestartIntent,
+        save: saveNativeRestartIntent,
+        cleaned: completeNativeRestartCleanup,
+        remove: removeNativeRestartIntent,
+        lock: withNativeRestartLock,
+      },
+    });
+    expect(code).toBe(1);
+    expect(lockFree).toBe(true);
+    expect(retired).toBe(true);
+    expect(await loadNativeRestartIntent(lostScope)).toBeNull();
+    // The restart's own release after the start returned is a no-op.
+    expect(await withNativeRestartLock(lostScope, async () => true)).toBe(true);
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true });
   }
 });

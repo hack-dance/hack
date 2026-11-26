@@ -7733,43 +7733,28 @@ test("the foreground lost-VM bound covers one pool check and the grace", () => {
 /**
  * HACK-2096: a foreground start whose provider VM is killed under it. Before,
  * only a detached owner watched its pool, so the foreground waited on a graph
- * owner in a lost VM and never exited. Now it names the lost VM and the one
- * recovery command, then exits non-zero: at once when ready, after the grace
- * while it is still starting.
+ * owner in a lost VM and never exited. Now it names the lost VM and what to run
+ * next, then exits non-zero: at once when ready, after the grace otherwise.
+ *
+ * - `serving`: ready, nothing left to finish.
+ * - `graph-ready`: the runtime reported the graph ready, and the frontend's own
+ *   readiness work (here the caller's `onReady`, where `hack restart` retires
+ *   its intent) still runs. The run is retired across boots by `hack down
+ *   --recover`, which also retires a restart still pending.
+ * - `starting`: lost before the graph was ready, which no command can retire
+ *   yet (HACK-2714), so the message names none.
+ *
+ * Every case runs `beforeLostExit` (a restart releases its lock there) once,
+ * after the startup observation finished and before the exit.
  */
 test.each([
-  { readyFirst: true, restartPending: false },
-  { readyFirst: false, restartPending: false },
-  { readyFirst: false, restartPending: true },
-])("a foreground start exits non-zero when its provider VM dies (ready: $readyFirst, restart pending: $restartPending)", async ({
-  readyFirst,
-  restartPending,
+  { stage: "serving" },
+  { stage: "graph-ready" },
+  { stage: "starting" },
+] as const)("a foreground start exits non-zero when its provider VM dies ($stage)", async ({
+  stage,
 }) => {
   const { opts } = await fixture(false);
-  // Codex review on #1253: a restart's replacement lost before readiness keeps
-  // its pending intent, so `hack up` would refuse. The intent appears only once
-  // the start is under way (a fresh start with one pending refuses up front),
-  // modelling the restart's cleaned intent the message reads at loss time.
-  let intentVisible = false;
-  const restartRun = {
-    run: "1".repeat(32),
-    owner: "c".repeat(32),
-    namespace: "b".repeat(64),
-    planId: "a".repeat(64),
-  };
-  opts.dependencies.loadRestart = async () =>
-    intentVisible
-      ? {
-          phase: "cleaned",
-          run: restartRun,
-          finalization: (
-            await beginNativeProjectFinalization({
-              scope: opts.scope,
-              run: restartRun,
-            })
-          ).token,
-        }
-      : null;
   const boot = "87654321-4321-4321-4321-cba987654321";
   const pid = 2345;
   const graceMs = 40;
@@ -7777,6 +7762,7 @@ test.each([
   let watched: string | undefined;
   const warnings: string[] = [];
   const exits: number[] = [];
+  const order: string[] = [];
   const reached = Promise.withResolvers<void>();
   const released = Promise.withResolvers<void>();
   const exited = Promise.withResolvers<void>();
@@ -7807,7 +7793,7 @@ test.each([
       : await invoke(request);
   const serve = opts.dependencies.serve!;
   opts.dependencies.serve = async (request) => {
-    if (!readyFirst) {
+    if (stage === "starting") {
       // The VM is lost while the owner is still starting its services.
       reached.resolve();
       await released.promise;
@@ -7817,8 +7803,10 @@ test.each([
       ...request,
       onReady: async () => {
         await request.onReady();
-        reached.resolve();
-        await released.promise;
+        if (stage === "serving") {
+          reached.resolve();
+          await released.promise;
+        }
       },
     });
   };
@@ -7826,7 +7814,20 @@ test.each([
   // No watchPool option: a foreground start watches by default.
   const attempt = startNativeProject({
     ...opts,
+    ...(stage === "graph-ready"
+      ? {
+          // The caller's readiness work, which runs before `ready` progress.
+          onReady: async () => {
+            reached.resolve();
+            await released.promise;
+          },
+        }
+      : {}),
+    beforeLostExit: async () => {
+      order.push("beforeLostExit");
+    },
     exitOnPoolEnd: () => {
+      order.push("exit");
       exits.push(performance.now() - started);
       exited.resolve();
     },
@@ -7837,7 +7838,6 @@ test.each([
     await Bun.sleep(30);
     expect(exits).toEqual([]);
     expect(warnings.join("\n")).not.toContain("native runtime VM");
-    intentVisible = restartPending;
     const killedAt = performance.now();
     providerGone = true;
     await Promise.race([
@@ -7845,25 +7845,29 @@ test.each([
       Bun.sleep(FOREGROUND_POOL_END_BOUND_MS),
     ]);
     expect(exits).toHaveLength(1);
+    expect(order).toEqual(["beforeLostExit", "exit"]);
     const elapsed = performance.now() - killedAt;
     expect(elapsed).toBeLessThan(FOREGROUND_POOL_END_BOUND_MS);
-    if (readyFirst) {
+    if (stage === "serving") {
       // Ready: nothing left to finish, so no grace (checks every 5 ms).
       expect(elapsed).toBeLessThan(graceMs);
     } else {
-      // Still starting: the start keeps its grace to finish or unwind first.
+      // Still starting or finishing readiness: the start keeps its grace.
       expect(elapsed).toBeGreaterThanOrEqual(graceMs - 5);
     }
     const message = warnings.find((line) => line.includes("native runtime VM"));
     expect(message).toContain(`pid ${pid}`);
     expect(message).toContain(boot);
-    expect(message).toContain("hack down --recover");
-    if (restartPending) {
-      expect(message).toContain("then hack restart");
-      expect(message).not.toContain("then hack up");
+    expect(message).toContain("exit code 1");
+    expect(message).not.toContain("hack restart");
+    if (stage === "starting") {
+      expect(message).not.toContain("hack down");
+      expect(message).not.toContain("hack up");
+      expect(message).toContain("Keep this native home unchanged");
     } else {
-      expect(message).toContain("then hack up");
-      expect(message).not.toContain("hack restart");
+      expect(message).toContain(
+        "Run hack down --recover to retire this run with its data kept, then hack up to start it again."
+      );
     }
   } finally {
     released.resolve();

@@ -620,6 +620,45 @@ export async function removeNativeRestartIntent(
     await rmdir(p.lock);
   }
 }
+/**
+ * After `hack down --recover` confirmed `run` stopped with its data retained,
+ * retire a pending restart of that run whose old run was already cleaned
+ * (HACK-2096). Such an intent is left by a replacement start that ended before
+ * readiness, for example when its VM was lost. Its old run is stopped and
+ * finalized, and its replacement is now retired with the same retained data, so
+ * the project is an ordinary stopped project that `hack up` resumes, as after a
+ * restart canceled once its cleanup finished. A `prepared` intent (the old run's
+ * stop is unconfirmed), an intent for another run, and a restart that still
+ * holds its operation lock are left alone. True when an intent was retired.
+ */
+export async function retireCleanedNativeRestart(
+  opts: NativeProjectRunScope & { readonly run: string }
+): Promise<boolean> {
+  const pending = (intent: NativeRestartIntent | null) =>
+    intent?.phase === "cleaned" && intent.run.run === opts.run;
+  if (!pending(await loadNativeRestartIntent(opts))) {
+    return false;
+  }
+  let entered = false;
+  try {
+    return await withNativeRestartLock(opts, async () => {
+      entered = true;
+      const intent = await loadNativeRestartIntent(opts);
+      if (!(intent && pending(intent))) {
+        return false;
+      }
+      await removeNativeRestartIntent({ ...opts, expected: intent });
+      return true;
+    });
+  } catch (error) {
+    if (!entered) {
+      // A live restart (or one interrupted before this fix) holds the lock;
+      // its intent stays for it, and for `hack restart`.
+      return false;
+    }
+    throw error;
+  }
+}
 function record(value: unknown, identity: unknown): NativeProjectRun {
   if (
     !isRecord(value) ||

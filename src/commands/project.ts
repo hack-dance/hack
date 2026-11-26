@@ -7663,12 +7663,22 @@ async function restartNativeImageProject({
       }
     },
     progress,
-    start: ({ run, onReady, signal, onStopSignals, onStopRequested }) =>
+    start: ({
+      run,
+      onReady,
+      signal,
+      onStopSignals,
+      onStopRequested,
+      releaseLock,
+    }) =>
       startNativeProject({
         ...startup,
         ...nativeRestartSelection({ run }),
         restore: run,
         verifiedBuildImages,
+        // A replacement that ends the process on a lost VM must not leave the
+        // restart's operation lock held (HACK-2096).
+        beforeLostExit: releaseLock,
         // The restart's own bookkeeping first, then the startup's ready
         // report: a detached owner (`restart --json`) tells its launcher here.
         onReady: async (services, addresses) => {

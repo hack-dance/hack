@@ -238,19 +238,25 @@ test("the end carries its evidence: the gone provider pid, or none for an ended 
   }
 });
 
-test("the foreground message names the lost VM and the one recovery command", () => {
-  const exited = nativeForegroundPoolEndMessage({
-    bootId: boot,
-    providerPid: 4242,
-  });
+test("a run lost after its graph was ready names down --recover, then hack up", () => {
+  const exited = nativeForegroundPoolEndMessage(
+    { bootId: boot, providerPid: 4242 },
+    { graphReady: true }
+  );
   expect(exited).toContain("pid 4242");
   expect(exited).toContain(boot);
   expect(exited).toContain("exit code 1");
-  const stopped = nativeForegroundPoolEndMessage({ bootId: boot });
+  const stopped = nativeForegroundPoolEndMessage(
+    { bootId: boot },
+    { graphReady: true }
+  );
   expect(stopped).toContain(boot);
   expect(stopped).not.toContain("pid");
   for (const message of [exited, stopped]) {
-    // One retire command, named once; no fresh-home detour.
+    // One retire command, named once; no fresh-home detour. A restart's
+    // replacement gets the same sequence: down --recover also retires its
+    // pending restart (HACK-2096), and `hack restart` would then refuse a
+    // stopped run with no restart pending.
     expect(message.match(/hack down --recover/g)).toHaveLength(1);
     expect(message).not.toContain("fresh");
     expect(message).toContain("then hack up to start it again");
@@ -258,15 +264,19 @@ test("the foreground message names the lost VM and the one recovery command", ()
   }
 });
 
-test("a lost restart names hack restart, which its pending intent requires", () => {
-  // Codex review on #1253: the replacement of a `hack restart` lost before
-  // readiness keeps its pending intent, and `hack up` then refuses with "use
-  // hack restart"; the message must not send the user there.
+test("a run lost before its graph was ready names no command that refuses it", () => {
+  // HACK-2714: neither `hack down --recover` nor `hack up` can retire a run
+  // whose VM was lost before it was ready, so the message sends the user to
+  // neither, and says to keep the home for inspection.
   const message = nativeForegroundPoolEndMessage(
     { bootId: boot, providerPid: 4242 },
-    { restartPending: true }
+    { graphReady: false }
   );
-  expect(message.match(/hack down --recover/g)).toHaveLength(1);
-  expect(message).toContain("then hack restart to finish the pending restart");
-  expect(message).not.toContain("then hack up");
+  expect(message).toContain("pid 4242");
+  expect(message).toContain("exit code 1");
+  expect(message).not.toContain("hack down");
+  expect(message).not.toContain("hack up");
+  expect(message).not.toContain("hack restart");
+  expect(message).toContain("Keep this native home unchanged");
+  expect(message).toContain("hack ps --json");
 });

@@ -3275,6 +3275,56 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // HACK-2096: after a foreground up or restart loses its VM, every command
+    // its message names is accepted in order. The negative control is PR #1253
+    // at cd0ebff10 (restart named by intent, lock left held, intent kept);
+    // keep-intent, leak-lock and intent-message each restore one old rule.
+    // restart-recovers is the reachability witness of a recovered restart.
+    name: "foreground-loss-recovery",
+    module: "ForegroundLossRecovery",
+    states: 20,
+    invariant: "NoRefusedAdvice",
+    fields: ['outcome = "refused"', 'lostAt = "Starting"'],
+    additionalControls: [
+      {
+        name: "keep-intent",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          'lostAt = "GraphReady"',
+          'kind = "restart"',
+          'intent = "cleaned"',
+          "lock = FALSE",
+        ],
+      },
+      {
+        name: "leak-lock",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          'lostAt = "GraphReady"',
+          'kind = "restart"',
+          'intent = "cleaned"',
+          "lock = TRUE",
+        ],
+      },
+      {
+        name: "intent-message",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: ['outcome = "refused"', 'lostAt = "Starting"'],
+      },
+      {
+        name: "restart-recovers",
+        negative: true,
+        invariant: "NoRestartRecovery",
+        fields: ['kind = "restart"', 'outcome = "ok"', 'lostAt = "GraphReady"'],
+      },
+    ],
+  },
+  {
     // HACK-2440 (c, d), HACK-2416: a patient first request, no failure on one
     // doubtful reading, and a host-side bound on "starting". Slow, refusing and
     // hanging apps; `legacy` runs the steady cadence before the first success.

@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   NATIVE_OWNER_EXIT_NOTICE,
+  NATIVE_RECOVERED_RESTART_NOTE,
   nativeDownEnvironment,
   nativeProjectDown,
 } from "../src/backends/native-project-down.ts";
@@ -22,11 +23,17 @@ import {
   waitNativeProjectFinalization,
 } from "../src/backends/native-project-finalization.ts";
 import {
+  completeNativeRestartCleanup,
   loadNativeProjectRun,
+  loadNativeRestartIntent,
   type NativeProjectRun,
   type NativeProjectRunScope,
+  type NativeRestartIntent,
   removeNativeProjectRun,
+  retireCleanedNativeRestart,
   saveNativeProjectRun,
+  saveNativeRestartIntent,
+  withNativeRestartLock,
 } from "../src/backends/native-project-run.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import {
@@ -2947,4 +2954,113 @@ test("the restart coordinator's down never starts a stopped pool", async () => {
   });
   await expect(attempt).rejects.toBeInstanceOf(NativeRuntimeRequestError);
   expect(calls).toEqual(["inspect"]);
+});
+
+/**
+ * HACK-2096: a `hack restart` whose replacement was lost (its VM died) after its
+ * old run was stopped leaves a `cleaned` restart intent, and `hack up` refuses
+ * while it is pending. Once `hack down --recover` retires the replacement with
+ * its data kept, the project is an ordinary stopped one: the recovery retires
+ * the intent too, so its one named follow-up, `hack up`, works.
+ */
+async function lostReplacementDown(opts: {
+  readonly recover: boolean;
+  readonly phase: NativeRestartIntent["phase"];
+  readonly intentRun?: string;
+  readonly lockHeld?: boolean;
+}) {
+  const fx = await fixture();
+  const intentRun = { ...run, run: opts.intentRun ?? run.run };
+  const prepared: NativeRestartIntent = {
+    phase: "prepared",
+    run: intentRun,
+    finalization: {
+      ...(await captureNativeProjectFinalization({ scope: fx.scope, run })),
+      run: intentRun.run,
+    },
+  };
+  await saveNativeRestartIntent({ ...fx.scope, intent: prepared });
+  if (opts.phase === "cleaned") {
+    await completeNativeRestartCleanup({ ...fx.scope, expected: prepared });
+  }
+  await deadFrontend(fx.scope);
+  const notices: string[] = [];
+  let recovered = false;
+  const down = () =>
+    nativeProjectDown({
+      ...fx,
+      recover: opts.recover,
+      notice: (line) => {
+        notices.push(line);
+      },
+      invoke: async (request) => {
+        const command = request.args[1]!;
+        if (command === "foreground-owner") {
+          return ownerSelection("exited");
+        }
+        if (command === "recover-live-owner") {
+          recovered = true;
+          return {
+            run: run.run,
+            phase: "stopped-data-retained",
+            recovered: true,
+            data_retained: true,
+            publisher_retired: true,
+            same_boot: true,
+          };
+        }
+        if (command === "managed-hostname-authority") {
+          return { authority: { present: false } };
+        }
+        expect(command).toBe("inspect");
+        return snapshot(recovered);
+      },
+    });
+  const result = opts.lockHeld
+    ? await withNativeRestartLock(fx.scope, async () => await down())
+    : await down();
+  return {
+    result,
+    notices,
+    intent: await loadNativeRestartIntent(fx.scope),
+  };
+}
+
+test("down --recover retires a cleaned restart whose replacement was lost, so hack up can resume", async () => {
+  const { result, notices, intent } = await lostReplacementDown({
+    recover: true,
+    phase: "cleaned",
+  });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(intent).toBeNull();
+  expect(notices).toContain(NATIVE_RECOVERED_RESTART_NOTE);
+});
+
+test.each([
+  { name: "plain down", recover: false, phase: "cleaned" },
+  { name: "a prepared intent", recover: true, phase: "prepared" },
+  {
+    name: "an intent for another run",
+    recover: true,
+    phase: "cleaned",
+    intentRun: "9".repeat(32),
+  },
+  {
+    name: "a restart that holds its lock",
+    recover: true,
+    phase: "cleaned",
+    lockHeld: true,
+  },
+] as const)("down keeps the pending restart for $name", async (opts) => {
+  const { result, notices, intent } = await lostReplacementDown(opts);
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(intent?.phase).toBe(opts.phase);
+  expect(notices).not.toContain(NATIVE_RECOVERED_RESTART_NOTE);
+});
+
+test("retiring a cleaned restart is a no-op without one", async () => {
+  const fx = await fixture();
+  expect(await retireCleanedNativeRestart({ ...fx.scope, run: run.run })).toBe(
+    false
+  );
 });

@@ -774,7 +774,7 @@ sets the report and the code together); the evidence is `BoundedExit` and
 | `GraphStopped` | `startNativeProjectAttempt` sets `graphCleanupConfirmed` and calls `onGraphStopped`, which cancels the watch (`stopPoolWatch`) and makes a pending `onEnded` a no-op. |
 | `Finish` | Lifecycle cleanup, `down.after` and `acknowledgeFinalization` settle; the finalizer cancels any watch. |
 | `Observe` | `watchNativeStartPool` polls the pool record every second and sees the gone provider pid or the ended boot; the grace comes from `serving`. |
-| `ExitOnLoss` | The `onEnded` callback in `startNativeProject` prints `nativeForegroundPoolEndMessage` (lost VM, exit 1, `hack down --recover`, then `hack up`, or `hack restart` while a restart intent is pending), finishes the startup observation and exits 1. |
+| `ExitOnLoss` | The `onEnded` callback in `startNativeProject` prints `nativeForegroundPoolEndMessage` (lost VM, exit 1, and what to run next; see [the recovery model](#advice-after-a-lost-foreground-vm)), finishes the startup observation, runs `beforeLostExit` and exits 1. |
 
 The bound in code is about 1 s once ready and about 11 s while starting or
 stopping; the test bound of 15 s is asserted to exceed
@@ -782,6 +782,47 @@ stopping; the test bound of 15 s is asserted to exceed
 cover the Rust graph owner's parent-exit cleanup (see the detached model) or the
 later `hack down --recover`, which runs `runtime recover` first for an exited
 provider (HACK-2579).
+
+## Advice after a lost foreground VM
+
+[`ForegroundLossRecovery.tla`](foreground-loss-recovery/ForegroundLossRecovery.tla)
+checks that the commands a foreground `hack up` or `hack restart` names after
+its VM is lost are all accepted when the user runs them in order (HACK-2096).
+The start is lost before the runtime reported its graph ready (`Starting`),
+after that but before the frontend's own readiness work finished (`GraphReady`:
+for a restart, its cleaned intent and operation lock are still held), or once
+serving. Command acceptance follows the code: `hack down --recover` retires a
+run only once its graph was ready (a run lost before that has no cross-boot
+retirement yet, HACK-2714); `hack up` refuses a pending restart; `hack restart`
+refuses while its lock is held and a stopped run with nothing pending.
+
+![Foreground loss recovery state chart](../../../docs/diagrams/foreground-loss-recovery.png)
+[SVG](../../../docs/diagrams/foreground-loss-recovery.svg) ·
+[Source](../../../docs/diagrams/foreground-loss-recovery.mmd)
+
+| Control | Result |
+| --- | --- |
+| `positive` | `NoRefusedAdvice` and `NoNeedlessWithholding` hold across 20 reachable states. |
+| `negative` | PR #1253 at `cd0ebff10`: the message names `hack restart` while an intent is pending, the lost start leaves the restart lock held, and `hack down --recover` keeps the intent. A run lost while starting is sent to `hack down --recover`, which refuses: `NoRefusedAdvice` fails. |
+| `keep-intent` | Only `hack down --recover` keeps the cleaned intent: a restart lost at `GraphReady` is sent to `hack up`, which refuses the pending restart. |
+| `leak-lock` | Only the lock stays held after the exit: `hack down --recover` cannot retire the intent under it, and `hack up` refuses. |
+| `intent-message` | Only the message rule is the old one: a start lost while starting is sent to `hack down --recover`, which refuses. |
+| `restart-recovers` | Reachability witness: `NoRestartRecovery` fails, so a lost restart is recovered by following its message. |
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `GraphReady` | `graph.onReady` at the top of the serve `onReady` handler in `startNativeProjectAttempt` (the runtime's `graph_foreground_ready` frame). |
+| `Serve` | The restart's `onReady` (`removeNativeRestartIntent`, lock release) runs inside the start's readiness work, before `ready` progress sets `serving`. |
+| `Lose` | `onEnded` in `startNativeProject`: `nativeForegroundPoolEndMessage(end, { graphReady })`, then `beforeLostExit` (the restart passes `releaseLock`), then exit 1. |
+| `Step` (`down`) | `nativeProjectDown` with `recover`: after a stopped result, `retireCleanedNativeRestart` removes a `cleaned` intent of the same run under `withNativeRestartLock`, and prints `NATIVE_RECOVERED_RESTART_NOTE`. |
+| `Step` (`up`, `restart`) | `refusePendingFreshStart` in native start; `withNativeRestartLock` and `activeReceipt` (`needs an active graph`) in restart. |
+
+Bounds: one start, one loss, at most two user commands. Not modeled: the Rust
+runtime's own recovery proofs (a cross-boot recovery that refuses for another
+reason, as HACK-2711 found for a project without a published port, is outside
+this model), the start's own unwind racing the pool watch (it ends through its
+own error, which releases the lock in the restart's `finally`), and real VM
+timing. The real-VM check is the gate for the runtime half.
 
 ## Native pool stop under a live run
 

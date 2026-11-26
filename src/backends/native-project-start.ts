@@ -2753,6 +2753,13 @@ type NativeProjectStartOptions = {
   /** Test seams for the pool watch: whether it runs (default on), and how the start ends. */
   readonly watchPool?: boolean;
   readonly exitOnPoolEnd?: () => void;
+  /**
+   * Runs once a start that lost its VM has finished its startup observation,
+   * just before it ends the process (HACK-2096). `hack restart` releases its
+   * operation lock here, which the process exit would otherwise leave held, so
+   * the pending restart stays resumable. Its failure never blocks the exit.
+   */
+  readonly beforeLostExit?: () => Promise<void>;
   readonly scope: NativeProjectRunScope;
   readonly composeFile: string;
   readonly targets?: readonly string[];
@@ -3373,12 +3380,21 @@ async function startNativeProjectAttempt(
   opts: NativeProjectStartOptions,
   observeStartup: () => ReturnType<typeof beginNativeProjectStartupObservation>,
   watchAdmittedBoot: ((bootId: string) => void) | undefined,
-  /**
-   * Called once the graph is confirmed stopped (its receipt shows nothing
-   * running or reserved). From then on the start no longer needs its VM, and
-   * the pool may stop legitimately as idle (HACK-2096).
-   */
-  onGraphStopped?: () => void
+  graph: {
+    /**
+     * The runtime reported this run's graph ready (its receipt is
+     * `ready-observed`), before the frontend's own readiness work (mapping,
+     * HTTPS, `up.after`, the caller's `onReady`). A run lost from here on is
+     * retired across boots by `hack down --recover` (HACK-2096).
+     */
+    readonly onReady?: () => void;
+    /**
+     * The graph is confirmed stopped (its receipt shows nothing running or
+     * reserved). From then on the start no longer needs its VM, and the pool
+     * may stop legitimately as idle (HACK-2096).
+     */
+    readonly onStopped?: () => void;
+  } = {}
 ): Promise<number> {
   const progress = progressReporter(opts.onProgress);
   const requestedProfiles = normalizeNativeProfiles(opts.profiles);
@@ -4429,6 +4445,7 @@ async function startNativeProjectAttempt(
                 await ensureMapping();
               },
               onReady: async () => {
+                graph.onReady?.();
                 const finalizeTiming = beginUpTiming("cli.readiness.finalize");
                 // Ready: the startup view is no longer needed.
                 void startupStatus.stop();
@@ -4564,7 +4581,7 @@ async function startNativeProjectAttempt(
               });
               graphCleanupConfirmed = settled.nothingReserved;
               if (graphCleanupConfirmed) {
-                onGraphStopped?.();
+                graph.onStopped?.();
               }
               if (
                 graphCleanupConfirmed &&
@@ -4606,7 +4623,7 @@ async function startNativeProjectAttempt(
             });
             final = confirmed.final;
             graphCleanupConfirmed = true;
-            onGraphStopped?.();
+            graph.onStopped?.();
             await retireRemovedMapping({
               final,
               mapping,
@@ -4787,23 +4804,6 @@ function withStartupLockBlocker(error: unknown): unknown {
 }
 
 /** Publish advisory startup evidence until this foreground invocation settles. */
-/**
- * Whether a lost start leaves a pending restart (Codex review on #1253): a
- * restart's replacement lost before readiness keeps its intent, so the
- * follow-up is `hack restart`, not `hack up`. Read at loss time, because a
- * ready restart has already retired it; an unreadable intent falls back to
- * whether this start is a restart's replacement.
- */
-async function nativeRestartPendingAtLoss(
-  opts: NativeProjectStartOptions
-): Promise<boolean> {
-  const load = opts.dependencies?.loadRestart ?? DEFAULTS.loadRestart;
-  return await load(opts.scope).then(
-    (intent) => intent !== null,
-    () => opts.restore !== undefined
-  );
-}
-
 export async function startNativeProject(
   opts: NativeProjectStartOptions
 ): Promise<number> {
@@ -4812,6 +4812,9 @@ export async function startNativeProject(
   let stopPoolWatch: (() => void) | undefined;
   // Ready and not stopping: the start has nothing left to finish on its own.
   let serving = false;
+  // The runtime reported the graph ready: a loss from here on leaves a run that
+  // `hack down --recover` retires across boots; before it, none can yet.
+  let graphReady = false;
   // The graph is confirmed stopped: the start is finishing (down.after, the
   // finalization acknowledgement) and no longer needs its VM. The pool now
   // counts as idle, so another project's up or a runtime down may stop it
@@ -4838,14 +4841,11 @@ export async function startNativeProject(
                 return;
               }
               if (!detached) {
-                const restartPending = await nativeRestartPendingAtLoss(opts);
-                if (settled || graphStopped) {
-                  return;
-                }
-                warn(nativeForegroundPoolEndMessage(end, { restartPending }));
+                warn(nativeForegroundPoolEndMessage(end, { graphReady }));
               }
               await finish?.();
               if (!settled) {
+                await opts.beforeLostExit?.().catch(() => undefined);
                 (opts.exitOnPoolEnd ?? (() => process.exit(1)))();
               }
             },
@@ -4861,6 +4861,7 @@ export async function startNativeProject(
           // like a ready one, it has nothing left to finish on its own.
           if (event.phase === "ready" || event.phase === "started") {
             serving = true;
+            graphReady = true;
           } else if (event.phase === "stopping" || event.phase === "stopped") {
             serving = false;
           }
@@ -4875,9 +4876,14 @@ export async function startNativeProject(
         return observation;
       },
       watchAdmittedBoot,
-      () => {
-        graphStopped = true;
-        stopPoolWatch?.();
+      {
+        onReady: () => {
+          graphReady = true;
+        },
+        onStopped: () => {
+          graphStopped = true;
+          stopPoolWatch?.();
+        },
       }
     );
   } catch (error) {

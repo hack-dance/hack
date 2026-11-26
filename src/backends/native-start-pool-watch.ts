@@ -53,18 +53,21 @@ export type NativeStartPoolEnd = {
 
 /**
  * What a foreground start prints when its VM is lost (HACK-2096): which VM, that
- * this start exits non-zero with data kept, and the one command that retires the
- * run. `hack down --recover` first runs `runtime recover` for an exited provider
- * (HACK-2579), so it needs nothing else; `hack up` afterwards starts it again.
+ * this start exits non-zero with data kept, and what to run next.
  *
- * A `hack restart` whose replacement was lost before it became ready keeps its
- * pending restart intent (only readiness retires it), and `down --recover` does
- * not remove it, so `hack up` would refuse. With `restartPending` the message
- * names `hack restart`, which resumes that intent with the retained data.
+ * `graphReady` says whether the runtime had reported this run's graph ready
+ * (receipt `ready-observed`) before the loss. Only such a run is retired across
+ * boots: `hack down --recover` first runs `runtime recover` for an exited
+ * provider (HACK-2579), starts the pool and retires the run with its data kept,
+ * and also retires a `hack restart` whose old run was already stopped, so
+ * `hack up` then starts it again whether or not this start was a restart's
+ * replacement. A graph lost before it was ready has no supported retirement yet
+ * (HACK-2714): `hack down --recover` and `hack up` both refuse it, so the
+ * message names neither and says to keep the native home for inspection.
  */
 export function nativeForegroundPoolEndMessage(
   end: NativeStartPoolEnd,
-  opts: { readonly restartPending?: boolean } = {}
+  opts: { readonly graphReady: boolean }
 ): string {
   const lost =
     end.providerPid === undefined
@@ -73,9 +76,9 @@ export function nativeForegroundPoolEndMessage(
   return [
     lost,
     "This foreground start ends now with exit code 1; the run's data is kept.",
-    opts.restartPending
-      ? "Run hack down --recover to retire this run with its data kept, then hack restart to finish the pending restart (hack up refuses while it is pending)."
-      : "Run hack down --recover to retire this run with its data kept, then hack up to start it again.",
+    opts.graphReady
+      ? "Run hack down --recover to retire this run with its data kept, then hack up to start it again."
+      : "It was lost before its services were ready, and no hack command can retire a run lost at that point yet. Keep this native home unchanged for inspection; hack ps --json shows what the run left.",
   ].join("\n");
 }
 

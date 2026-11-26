@@ -46,6 +46,7 @@ import {
   nativeProjectStartupPending,
   nativeRunEnvironmentChange,
   removeNativeProjectRun,
+  retireCleanedNativeRestart,
 } from "./native-project-run.ts";
 import { nativeProjectRuntimeUpArgs } from "./native-project-runtime-up.ts";
 import {
@@ -742,6 +743,13 @@ class RetainedRunResumed extends Error {}
  */
 class StoppedPoolStarted extends Error {}
 
+/**
+ * Shown when `hack down --recover` also retired a pending `hack restart` whose
+ * replacement was lost (HACK-2096): the next `hack up` resumes the retained data.
+ */
+export const NATIVE_RECOVERED_RESTART_NOTE =
+  "The interrupted hack restart of this run was retired with its data kept; hack up starts the project again.";
+
 /** Shown after a down started the pool to recover its run (HACK-2456). */
 export const NATIVE_RECOVERY_RUNTIME_STARTED_NOTE =
   "The native runtime was started to recover this run and is still running; run `runtime down` to stop it.";
@@ -1303,6 +1311,16 @@ export async function nativeProjectDown(
         startStoppedPool: opts.deferFinalization !== true && !started,
         startupWaitMs,
       });
+      if (
+        result.status === "stopped" &&
+        opts.recover &&
+        opts.deferFinalization !== true &&
+        (await retireCleanedNativeRestart({ ...opts.scope, run: result.run }))
+      ) {
+        (opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+          NATIVE_RECOVERED_RESTART_NOTE
+        );
+      }
       return started ? { ...result, runtimeStarted: true } : result;
     } catch (error) {
       if (error instanceof StoppedPoolStarted && !started) {

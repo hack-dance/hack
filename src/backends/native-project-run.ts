@@ -626,11 +626,20 @@ export async function removeNativeRestartIntent(
  * - `locked`: the operation lock (`lock`) is held by a restart, a filesystem
  *   recovery or a data removal, live or interrupted before HACK-2096.
  * - `running`: under the lock, the run no longer read as stopped with its data
- *   retained (or could not be inspected); whoever resumed it owns the intent.
+ *   retained; whoever resumed it owns the intent.
+ * - `unconfirmed`: the inspect under the lock failed (for example the provider
+ *   stayed busy past the wait), so the run could not be confirmed stopped.
  * - `unreadable`: the intent could not be read, or removed once read.
  */
 export type NativeRestartRetirement =
-  | { readonly status: "retired" | "none" | "running" | "unreadable" }
+  | {
+      readonly status:
+        | "retired"
+        | "none"
+        | "running"
+        | "unconfirmed"
+        | "unreadable";
+    }
   | { readonly status: "locked"; readonly lock: string };
 /**
  * After `hack down --recover` confirmed `run` stopped with its data retained,
@@ -683,8 +692,12 @@ export async function retireCleanedNativeRestart(
         if (!(current.intent && pending(current.intent))) {
           return { status: "none" };
         }
-        if (!(await opts.stillStopped().catch(() => false))) {
-          return { status: "running" };
+        const stopped = await opts.stillStopped().then(
+          (value) => (value ? "stopped" : "running"),
+          () => "unconfirmed" as const
+        );
+        if (stopped !== "stopped") {
+          return { status: stopped };
         }
         try {
           await removeNativeRestartIntent({

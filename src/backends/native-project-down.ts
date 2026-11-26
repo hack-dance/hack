@@ -21,6 +21,7 @@ import {
   waitNativeProjectFinalization,
 } from "./native-project-finalization.ts";
 import {
+  INSPECT_BUSY_WAIT_MS,
   inspectNativeProjectGraph,
   isNativeProviderBusy,
   observeStartingNativeProjectGraph,
@@ -764,6 +765,15 @@ export function nativeRestartLockHeldNote(lock: string): string {
  * Shown when `hack down --recover` stopped the run but could not read (or
  * remove) its pending restart intent (HACK-2096). The stop itself stands.
  */
+/**
+ * Shown when `hack down --recover` stopped the run but kept its pending
+ * restart because, under the restart lock, it could not confirm the run still
+ * stopped: the runtime stayed busy past the wait, the inspect failed, or the
+ * run no longer read as stopped (HACK-2096 review). The stop itself stands.
+ */
+export const NATIVE_RESTART_KEPT_UNCONFIRMED_NOTE =
+  "The run was stopped with its data kept, but its pending hack restart was kept: the run could not be confirmed still stopped (the native runtime was busy or the run changed). Run hack down --recover again to retire it; hack up refuses while it is pending.";
+
 export const NATIVE_RESTART_INTENT_UNREADABLE_NOTE =
   "The run was stopped with its data kept, but its pending hack restart could not be read, so it was not retired; hack up refuses while it is pending. Inspect native state before recovery.";
 
@@ -995,6 +1005,11 @@ async function nativeProjectDownOnce(opts: {
   readonly endedBootOwnerWaitMs?: number;
   /** Test seam of the HACK-2097 wait for an owner that left its stop unanswered. */
   readonly ownerExitWaitMs?: number;
+  /**
+   * Test seam: how long the re-inspect before retiring a pending restart waits
+   * out `provider_busy`; {@link INSPECT_BUSY_WAIT_MS} by default.
+   */
+  readonly restartRetireBusyWaitMs?: number;
   /** Where the one-line wait notices go; stderr by default. */
   readonly notice?: (line: string) => void;
 }) {
@@ -1304,8 +1319,15 @@ async function nativeProjectDownOnce(opts: {
  * After `hack down --recover` stopped `run` with its data kept, retire a
  * pending restart of it (HACK-2096; see {@link retireCleanedNativeRestart}),
  * re-inspecting the run under the restart lock, and say what happened in one
- * line when it was retired, kept for a held lock, or unreadable. A plain down
- * and the restart coordinator's own down (`deferFinalization`) never retire.
+ * line whatever it did with an intent it found: retired, or kept for a held
+ * lock, an unreadable intent, or a run it could not confirm still stopped. A
+ * plain down and the restart coordinator's own down (`deferFinalization`)
+ * never retire.
+ *
+ * The re-inspect waits out `provider_busy` like any mutating command's inspect
+ * ({@link INSPECT_BUSY_WAIT_MS}): a read-only `hack ps` or `hack logs`, or
+ * another project's starting foreground `up`, holds the lease only briefly or
+ * until its ready line, and is no sign that this run was resumed.
  */
 async function retirePendingRestartAfterRecover(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -1314,6 +1336,7 @@ async function retirePendingRestartAfterRecover(opts: {
   readonly recover?: boolean;
   readonly deferFinalization?: boolean;
   readonly invoke?: typeof invokeNativeRuntime;
+  readonly restartRetireBusyWaitMs?: number;
   readonly notice?: (line: string) => void;
 }): Promise<void> {
   if (opts.recover !== true || opts.deferFinalization === true) {
@@ -1323,7 +1346,6 @@ async function retirePendingRestartAfterRecover(opts: {
   const retirement = await retireCleanedNativeRestart({
     ...opts.scope,
     run: opts.run,
-    // A busy provider means another owner acts on the pool: not stopped.
     stillStopped: async () =>
       stoppedRetained(
         await inspectNativeProjectGraph({
@@ -1331,7 +1353,7 @@ async function retirePendingRestartAfterRecover(opts: {
           projectRoot: opts.scope.projectRoot,
           run: opts.run,
           invoke,
-          busyWaitMs: 0,
+          busyWaitMs: opts.restartRetireBusyWaitMs ?? INSPECT_BUSY_WAIT_MS,
         })
       ),
   });
@@ -1343,6 +1365,11 @@ async function retirePendingRestartAfterRecover(opts: {
     notice(nativeRestartLockHeldNote(retirement.lock));
   } else if (retirement.status === "unreadable") {
     notice(NATIVE_RESTART_INTENT_UNREADABLE_NOTE);
+  } else if (
+    retirement.status === "running" ||
+    retirement.status === "unconfirmed"
+  ) {
+    notice(NATIVE_RESTART_KEPT_UNCONFIRMED_NOTE);
   }
 }
 

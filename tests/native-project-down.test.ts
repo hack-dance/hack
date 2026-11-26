@@ -15,6 +15,7 @@ import {
   NATIVE_OWNER_EXIT_NOTICE,
   NATIVE_RECOVERED_RESTART_NOTE,
   NATIVE_RESTART_INTENT_UNREADABLE_NOTE,
+  NATIVE_RESTART_KEPT_UNCONFIRMED_NOTE,
   nativeDownEnvironment,
   nativeProjectDown,
   nativeRestartLockHeldNote,
@@ -2976,6 +2977,10 @@ async function lostReplacementDown(opts: {
   readonly resumedUnderLock?: boolean;
   /** The intent on disk cannot be read. */
   readonly unreadable?: boolean;
+  /** How many inspects under the restart lock answer `provider_busy` first. */
+  readonly busyUnderLock?: number;
+  /** The re-inspect's busy wait (the production default is 15 s). */
+  readonly retireBusyWaitMs?: number;
 }) {
   const fx = await fixture();
   const { lock } = await nativeRestartOperationLock(fx.scope);
@@ -3009,6 +3014,9 @@ async function lostReplacementDown(opts: {
     nativeProjectDown({
       ...fx,
       recover: opts.recover,
+      ...(opts.retireBusyWaitMs === undefined
+        ? {}
+        : { restartRetireBusyWaitMs: opts.retireBusyWaitMs }),
       notice: (line) => {
         notices.push(line);
       },
@@ -3034,6 +3042,15 @@ async function lostReplacementDown(opts: {
         expect(command).toBe("inspect");
         if (!opts.lockHeld && (await locked())) {
           inspectsUnderLock++;
+          if (inspectsUnderLock <= (opts.busyUnderLock ?? 0)) {
+            // A `hack ps`, `hack logs` or another project's starting `up`
+            // holds the provider lease.
+            throw new NativeRuntimeRequestError({
+              message:
+                "Native runtime request failed (provider_busy); inspect owned state before retrying.",
+              nativeCode: "provider_busy",
+            });
+          }
           // Another owner resumed the run between the down and the lock.
           return snapshot(recovered && !opts.resumedUnderLock);
         }
@@ -3096,7 +3113,50 @@ test.each([
   expect(notices).not.toContain(NATIVE_RECOVERED_RESTART_NOTE);
   if ("resumedUnderLock" in opts) {
     expect(inspectsUnderLock).toBe(1);
+    // Kept, but not silently (HACK-2096 round-2 review).
+    expect(notices).toContain(NATIVE_RESTART_KEPT_UNCONFIRMED_NOTE);
   }
+});
+
+test("down --recover waits out a briefly busy provider and retires the pending restart", async () => {
+  // HACK-2096 round-2 review: a read-only `hack ps` or another project's
+  // starting `up` holds the lease for a moment; that is no sign of a resume.
+  const { result, notices, intent, inspectsUnderLock } =
+    await lostReplacementDown({
+      recover: true,
+      phase: "cleaned",
+      busyUnderLock: 3,
+      retireBusyWaitMs: 2000,
+    });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(inspectsUnderLock).toBe(4);
+  expect(intent).toBeNull();
+  expect(notices).toContain(NATIVE_RECOVERED_RESTART_NOTE);
+  expect(notices).not.toContain(NATIVE_RESTART_KEPT_UNCONFIRMED_NOTE);
+});
+
+test("down --recover keeps the pending restart past the busy wait and says to run it again", async () => {
+  const { result, notices, intent, inspectsUnderLock } =
+    await lostReplacementDown({
+      recover: true,
+      phase: "cleaned",
+      busyUnderLock: Number.POSITIVE_INFINITY,
+      retireBusyWaitMs: 120,
+    });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  // It retried within the wait, then gave up.
+  expect(inspectsUnderLock).toBeGreaterThan(1);
+  expect(typeof intent === "string" ? undefined : intent?.phase).toBe(
+    "cleaned"
+  );
+  expect(notices).not.toContain(NATIVE_RECOVERED_RESTART_NOTE);
+  const kept = notices.filter(
+    (line) => line === NATIVE_RESTART_KEPT_UNCONFIRMED_NOTE
+  );
+  expect(kept).toHaveLength(1);
+  expect(kept[0]).toContain("pending hack restart was kept");
+  expect(kept[0]).toContain("Run hack down --recover again");
+  expect(kept[0]).not.toContain("\n");
 });
 
 test("down --recover names the pending restart and the held lock it kept", async () => {

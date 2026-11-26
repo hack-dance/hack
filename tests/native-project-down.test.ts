@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   NATIVE_LOST_REMOVAL_NOTE,
+  NATIVE_LOST_REMOVAL_PENDING,
   NATIVE_LOST_REMOVAL_UNREPAIRABLE,
   NATIVE_OWNER_EXIT_NOTICE,
   NATIVE_RECOVERED_RESTART_NOTE,
@@ -2788,18 +2789,21 @@ test.each([
   { foreground: "exited", phase: "stopped-data-retained" },
   // A retained stop whose frontend finished its finalization needs nothing more.
   { foreground: "absent", phase: "stopped-data-retained" },
-  // A start that was never confirmed has no supported recovery after a boot,
-  // so the pool is not started for it (requireRecoverableOwner).
+  // A restart in progress has no supported recovery after a boot, so the pool
+  // is not started for it (requireRecoverableOwner).
+  { foreground: "exited", phase: "restarting" },
+  // A lost start the runtime would refuse (an unsettled relay startup or a
+  // cleanup marker: no `cross_boot_start`) does not start a pool either.
+  { foreground: "exited", phase: "failed-retained" },
   { foreground: "exited", phase: "preparing" },
   { foreground: "exited", phase: "restoring" },
-  { foreground: "exited", phase: "failed-retained" },
-  // Same-boot recoveries (recover-live-owner) cannot run after the boot this
-  // would start, so the pool is not started for them either.
   {
     foreground: "exited",
     phase: "failed-retained",
-    extra: { failed_start_recoverable: true },
+    extra: { cross_boot_start: false, failed_start_recoverable: true },
   },
+  // A same-boot recovery (recover-live-owner) cannot run after the boot this
+  // would start, so the pool is not started for it either.
   {
     foreground: "exited",
     phase: "ready-observed",
@@ -2834,6 +2838,72 @@ test.each([
     "runtime_not_running"
   );
   expect(calls).toEqual(["inspect", "foreground-owner"]);
+});
+
+// HACK-2714 (real VM, row 2): the provider died after "Project started" and
+// before the owner's ready line, and the owner's unwind left `failed-retained`.
+// `runtime recover` stopped the pool; the down must start it, because the
+// runtime's cross-boot dead-owner recovery now retires that start. Before this
+// fix the down kept `runtime_not_running` here, and `hack up` refused.
+test.each([
+  { phase: "failed-retained" },
+  { phase: "preparing" },
+  // An owner killed mid-restore, without its unwind (reviewer finding).
+  { phase: "restoring" },
+  // The same-boot hint does not matter once the boot has ended.
+  { phase: "failed-retained", extra: { failed_start_recoverable: true } },
+] as {
+  phase: string;
+  extra?: Record<string, unknown>;
+}[])("down --recover starts a stopped pool for a start lost before ready ($phase)", async ({
+  phase,
+  extra,
+}) => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  let pool = false;
+  let cleaned = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    recover: true,
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "up") {
+        pool = true;
+        return { phase: "running" };
+      }
+      if (command === "foreground-owner") {
+        // On the new boot the runtime names the lost start's dead-owner
+        // recovery; while the pool is stopped it cannot.
+        return {
+          ...ownerSelection("exited", phase),
+          ...extra,
+          cross_boot_start: true,
+          dead_owner_recovery: pool ? receiptSha : null,
+        };
+      }
+      if (!pool) {
+        throw poolStoppedError();
+      }
+      if (command === "recover-cleanup") {
+        expect(request.args).toContain(receiptSha);
+        cleaned = true;
+        return { run: run.run, recovered: true, data_retained: true };
+      }
+      if (command === "retire-recovered-publisher") {
+        expect(cleaned).toBe(true);
+        return { run: run.run, publisher_retired: true, data_retained: true };
+      }
+      expect(command).toBe("inspect");
+      return snapshot(cleaned);
+    },
+  });
+  expect(result).toMatchObject({ status: "stopped", runtimeStarted: true });
+  expect(calls.slice(0, 3)).toEqual(["inspect", "foreground-owner", "up"]);
+  expect(calls.filter((call) => call === "up")).toHaveLength(1);
+  expect(calls).toContain("recover-cleanup");
+  expect(calls).not.toContain("recover-live-owner");
 });
 
 /** A frontend that began its finalization and exited without completing it. */
@@ -3641,11 +3711,13 @@ function lostRemovalSnapshot(webState: string) {
 }
 async function lostRemovalDown(opts: {
   readonly recover: boolean;
-  readonly webState: "exited" | "running";
+  readonly webState: "exited" | "running" | "absent";
+  /** An earlier repair ended before its storage barrier confirmed. */
+  readonly pending?: boolean;
   /** Whether the runtime's cleanup actually removes the container. */
   readonly cleanupClears?: boolean;
-  /** The runtime refuses an owner-less cleanup (real-VM row 8 at c624229e). */
-  readonly ownerRequired?: boolean;
+  /** The runtime refuses the owner-less repair with this code (real-VM row 8). */
+  readonly refusedWith?: "graph_owner_recovery" | "graph_lost_removal";
 }) {
   const fx = await fixture();
   const calls: string[] = [];
@@ -3674,12 +3746,11 @@ async function lostRemovalDown(opts: {
           run.run,
           "--json",
         ]);
-        if (opts.ownerRequired) {
-          // A relay-enrolled receipt: cleanup goes through the owner, gone.
+        if (opts.refusedWith) {
+          // The repair could not prove the retired owner or the containers.
           throw new NativeRuntimeRequestError({
-            message:
-              "Native runtime request failed (graph_owner_recovery); inspect owned state before retrying.",
-            nativeCode: "graph_owner_recovery",
+            message: `Native runtime request failed (${opts.refusedWith}); inspect owned state before retrying.`,
+            nativeCode: opts.refusedWith,
           });
         }
         cleaned = true;
@@ -3692,9 +3763,12 @@ async function lostRemovalDown(opts: {
         return { authority: { present: false } };
       }
       expect(command).toBe("inspect");
-      return lostRemovalSnapshot(
-        cleaned && opts.cleanupClears !== false ? "absent" : opts.webState
-      );
+      return {
+        ...lostRemovalSnapshot(
+          cleaned && opts.cleanupClears !== false ? "absent" : opts.webState
+        ),
+        ...(opts.pending && !cleaned ? { lost_removal_pending: true } : {}),
+      };
     },
   });
   const result = await down.then(
@@ -3703,6 +3777,33 @@ async function lostRemovalDown(opts: {
   );
   return { result, calls, notices };
 }
+
+// Codex review of #1273: a repair that removed the containers and ended before
+// its storage barrier confirmed leaves its marker. The guest lists nothing, but
+// the stop is not durable yet: down --recover runs the repair again (which
+// flushes the disk and clears the marker), and a plain down refuses.
+test("down --recover finishes a lost-removal repair whose barrier never confirmed", async () => {
+  const { result, calls, notices } = await lostRemovalDown({
+    recover: true,
+    webState: "absent",
+    pending: true,
+  });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(calls.filter((call) => call === "cleanup")).toHaveLength(1);
+  expect(notices).toContain(NATIVE_LOST_REMOVAL_NOTE);
+});
+
+test("a plain down refuses a stop whose lost-removal repair is unfinished", async () => {
+  const { result, calls } = await lostRemovalDown({
+    recover: false,
+    webState: "absent",
+    pending: true,
+  });
+  expect(result).toBeInstanceOf(Error);
+  expect((result as Error).message).toBe(NATIVE_LOST_REMOVAL_PENDING);
+  expect(NATIVE_LOST_REMOVAL_PENDING).toContain("hack down --recover");
+  expect(calls).not.toContain("cleanup");
+});
 
 test("down --recover removes containers a lost VM brought back, so hack up can start", async () => {
   const { result, calls, notices } = await lostRemovalDown({
@@ -3738,15 +3839,21 @@ test("down --recover prints no removal note when the re-inspection still finds t
   expect(notices).not.toContain(NATIVE_LOST_REMOVAL_NOTE);
 });
 
-test("down --recover says plainly when the runtime cannot remove brought-back containers without the owner", async () => {
-  // Real-VM row 8 at c624229e: the receipt is relay-enrolled, so `graph
-  // cleanup` goes through the run's foreground owner, which is gone, and the
-  // runtime refuses (`graph_owner_recovery`). The refusal names no command
-  // that fails and none that discards the data.
+test.each([
+  // No retired publication: the cleanup still goes to an owner that is gone.
+  { code: "graph_owner_recovery" },
+  // The repair found a container it does not admit (HACK-2719).
+  { code: "graph_lost_removal" },
+] as const)("down --recover says plainly when the runtime refuses to remove brought-back containers ($code)", async ({
+  code,
+}) => {
+  // Real-VM row 8: since HACK-2719 the runtime removes them without the owner
+  // under the retired owner's lock; this is the refusal when it cannot prove
+  // that. It names no command that fails and none that discards the data.
   const { result, calls, notices } = await lostRemovalDown({
     recover: true,
     webState: "exited",
-    ownerRequired: true,
+    refusedWith: code,
   });
   expect(result).toBeInstanceOf(Error);
   expect((result as Error).message).toBe(NATIVE_LOST_REMOVAL_UNREPAIRABLE);

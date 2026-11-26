@@ -851,6 +851,31 @@ impl<'a> OwnedGuest<'a> {
         self.execute_mode(script, arguments, None, false)
     }
 
+    /// [`Self::execute_cleanup`] (no allocation admission, so a budgeted engine
+    /// cannot refuse it for memory pressure) under one absolute deadline for the
+    /// connect, the guest process and the reply. A timed-out exec is uncertain.
+    pub(super) fn execute_cleanup_until(
+        &self,
+        script: &str,
+        arguments: &[&str],
+        deadline: Instant,
+    ) -> Result<String, CandidateError> {
+        self.verify()?;
+        #[cfg(all(test, target_os = "macos"))]
+        if super::engine::fixture::active(self.candidate) {
+            return Ok(super::engine::fixture::execute(script, arguments, None));
+        }
+        let script = format!(
+            "set -eu\ntest \"$(cat /proc/sys/kernel/random/boot_id)\" = \"$1\"\ntest \"$(cat /storage/.hack-local-owner)\" = \"$2\"\ntest \"$(findmnt -n -o FSTYPE --mountpoint /storage)\" = ext4\nshift 2\n{script}"
+        );
+        let mut args = vec![self.boot_id(), self.incarnation()];
+        args.extend_from_slice(arguments);
+        let path = socket(self.candidate, &self.owner, "agent.sock")?;
+        let result = agent::exec_until(&path, &script, &args, deadline)?;
+        self.verify()?;
+        Ok(result)
+    }
+
     fn execute_mode(
         &self,
         script: &str,

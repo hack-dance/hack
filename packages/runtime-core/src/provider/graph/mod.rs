@@ -447,6 +447,11 @@ pub struct Snapshot {
     pub failed_after_started: Option<startup_failure::AfterStarted>,
     #[cfg(target_os = "macos")]
     pub interrupted_start_cleanup_incomplete: bool,
+    /// A lost-removal repair (HACK-2719) removed containers again but its storage
+    /// barrier has not confirmed: the stop is not yet durable, whatever the guest
+    /// lists now. Only that repair, run again, clears it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub lost_removal_pending: bool,
     pub observations: BTreeMap<String, Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub startup_observed_ports: Vec<u16>,
@@ -2110,6 +2115,12 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
         "foreground": publication.word(),
         "live_owner_recovery": resumable,
         "failed_start_recoverable": !running && live_owner_cleanup::failed_start_recoverable(&root, &receipt),
+        // Whether the cross-boot dead-owner recovery admits this receipt as a start
+        // lost before ready (HACK-2714), so a caller starts a stopped pool, or names
+        // `hack down --recover`, only for a recovery that can use it. It reads the
+        // receipt alone: a caller also requires the owner exited (`foreground`).
+        // Selection only, like the fields around it.
+        "cross_boot_start": dead_owner_cleanup::unconfirmed_start(&receipt),
         "dead_owner_recovery": predecessor,
         "dead_owner_recovery_complete": predecessor_complete,
         "dead_owner_recovery_error": predecessor_error,
@@ -2470,6 +2481,7 @@ fn inspect_using(
     let storage_references = storage::references(&receipt, journal_incomplete, &observations);
     let pending_cleanup = cleanup_diagnostics::pending(&receipt, &observations, journal_incomplete);
     let failed_after_started = startup_failure::after_started(&root);
+    let lost_removal_pending = fs::symlink_metadata(root.join(LOST_REMOVAL_REPAIR)).is_ok();
     Ok(Snapshot {
         receipt,
         journal_incomplete,
@@ -2477,6 +2489,7 @@ fn inspect_using(
         failed_after_started,
         #[cfg(target_os = "macos")]
         interrupted_start_cleanup_incomplete,
+        lost_removal_pending,
         observations,
         startup_observed_ports: Vec::new(),
         guest_endpoints,
@@ -2726,6 +2739,11 @@ fn cleanup_owned_fenced(
         super::environment_recovery::retire(candidate, engine.guest(), &slot, None)?;
     }
     fence()?;
+    // HACK-2719: the receipt records the removals only once they are on the guest's
+    // persistent disk. Otherwise a VM lost seconds later boots the engine with the
+    // removed containers listed again while the receipt says they are absent.
+    storage_barrier(engine)?;
+    fence()?;
     receipt.set_phase(if remove_data {
         "removed"
     } else {
@@ -2736,6 +2754,71 @@ fn cleanup_owned_fenced(
     #[cfg(target_os = "macos")]
     crate::provider::interactive_session::after_cleanup(candidate, &receipt.run);
     Ok(receipt)
+}
+
+/// Flushes the guest's `/storage` filesystem, where the engine keeps its state, and
+/// confirms the flush returned. The guest's BusyBox `sync -f` flushes only that
+/// filesystem (`syncfs`); a build without that option ignores it and flushes all
+/// of them, which is slower but never less durable. The guest script itself first
+/// checks the boot, the pool owner and the ext4 `/storage` mount.
+const STORAGE_BARRIER: &str = "sync -f /storage\nprintf 'hack-storage-barrier-v1 synced\\n'\n";
+const STORAGE_BARRIER_DONE: &str = "hack-storage-barrier-v1 synced\n";
+/// The run-directory marker of a lost-removal repair whose barrier has not yet
+/// confirmed (`foreground::retained_data::repair_lost_removals`).
+pub(super) const LOST_REMOVAL_REPAIR: &str = "lost-removal-repair.json";
+/// The barrier's own bound. The cleanup holds the provider lease, so a flush that
+/// stalls must end well before another project's start gives up waiting for it.
+const STORAGE_BARRIER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Durability barrier for a cleanup that has removed guest resources: commit them
+/// to the guest disk before any host record says they are gone (HACK-2719). It runs
+/// without allocation admission, so memory pressure cannot refuse a `hack down`. A
+/// barrier that does not confirm in time leaves the receipt at `cleanup-intent`,
+/// which a repeated `hack down` (and every recovery) resumes by reinspection.
+pub(super) fn storage_barrier(engine: &Engine<'_>) -> Result<(), CandidateError> {
+    let deadline = std::time::Instant::now() + STORAGE_BARRIER_TIMEOUT;
+    let output = engine
+        .guest()
+        .execute_cleanup_until(STORAGE_BARRIER, &[], deadline)
+        .map_err(|_| storage_barrier_refused())?;
+    storage_barrier_confirmed(&output)
+}
+
+fn storage_barrier_refused() -> CandidateError {
+    error(
+        "graph_cleanup_uncertain",
+        "The guest did not confirm within 10 seconds that the removed graph resources reached its disk, so the cleanup is not recorded yet; retained data is kept. Run hack down again.",
+    )
+}
+
+fn storage_barrier_confirmed(output: &str) -> Result<(), CandidateError> {
+    if output == STORAGE_BARRIER_DONE {
+        return Ok(());
+    }
+    Err(storage_barrier_refused())
+}
+
+#[cfg(test)]
+mod storage_barrier_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_exact_confirmation_commits_a_cleanup() {
+        // Only the storage filesystem is flushed, within its own short bound.
+        assert!(STORAGE_BARRIER.starts_with("sync -f /storage\n"));
+        assert_eq!(STORAGE_BARRIER_TIMEOUT, Duration::from_secs(10));
+        storage_barrier_confirmed(STORAGE_BARRIER_DONE).unwrap();
+        for output in [
+            "",
+            "hack-storage-barrier-v1 synced",
+            "hack-storage-barrier-v1 synced\n\n",
+            "sync: error\nhack-storage-barrier-v1 synced\n",
+        ] {
+            let refused = storage_barrier_confirmed(output).unwrap_err();
+            assert_eq!(refused.code, "graph_cleanup_uncertain");
+            assert!(refused.message.contains("Run hack down again."));
+        }
+    }
 }
 
 /// The compiled `Healthcheck` to compare with a container's, accepting one created before

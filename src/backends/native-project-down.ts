@@ -5,6 +5,10 @@ import {
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
+import {
+  NATIVE_RECOVERABLE_LIVE_PHASES,
+  nativeCrossBootRecoverable,
+} from "./native-cross-boot-recovery.ts";
 import { awaitNativeEndedBootOwner } from "./native-ended-boot-owner.ts";
 import {
   nativeFrontendGone,
@@ -136,19 +140,6 @@ const RECEIPT_SHA = /^[a-f0-9]{64}$/;
 const RECOVERY_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 const FOREGROUND_STATES = new Set(["absent", "running", "exited", "uncertain"]);
-/**
- * Graph phases in which an exited foreground owner is recovered: ready, or every
- * service started with some goal still unmet (`started-observed`, written only
- * under `--report-started`). Only a run with a saved mapping gets here. A fresh
- * start saves its mapping only at ready today, so in the started phase this is a
- * restored run; PR B saves the mapping at started.
- */
-const RECOVERABLE_LIVE_PHASES: ReadonlySet<string> = new Set([
-  "ready-observed",
-  "started-observed",
-  "reconciled-cleanup-only",
-]);
-
 /** What `graph foreground-owner` selected; it grants no recovery authority. */
 type ForegroundOwnerSelection = {
   readonly phase: string;
@@ -161,6 +152,12 @@ type ForegroundOwnerSelection = {
   readonly deadOwnerRecoveryComplete: boolean;
   readonly deadOwnerRecoveryError: string | null;
   readonly failedStartRecoverable: boolean;
+  /**
+   * The runtime's cross-boot recovery admits this receipt as a start lost before
+   * ready (`cross_boot_start`: a lost-start phase, a settled relay startup and no
+   * cleanup marker). Absent from an older runtime, which never admitted one.
+   */
+  readonly crossBootStart: boolean;
 };
 
 /**
@@ -232,6 +229,7 @@ async function selectForegroundOwner(opts: {
     !isRecord(value) ||
     value.version !== 1 ||
     !optionalBoolean(value.failed_start_recoverable) ||
+    !optionalBoolean(value.cross_boot_start) ||
     value.run !== opts.run.run ||
     value.owner !== opts.run.owner ||
     typeof value.phase !== "string" ||
@@ -270,6 +268,7 @@ async function selectForegroundOwner(opts: {
   return {
     phase: value.phase,
     failedStartRecoverable: value.failed_start_recoverable === true,
+    crossBootStart: value.cross_boot_start === true,
     receiptSha256: value.receipt_sha256,
     foreground: value.foreground as ForegroundOwnerSelection["foreground"],
     liveOwnerRecovery:
@@ -590,7 +589,7 @@ function requireRecoverableOwner(
   }
   if (
     selection.foreground === "exited" &&
-    !RECOVERABLE_LIVE_PHASES.has(selection.phase) &&
+    !NATIVE_RECOVERABLE_LIVE_PHASES.has(selection.phase) &&
     !selection.failedStartRecoverable
   ) {
     throw exitedOwnerRefused(selection.phase, verb);
@@ -813,13 +812,19 @@ export const NATIVE_RESTART_INTENT_UNREADABLE_NOTE =
  * Whether the lock-free `graph foreground-owner` selection (host files only;
  * it needs no running pool) shows an exited owner whose run the recovery after a
  * boot can still recover. Starting the pool begins a new boot, so only the
- * cross-boot dead-owner recovery applies: a ready run, or an interrupted
- * dead-owner recovery resuming by its own selection. The same-boot recoveries
- * (`recover-live-owner`, which a recoverable failed start and an interrupted
- * live-owner recovery use) need the original boot's relay identity and cannot run
- * after it, so those cases, an exited owner of a start that was never confirmed
- * (`preparing`, `restoring`), a live, absent or uncertain owner, a retained stop
- * (whose unadmitted owner is retired without the pool) and an unreadable
+ * cross-boot dead-owner recovery applies: a ready run, a start lost before it
+ * was ready (`failed-retained` after the owner's own unwind, or `preparing` or
+ * `restoring` without one; HACK-2714), or an interrupted dead-owner recovery
+ * resuming by its own
+ * selection. The runtime admits a lost start only with a settled relay startup
+ * and no cleanup marker (`crossBootStart`, read from the receipt before the pool
+ * is started), and revalidates the dead owner and the ended boot. The
+ * same-boot recoveries (`recover-live-owner`, which an interrupted live-owner
+ * recovery uses) need the original boot's relay identity and cannot run after
+ * it, so that case, an exited owner of a restart in progress (`restarting`) or
+ * of a lost start the runtime would refuse, a live, absent or uncertain owner, a
+ * retained
+ * stop (whose unadmitted owner is retired without the pool) and an unreadable
  * selection are all false: the caller keeps its refusal and never starts a pool
  * it could not then use.
  */
@@ -839,7 +844,7 @@ async function deadOwnerOfLiveRun(opts: {
     }
     if (
       selection.foreground === "exited" &&
-      (RECOVERABLE_LIVE_PHASES.has(selection.phase) ||
+      (nativeCrossBootRecoverable(selection) ||
         selection.deadOwnerRecovery !== null)
     ) {
       return true;
@@ -955,7 +960,12 @@ class ExitedPoolRecovered extends Error {
  * container absent, so `hack down --recover` refused ("cleanup is
  * unconfirmed") and `hack up` refused the mapping. Only this exact shape is
  * repaired, by the runtime's own `graph cleanup` of the receipt's resources
- * (exact ids, volumes kept); anything running, uncertain or unrecorded is not.
+ * (exact ids; named volumes and data kept, a container's anonymous volumes go
+ * with it as in the original down); anything running, uncertain or unrecorded is not.
+ * The run's owner retired its publication when that down finished, so the
+ * runtime removes them under that retirement's lock, without an owner
+ * (HACK-2719). A cleanup also flushes the guest disk before it records the
+ * removal now, so a new down no longer leaves this shape behind.
  */
 function lostContainerRemovals(snapshot: unknown): boolean {
   if (
@@ -981,20 +991,43 @@ function lostContainerRemovals(snapshot: unknown): boolean {
     const observation = observations[`container:${String(resource.key)}`];
     return isRecord(observation) ? observation.state : undefined;
   });
-  return (
-    states.includes("exited") &&
-    states.every((state) => state === "absent" || state === "exited")
+  const settled = states.every(
+    (state) => state === "absent" || state === "exited"
   );
+  // A repair that removed them but ended before its storage barrier confirmed
+  // (`lost_removal_pending`): run it again, so the stop becomes durable.
+  return settled && (states.includes("exited") || lostRemovalPending(snapshot));
+}
+
+/** A lost-removal repair whose storage barrier has not confirmed yet. */
+function lostRemovalPending(snapshot: unknown): boolean {
+  return isRecord(snapshot) && snapshot.lost_removal_pending === true;
 }
 
 /**
- * The refusal when the brought-back containers cannot be removed (real-VM row
- * 8): the run's cleanup must go through its foreground owner, which is gone,
- * and the runtime offers no owner-less removal that keeps data yet. It names
- * no command that would fail, and none that would discard the data.
+ * The refusal of a plain `hack down` while a lost-removal repair is unfinished:
+ * the containers are gone from the guest's list, but not yet durably.
+ */
+export const NATIVE_LOST_REMOVAL_PENDING =
+  "This run is stopped with its data kept, but an earlier hack down --recover removed containers a lost VM had brought back and ended before it confirmed that the removal reached the guest disk. Run hack down --recover to finish it; hack up refuses the run until then.";
+
+/**
+ * The refusal when the runtime does not remove the brought-back containers
+ * (real-VM row 8): its owner-less repair needs the owner's publication retired
+ * and each container exactly as recorded and stopped (`graph_lost_removal`), and
+ * without a retired publication the cleanup goes to an owner that is gone
+ * (`graph_owner_recovery`). Since HACK-2719 an ordinary row 8 is repaired, so
+ * this is shown only when one of those proofs fails. It names no command that
+ * would fail, and none that would discard the data.
  */
 export const NATIVE_LOST_REMOVAL_UNREPAIRABLE =
-  "This run is stopped with its data kept and nothing of it is running, but stopped containers that an earlier hack down had removed are listed again, most likely because the VM was lost seconds after that down, before the removal reached its disk. This run's cleanup goes through its foreground owner, which is gone, so no hack command can remove them while keeping the data yet, and hack up refuses the run until they are gone. Keep this native home unchanged for inspection; hack ps --json shows the stopped containers.";
+  "This run is stopped with its data kept and nothing of it is running, but stopped containers that an earlier hack down had removed are listed again, most likely because the VM was lost seconds after that down, before the removal reached its disk. The runtime could not prove that this run's foreground owner retired and that each container is the stopped one it recorded, so it did not remove them, and hack up refuses the run until they are gone. Keep this native home unchanged for inspection; hack ps --json shows the stopped containers.";
+
+/** Runtime codes for which the lost-removal repair proved nothing it could remove. */
+const LOST_REMOVAL_REFUSALS: ReadonlySet<string> = new Set([
+  "graph_owner_recovery",
+  "graph_lost_removal",
+]);
 
 /** Shown when `hack down --recover` removed containers a lost VM brought back. */
 export const NATIVE_LOST_REMOVAL_NOTE =
@@ -1376,6 +1409,9 @@ async function nativeProjectDownOnce(opts: {
   const verifyStoppedRepairing = async (snapshot: unknown): Promise<void> => {
     if (!(opts.recover === true && lostContainerRemovals(snapshot))) {
       verify(snapshot, run, true);
+      if (stoppedRetained(snapshot) && lostRemovalPending(snapshot)) {
+        throw new ClosedCliError(NATIVE_LOST_REMOVAL_PENDING);
+      }
       return;
     }
     try {
@@ -1386,12 +1422,12 @@ async function nativeProjectDownOnce(opts: {
         timeoutMs: 590_000,
       });
     } catch (error) {
-      // Real-VM row 8 at c624229e: a relay-enrolled receipt's cleanup goes
-      // through its foreground owner, which is gone, and the runtime has no
-      // owner-less removal that keeps data yet. Say exactly that.
+      // Real-VM row 8: the runtime removes them without the owner once the
+      // owner's publication is retired (HACK-2719). When it cannot prove that,
+      // or the containers' identities, say exactly that.
       if (
         error instanceof NativeRuntimeRequestError &&
-        error.nativeCode === "graph_owner_recovery"
+        LOST_REMOVAL_REFUSALS.has(error.nativeCode ?? "")
       ) {
         throw new ClosedCliError(NATIVE_LOST_REMOVAL_UNREPAIRABLE);
       }

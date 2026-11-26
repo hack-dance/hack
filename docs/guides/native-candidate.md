@@ -2683,10 +2683,12 @@ The start's own error often comes first: a runtime request, image preparation
 or the start's unwind fails within about a second of the provider's death
 (`process_identity_unavailable`). That error ends the start with the same
 message, chosen by how far the start got, not by which error fired, followed
-by the start's own error on one `(cause: …)` line. The pool record decides: an
-error on a VM whose provider is still recorded alive keeps its own message,
-even when it carries that code, because the runtime also reports it for
-failures on a healthy VM. A VM lost
+by the start's own error on one `(cause: …)` line. The pool record decides: a
+provider pid it names that is gone proves the loss in any phase, including a
+stop that died part way (`quiescing` or `stopping`); an error on a pool still
+recorded `running` with a live provider keeps its own message, even when it
+carries that code, because the runtime also reports it for failures on a
+healthy VM. A VM lost
 seconds after a `hack down` can also bring that down's removed containers back,
 stopped, on the next boot (the guest engine's removal had not reached its
 disk). `hack down --recover` removes them again, says so in one line, and then

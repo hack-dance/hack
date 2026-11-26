@@ -815,7 +815,7 @@ while its lock is held and a stopped run with nothing pending.
 
 | Control | Result |
 | --- | --- |
-| `positive` | `NoRefusedAdvice`, `NoNeedlessWithholding` and `NoFalseLoss` hold across 100 reachable states, whichever of the watch and the start error ends the start, and when an ordinary failure on a live VM ends it. |
+| `positive` | `NoRefusedAdvice`, `NoNeedlessWithholding`, `NoFalseLoss` and `NoMissedLoss` hold across 176 reachable states, whichever of the watch and the start error ends the start, whether the record still says `running` or is stuck mid-stop when the VM dies, and when an ordinary failure on a live VM ends it. |
 | `negative` | PR #1253 at `cd0ebff10`: the message names `hack restart` while an intent is pending and `hack down --recover` otherwise, at every stage; the lost start leaves the restart lock held; `hack down --recover` keeps the intent and the brought-back containers; a start error keeps its own text. `NoRefusedAdvice` fails. |
 | `keep-intent` | Only `hack down --recover` keeps the cleaned intent: a lost restart is sent to `hack up`, which refuses the pending restart. |
 | `leak-lock` | Only the lock stays held after the watch's exit: `hack down --recover` cannot retire the intent under it, and `hack up` refuses. |
@@ -824,6 +824,7 @@ while its lock is held and a stopped run with nothing pending.
 | `generic-error` | PR #1253 at `a8705a39` on a real VM: the start's error wins the race with its own text. Image preparation's "retry `hack up`" is refused by a pending restart or an unconfirmed cleanup. |
 | `keep-leftover` | Real-VM row 8: `hack down --recover` does not remove the brought-back containers, so it cannot confirm the cleanup, and the named sequence stops there. |
 | `code-without-veto` | `38347515`: a lost-provider code alone counts as a lost VM. An ordinary failure on a healthy VM (the runtime also reports `process_identity_unavailable` there) gets lost-VM advice: `NoFalseLoss` fails. |
+| `transitional-veto` | `c624229e`: only a `running` record's pid is read, and any record naming the boot vetoes the code. A provider that died with the record stuck in `quiescing` or `stopping` (a `runtime down` from another terminal, another project's idle stop) gets the start error's own text: `NoMissedLoss` fails. |
 | `restart-recovers` | Reachability witness: `NoRestartRecovery` fails, so a lost restart is recovered by following its message. |
 
 | Model action | Implementation boundary |
@@ -832,10 +833,10 @@ while its lock is held and a stopped run with nothing pending.
 | `Request` | `graph.onRequested` where `servicesRequested` is set, just before the serve request. |
 | `GraphReady` | `graph.onReady` in the serve `onReady` handler, after `ensureMapping` saved the run mapping (the runtime's `graph_foreground_ready` frame, or the started line of a started return). |
 | `Serve` | The restart's `onReady` (`removeNativeRestartIntent`, lock release) runs inside the start's readiness work, before `ready` progress sets `serving`. |
-| `Die` | The provider VM dies; `leftover` only for a recorded run lost while preparing. |
+| `Die` | The provider VM dies; `leftover` only for a recorded run lost while preparing; `stale` when the record is stuck in a transitional phase that still names the boot. |
 | `OrdinaryFail` | A start error on a healthy VM: the watched boot is still recorded with a live provider, so `classifyNativeLostProvider` returns nothing and the error keeps its own message, whatever code it carries. |
 | `Watch` | `onEnded` in `startNativeProject`: `nativeForegroundPoolEndMessage(end, loss)`, then `beforeLostExit` (the restart passes `releaseLock`), then exit 1. |
-| `StartFails` | The `catch` in `startNativeProject`: `lostVmFailure` asks `classifyNativeLostProvider` (the same pool reading as the watch, `nativePoolBootEnd`; a lost-provider code counts only when the record shows nothing live for the watched boot) and throws `NativeForegroundVmLostError` with the same stage message and a `(cause: …)` line; the restart's `finally` releases its lock. |
+| `StartFails` | The `catch` in `startNativeProject`: `lostVmFailure` asks `classifyNativeLostProvider` (the same pool reading as the watch, `nativePoolBootEnd`: a gone provider pid in any phase, or an ended boot; only a `running` record with a live pid vetoes a lost-provider code) and throws `NativeForegroundVmLostError` with the same stage message and a `(cause: …)` line; the restart's `finally` releases its lock. |
 | `Step` (`down`) | `nativeProjectDown` with `recover`: brought-back containers (`lostContainerRemovals`) are removed by `graph cleanup` before the stopped run is confirmed; after a stopped result, `retireCleanedNativeRestart` re-reads the intent and re-inspects the run (`stopped-data-retained`) under `withNativeRestartLock`, removes a `cleaned` intent of the same run, and prints `NATIVE_RECOVERED_RESTART_NOTE` (or one line for whatever it kept). |
 | `Step` (`up`, `restart`) | `refusePendingFreshStart` and the unsafe-mapping refusal in native start; `withNativeRestartLock` and `activeReceipt` (`needs an active graph`) in restart. |
 

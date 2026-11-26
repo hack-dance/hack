@@ -143,6 +143,36 @@ test("a start whose provider process vanished while the record still says runnin
   // never this one: no pid of it is asked about.
 });
 
+test("a provider that died mid-stop ends the start; a live one in a transitional phase never does", async () => {
+  // Round-5 review: the runtime keeps the boot id through `quiescing` and
+  // `stopping`, and a provider that dies part way through a stop (another
+  // terminal's `runtime down`, another project's idle stop) leaves the record
+  // there. Before, only a `running` record's pid was checked, so the watch
+  // never ended such a start.
+  for (const phase of ["quiescing", "stopping", "starting"]) {
+    for (const [gone, expected] of [
+      [true, 1],
+      [false, 0],
+    ] as const) {
+      let ended = 0;
+      const stop = watchNativeStartPool({
+        home: "/fixture",
+        bootId: boot,
+        checkMs: 5,
+        graceMs: 10,
+        read: () => Promise.resolve(record({ phase, process: { pid: 4242 } })),
+        gone: (pid) => pid === 4242 && gone,
+        onEnded: () => {
+          ended += 1;
+        },
+      });
+      await Bun.sleep(80);
+      stop();
+      expect({ phase, gone, ended }).toEqual({ phase, gone, ended: expected });
+    }
+  }
+});
+
 test("a successor boot retires the attempt without probing the successor's PID", async () => {
   const pids: number[] = [];
   const retired = Promise.withResolvers<void>();
@@ -432,12 +462,49 @@ test("a live provider on the watched boot vetoes a lost-provider code", async ()
       gone: () => false,
     });
   expect(await classify(record({ process: { pid: 4242 } }))).toBeUndefined();
-  // Still recorded, mid-transition: not proven ended, so not lost either.
-  expect(await classify(record({ phase: "starting" }))).toBeUndefined();
   // A record naming no boot at all leaves the code to decide.
   expect(await classify({ token: owner, phase: "running" })).toEqual({
     bootId: boot,
   });
+});
+
+test("only a running record with a live provider vetoes; a dead pid is lost in any phase", async () => {
+  // Round-5 review: a provider that died mid-stop leaves the record in
+  // `quiescing` or `stopping` with the boot id set. Before, any record naming
+  // the boot vetoed, so such a start failed with generic text.
+  const coded = new NativeRuntimeRequestError({
+    message: "Native runtime request failed (process_identity_unavailable).",
+    nativeCode: "process_identity_unavailable",
+  });
+  const classify = (fields: Record<string, unknown>, dead: boolean) =>
+    classifyNativeLostProvider({
+      error: coded,
+      home: "/unused",
+      bootId: boot,
+      read: async () => record({ process: { pid: 4242 }, ...fields }),
+      gone: (pid) => pid === 4242 && dead,
+    });
+  for (const phase of ["stopping", "quiescing", "starting"]) {
+    // A dead pid proves the loss, whatever the phase.
+    expect(await classify({ phase }, true)).toEqual({
+      bootId: boot,
+      providerPid: 4242,
+    });
+    // A live pid mid-transition proves nothing: the code decides.
+    expect(await classify({ phase }, false)).toEqual({ bootId: boot });
+  }
+  // A live pid on a running record vetoes the code.
+  expect(await classify({ phase: "running" }, false)).toBeUndefined();
+  // A transitional record with no pid and no code: not lost.
+  expect(
+    await classifyNativeLostProvider({
+      error: new Error("synthetic failure"),
+      home: "/unused",
+      bootId: boot,
+      read: async () => record({ phase: "stopping" }),
+      gone: () => false,
+    })
+  ).toBeUndefined();
 });
 
 test("the cause line keeps the start's own message, bounded to one line", () => {

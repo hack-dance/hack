@@ -18,13 +18,15 @@
  * so it passes 0 and ends at once. A later `up` waits for this process to be
  * proven gone before it recovers the run, so ending sooner only shortens that
  * wait (HACK-2535 real-VM run: about 9 s of `up` after a pool stop). A pool that is only slow (starting, stopping, unreadable, or any
- * transitional phase) never proves an ended boot, so it never ends the start.
+ * transitional phase) never proves an ended boot while its provider lives, so
+ * it never ends the start.
  *
  * The provider can also die while the record still says `running` (a crash, a
- * kill, or a provider that does not survive a sleep; HACK-2579): only a later
- * `runtime recover` writes a stopped phase. A pid from the matching boot that
- * no longer exists (`kill 0` answers ESRCH) ends the boot the same way. A
- * reused pid reads as alive.
+ * kill, or a provider that does not survive a sleep; HACK-2579), or while it
+ * says `quiescing` or `stopping` (a stop that died part way): only a later
+ * `runtime recover` writes a stopped phase. A pid named by a record of the
+ * matching boot that no longer exists (`kill 0` answers ESRCH) ends the boot
+ * the same way, in any phase. A reused pid reads as alive.
  *
  * Ending is the same as a crash of the start process, which the run's records
  * already tolerate: the receipt, finalization and recovery evidence stay as
@@ -180,10 +182,18 @@ export function watchNativeStartPool(opts: {
 
 /**
  * One reading of the pool record against a watched boot: the boot's owner
- * token once a record names it, and the end it proves, if any (the provider pid
- * the running record names is gone, or the boot was stopped or replaced). The
+ * token once a record names it, the end it proves, if any (the provider pid a
+ * record of the boot names is gone, or the boot was stopped or replaced), and
+ * whether it proves the boot live (`running` with a live provider pid). The
  * pool watch and {@link classifyNativeLostProvider} share it, so a lost VM is
  * recognized the same way whichever notices first.
+ *
+ * The pid is checked in any phase that still names the watched boot, not only
+ * `running` (HACK-2096 round-5 review): the runtime keeps the boot id through
+ * `quiescing` and `stopping`, and a provider that dies mid-stop (another
+ * terminal's `runtime down`, or another project's idle stop) leaves the record
+ * there. A gone pid (ESRCH) proves the boot ended in any phase; a live pid in
+ * a transitional phase proves nothing either way.
  */
 export function nativePoolBootEnd(
   record: unknown,
@@ -192,7 +202,11 @@ export function nativePoolBootEnd(
     readonly owner?: string;
     readonly gone: (pid: number) => boolean;
   }
-): { readonly owner?: string; readonly end?: NativeStartPoolEnd } {
+): {
+  readonly owner?: string;
+  readonly end?: NativeStartPoolEnd;
+  readonly live: boolean;
+} {
   let owner = opts.owner;
   let provider: number | undefined;
   if (
@@ -201,17 +215,23 @@ export function nativePoolBootEnd(
     typeof record.token === "string"
   ) {
     owner ??= record.token;
-    if (record.phase === "running") {
-      provider = providerPid(record);
-    }
+    provider = providerPid(record);
   }
   if (provider !== undefined && opts.gone(provider)) {
-    return { owner, end: { bootId: opts.bootId, providerPid: provider } };
+    return {
+      owner,
+      end: { bootId: opts.bootId, providerPid: provider },
+      live: false,
+    };
   }
   if (nativeHttpsPoolBootEnded(record, { bootId: opts.bootId, owner })) {
-    return { owner, end: { bootId: opts.bootId } };
+    return { owner, end: { bootId: opts.bootId }, live: false };
   }
-  return { owner };
+  return {
+    owner,
+    live:
+      provider !== undefined && isRecord(record) && record.phase === "running",
+  };
 }
 
 /**
@@ -269,14 +289,15 @@ export function nativeLostProviderCode(error: unknown, depth = 0): boolean {
  * grace. This is the one classification every such path goes through, so the
  * user gets the same stage message whichever notices first. The pool record is
  * the evidence (the same reading as the watch: the watched boot's provider pid
- * is gone, or the boot ended). A record that still names the watched boot
- * without proving it ended (its provider pid is alive) vetoes everything else:
- * the runtime also reports `process_identity_unavailable` for failures on a
- * healthy VM (an image build's context snapshot, an incarnation read, a helper
- * process scan, engine verification), and those must keep their own message.
- * Only when the record cannot be read, or names no state for the watched boot,
- * does a lost-provider code in the error count. Undefined when nothing proves a
- * loss.
+ * is gone in any phase, or the boot ended). Only a record that proves the boot
+ * live, `running` with a live provider pid, vetoes everything else: the runtime
+ * also reports `process_identity_unavailable` for failures on a healthy VM (an
+ * image build's context snapshot, an incarnation read, a helper process scan,
+ * engine verification), and those must keep their own message. In any other
+ * case (an unreadable record, one that names nothing for the watched boot, or
+ * a transitional phase such as `starting`, `quiescing` or `stopping` with a
+ * live pid, which proves nothing) a lost-provider code in the error decides.
+ * Undefined when nothing proves a loss.
  */
 export async function classifyNativeLostProvider(opts: {
   readonly error: unknown;
@@ -288,15 +309,15 @@ export async function classifyNativeLostProvider(opts: {
   const record = await (opts.read ?? readNativePoolRecord)(opts.home).catch(
     () => undefined
   );
-  const { end } = nativePoolBootEnd(record, {
+  const { end, live } = nativePoolBootEnd(record, {
     bootId: opts.bootId,
     gone: opts.gone ?? processGone,
   });
   if (end) {
     return end;
   }
-  if (isRecord(record) && record.guest_boot_id === opts.bootId) {
-    // The watched boot is still recorded and not proven ended: not lost.
+  if (live) {
+    // The watched boot is running with a live provider: not lost.
     return undefined;
   }
   return nativeLostProviderCode(opts.error)

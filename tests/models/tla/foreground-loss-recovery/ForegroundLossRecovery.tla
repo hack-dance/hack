@@ -45,19 +45,27 @@
 \*     the run is stopped with data kept, when the restart lock is free.
 \*   RepairLeftover: `hack down --recover` removes containers the receipt
 \*     records removed that a lost VM brought back.
-\*   ClassifyRule = "veto": a start error counts as a lost VM only from the
-\*     pool record, or from a lost-provider code when the record shows nothing
-\*     live for the watched boot (this fix); "code": the code alone suffices
-\*     (38347515), though the runtime also reports it on a healthy VM.
+\*   ClassifyRule = "veto": a start error counts as a lost VM from the pool
+\*     record (a gone provider pid in any phase, or an ended boot); only a
+\*     `running` record with a live pid vetoes a lost-provider code (this
+\*     fix). "round5": c624229e, where only a `running` record's pid was read
+\*     and any record naming the boot vetoed, so a provider that died with the
+\*     record stuck in `quiescing` or `stopping` was missed. "code": the code
+\*     alone suffices (38347515), though the runtime also reports it on a
+\*     healthy VM.
+\*
+\* `stale`: the record names the watched boot in a transitional phase when the
+\* provider dies (a `runtime down` from another terminal, or another project's
+\* idle stop, died part way).
 EXTENDS Naturals, Sequences
 
 CONSTANTS MessageRule, ErrorRule, ReleaseLock, RetireIntent, RepairLeftover,
           ClassifyRule
 
-VARIABLES kind, recorded, start, lostAt, endedBy, leftover, receipt, intent,
-          lock, msg, todo, outcome
-vars == <<kind, recorded, start, lostAt, endedBy, leftover, receipt, intent,
-          lock, msg, todo, outcome>>
+VARIABLES kind, recorded, start, lostAt, endedBy, leftover, stale, receipt,
+          intent, lock, msg, todo, outcome
+vars == <<kind, recorded, start, lostAt, endedBy, leftover, stale, receipt,
+          intent, lock, msg, todo, outcome>>
 
 Commands == {"down", "up", "restart"}
 Stages == {"Preparing", "Requested", "GraphReady", "Serving"}
@@ -69,6 +77,7 @@ TypeOK ==
     /\ lostAt \in Stages \cup {"none"}
     /\ endedBy \in {"none", "watch", "error", "ordinary"}
     /\ leftover \in BOOLEAN
+    /\ stale \in BOOLEAN
     /\ receipt \in {"none", "stopped", "unready", "ready"}
     /\ intent \in {"none", "cleaned"}
     /\ lock \in BOOLEAN
@@ -86,13 +95,13 @@ Init ==
     /\ recorded \in BOOLEAN
     /\ kind = "restart" => recorded
     /\ start = "Preparing" /\ lostAt = "none" /\ endedBy = "none"
-    /\ leftover = FALSE
+    /\ leftover = FALSE /\ stale = FALSE
     /\ receipt = IF recorded THEN "stopped" ELSE "none"
     /\ intent = IF kind = "restart" THEN "cleaned" ELSE "none"
     /\ lock = (kind = "restart")
     /\ msg = "none" /\ todo = <<>> /\ outcome = "pending"
 
-Frozen == <<kind, recorded, endedBy, leftover, msg, todo, outcome>>
+Frozen == <<kind, recorded, endedBy, leftover, stale, msg, todo, outcome>>
 
 \* The first service of this run is requested (`graph.onRequested`).
 Request ==
@@ -116,12 +125,15 @@ Serve ==
     /\ UNCHANGED <<lostAt, receipt>> /\ UNCHANGED Frozen
 
 \* The provider VM dies under the start. A recorded run lost before any
-\* service was requested may get its removed containers back (row 8).
+\* service was requested may get its removed containers back (row 8). The
+\* record may still say `running`, or be stuck in a transitional phase
+\* (`stale`) that still names the boot.
 Die ==
     /\ start \in Stages
     /\ start' = "Dead" /\ lostAt' = start
     /\ leftover' \in IF recorded /\ start = "Preparing"
                      THEN BOOLEAN ELSE {FALSE}
+    /\ stale' \in BOOLEAN
     /\ UNCHANGED <<kind, recorded, endedBy, receipt, intent, lock, msg, todo,
                    outcome>>
 
@@ -159,17 +171,22 @@ End(by, m, lockAfter) ==
     /\ msg' = m /\ todo' = Steps(m)
     /\ lock' = lockAfter
     /\ outcome' = IF Steps(m) = <<>> THEN "ok" ELSE "pending"
-    /\ UNCHANGED <<kind, recorded, lostAt, leftover, receipt, intent>>
+    /\ UNCHANGED <<kind, recorded, lostAt, leftover, stale, receipt, intent>>
 
 \* The pool watch sees the lost VM, prints the message, runs `beforeLostExit`
 \* (the restart's lock release) and exits 1; nothing else of the start runs.
 Watch == End("watch", Message(lostAt), lock /\ ~ReleaseLock)
 
 \* The start's own error path fails first. Its error propagates, so the
-\* restart's `finally` releases the lock either way.
+\* restart's `finally` releases the lock either way. It is classified as a
+\* lost VM unless the code at hand misses it: the round-5 rule read no pid
+\* from a transitional record and let that record veto the code.
+Classified == ~(ClassifyRule = "round5" /\ stale)
+
 StartFails ==
     End("error",
-        IF ErrorRule = "stage" THEN Message(lostAt) ELSE GenericMessage(lostAt),
+        IF ErrorRule = "stage" /\ Classified
+        THEN Message(lostAt) ELSE GenericMessage(lostAt),
         FALSE)
 
 \* An ordinary failure on a healthy VM (no `Die`): the record still shows the
@@ -184,7 +201,7 @@ OrdinaryFail ==
     /\ start' = "Lost" /\ lostAt' = start /\ endedBy' = "ordinary"
     /\ todo' = <<>> /\ outcome' = "ok"
     /\ lock' = FALSE
-    /\ UNCHANGED <<kind, recorded, leftover, receipt, intent>>
+    /\ UNCHANGED <<kind, recorded, leftover, stale, receipt, intent>>
 
 \* `hack down --recover` depends on where the start was lost, not on what the
 \* message said. Lost while preparing, the record (if any) is still the
@@ -222,7 +239,7 @@ Step ==
             /\ intent' = IF c = "down" /\ RetireIntent /\ ~lock
                          THEN "none"
                          ELSE IF c = "restart" THEN "none" ELSE intent
-    /\ UNCHANGED <<kind, recorded, start, lostAt, endedBy, lock, msg>>
+    /\ UNCHANGED <<kind, recorded, start, lostAt, endedBy, stale, lock, msg>>
 
 Next == Request \/ GraphReady \/ Serve \/ Die \/ Watch \/ StartFails
         \/ OrdinaryFail \/ Step
@@ -239,4 +256,8 @@ NoRestartRecovery ==
     ~(kind = "restart" /\ outcome = "ok" /\ msg \notin {"inspect", "own"})
 \* An ordinary failure on a live VM never gets lost-VM advice.
 NoFalseLoss == endedBy = "ordinary" => msg = "own"
+\* A start error after its VM died gets the stage message (one the stage
+\* rules name), never the error's own text, whatever phase the record is in.
+NoMissedLoss ==
+    endedBy = "error" => msg \in {"up", "downUp", "downRestart", "inspect"}
 =============================================================================

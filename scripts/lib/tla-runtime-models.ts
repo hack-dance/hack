@@ -3303,7 +3303,7 @@ const contracts: readonly ModelContract[] = [
     // restart-recovers is the reachability witness of a recovered restart.
     name: "foreground-loss-recovery",
     module: "ForegroundLossRecovery",
-    states: 100,
+    states: 176,
     invariant: "NoRefusedAdvice",
     fields: ['outcome = "refused"', 'lostAt = "Preparing"'],
     alternativeWitnesses: [['outcome = "refused"', 'lostAt = "Requested"']],
@@ -3328,6 +3328,15 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NoFalseLoss",
         fields: ['endedBy = "ordinary"', 'lostAt = "Preparing"'],
+      },
+      {
+        // c624229e (round-5 review): only a running record's pid was read and
+        // any record naming the boot vetoed, so a provider that died with the
+        // record stuck mid-stop got the start error's own text.
+        name: "transitional-veto",
+        negative: true,
+        invariant: "NoMissedLoss",
+        fields: ['endedBy = "error"', "stale = TRUE", 'lostAt = "Preparing"'],
       },
       {
         // Real-VM row 8: containers a lost VM brought back are not removed,

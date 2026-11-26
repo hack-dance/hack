@@ -1,6 +1,14 @@
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
+  isNativeCommandLeaseRefusal,
+  isNativeOwnerRefreshLeaseRefusal,
+  NATIVE_OWNER_REFRESH_LEASE_BUSY,
+  type NativeLeaseCommand,
+  nativeCommandLeaseRefusal,
+  nativeCommandLeaseWaitReporter,
+} from "./native-command-lease.ts";
+import {
   loadNativeProjectRun,
   type NativeProjectRunScope,
 } from "./native-project-run.ts";
@@ -27,6 +35,7 @@ const REFRESH_DIAGNOSTIC_CODES = new Set([
   "graph_dependency_rebind_launch",
   "graph_dependency_rebind_readiness",
   "graph_dependency_rebind_stop",
+  NATIVE_OWNER_REFRESH_LEASE_BUSY,
   "graph_dependency_refresh_refused",
   "graph_owner_recovery",
   "graph_publisher_retirement",
@@ -41,6 +50,12 @@ const REFRESH_DIAGNOSTIC_CODES = new Set([
 ]);
 
 /**
+ * The refresh request's bound: the runtime's 35 s lease wait, 5 s to send, 175 s
+ * reading the owner's answer, and a 5 s margin.
+ */
+export const NATIVE_DEPENDENCY_REFRESH_TIMEOUT_MS = 220_000;
+
+/**
  * The runtime refused the refresh before acting because it is stopped. That
  * outcome is confirmed, not uncertain: nothing was refreshed and no command
  * was requested, so report the cause and the next action directly.
@@ -48,7 +63,25 @@ const REFRESH_DIAGNOSTIC_CODES = new Set([
 const RUNTIME_NOT_RUNNING_MESSAGE =
   "Native runtime is not running; no dependency refresh or command was requested. Start the native runtime and retry.";
 
-function refused(cause?: unknown): Error {
+function refused(cause?: unknown, command?: NativeLeaseCommand): Error {
+  // The requesting process's own lease wait expired before it sent anything to
+  // the owner (HACK-2729), or the owner's own wait expired before its rebind:
+  // nothing was refreshed and no command ran, so this is not an uncertain
+  // outcome. Every other owner refusal arrives wrapped and stays unconfirmed.
+  if (
+    command &&
+    (isNativeCommandLeaseRefusal(cause) ||
+      isNativeOwnerRefreshLeaseRefusal(cause))
+  ) {
+    return nativeCommandLeaseRefusal({
+      // The owner's answer carries only its code, so it names no holder.
+      nativeMessage: isNativeCommandLeaseRefusal(cause)
+        ? cause.nativeMessage
+        : undefined,
+      command,
+      stage: "refresh",
+    });
+  }
   if (
     cause instanceof NativeRuntimeRequestError &&
     cause.nativeCode === "provider_pin_changed"
@@ -101,6 +134,10 @@ function validSlots(value: unknown): value is number[] {
 export async function refreshNativeProjectDependencies(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
+  /** The command that sends this refresh first, as its refusal names it. */
+  readonly command: NativeLeaseCommand;
+  /** The command's lease-wait progress line; one per command (HACK-2729). */
+  readonly onLeaseWait?: (holder: string) => void;
   readonly invoke?: typeof invokeNativeRuntime;
 }) {
   const mapping = await loadNativeProjectRun(opts.scope);
@@ -120,10 +157,12 @@ export async function refreshNativeProjectDependencies(opts: {
         mapping.run,
         "--json",
       ],
-      // Up to 15 s waiting for a briefly held provider lease (HACK-2669), 5 s to
-      // send, then 175 s reading the owner's answer. Killing the request first
-      // would disconnect it, and a disconnect cancels the owner's rebind.
-      timeoutMs: 200_000,
+      // Up to 35 s waiting for the provider lease (a brief holder, HACK-2669, or
+      // another project's stop, HACK-2729), 5 s to send, then 175 s reading the
+      // owner's answer. Killing the request first would disconnect it, and a
+      // disconnect cancels the owner's rebind.
+      timeoutMs: NATIVE_DEPENDENCY_REFRESH_TIMEOUT_MS,
+      onLeaseWait: nativeCommandLeaseWaitReporter({ given: opts.onLeaseWait }),
     });
     if (
       !isRecord(response) ||
@@ -146,6 +185,6 @@ export async function refreshNativeProjectDependencies(opts: {
       changedSlots: response.changed_slots,
     };
   } catch (cause) {
-    throw refused(cause);
+    throw refused(cause, opts.command);
   }
 }

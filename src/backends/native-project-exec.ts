@@ -3,6 +3,13 @@ import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { waitForNativeProjectReady } from "../lib/native-start-wait.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
+import {
+  isNativeCommandLeaseRefusal,
+  isNativeCommandNotRun,
+  NATIVE_COMMAND_LEASE_WAIT_SECONDS,
+  nativeCommandLeaseRefusal,
+  nativeCommandLeaseWaitReporter,
+} from "./native-command-lease.ts";
 import { prepareNativeExecEnvironment } from "./native-exec-environment.ts";
 import { resolveNativeStartTimeoutSeconds } from "./native-graph-start-budget.ts";
 import {
@@ -19,6 +26,22 @@ import {
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
+
+/**
+ * The `graph exec` request's bound: the runtime's 35 s lease wait, the 30 s
+ * exec, 20 s of output still arriving, the 5 s inspection grace and a 5 s
+ * margin.
+ */
+export const NATIVE_EXEC_REQUEST_TIMEOUT_MS = 95_000;
+
+/**
+ * The delivery lifetime of an exec's fresh per-command values. The runtime
+ * starts it when `graph exec` receives them, before its lease wait, and stops
+ * that wait once the lifetime has passed. It covers the whole 35 s lease wait
+ * (HACK-2729) and keeps the 30 s it gave delivery before that wait grew.
+ */
+export const NATIVE_EXEC_VALUES_LIFETIME_SECONDS =
+  NATIVE_COMMAND_LEASE_WAIT_SECONDS + 30;
 
 function refused(): Error {
   return new ClosedCliError(
@@ -97,7 +120,7 @@ async function freshDelivery(opts: {
       version: 1,
       plan: mapping.planId,
       run: mapping.run,
-      lifetime_seconds: 30,
+      lifetime_seconds: NATIVE_EXEC_VALUES_LIFETIME_SECONDS,
       services: { [opts.service]: values },
     })
   );
@@ -112,8 +135,50 @@ async function freshDelivery(opts: {
   );
   return { payload, extra, generation: selected.generation };
 }
-/** One bounded noninteractive command; fresh values use private stdin when a Compose source is supplied. */
-export async function nativeProjectExec(opts: {
+/**
+ * The `graph exec` request, with its own expired lease wait reported as a plain
+ * refusal (HACK-2729). The exec's lease is the first thing `graph exec` takes, so
+ * that refusal means the command did not run (the refresh before it did): it is
+ * not an uncertain outcome.
+ */
+function withExecLeaseRefusal(
+  invoke: typeof invokeNativeRuntime
+): typeof invokeNativeRuntime {
+  return async (request) => {
+    try {
+      return await invoke(request);
+    } catch (error) {
+      if (isNativeCommandLeaseRefusal(error)) {
+        throw nativeCommandLeaseRefusal({
+          nativeMessage: error.nativeMessage,
+          command: "hack exec",
+          stage: "exec",
+        });
+      }
+      throw error;
+    }
+  };
+}
+
+/**
+ * One bounded noninteractive command; fresh values use private stdin when a
+ * Compose source is supplied. A refusal whose command was never sent releases a
+ * native background command's admission slot: no guest process exists for it.
+ */
+export async function nativeProjectExec(
+  opts: Parameters<typeof nativeProjectExecAttempt>[0]
+): Promise<Awaited<ReturnType<typeof nativeProjectExecAttempt>>> {
+  try {
+    return await nativeProjectExecAttempt(opts);
+  } catch (error) {
+    if (isNativeCommandNotRun(error)) {
+      await noteNativeExitConfirmed();
+    }
+    throw error;
+  }
+}
+
+async function nativeProjectExecAttempt(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   readonly service: string;
@@ -121,6 +186,8 @@ export async function nativeProjectExec(opts: {
   readonly workdir?: string;
   readonly composeFile?: string;
   readonly invoke?: typeof invokeNativeRuntime;
+  /** The lease-wait progress line; the CLI prints it once per command. */
+  readonly onLeaseWait?: (holder: string) => void;
 }) {
   if (!nativeAuthoredExecOptions(opts.service, opts.argv, opts.workdir)) {
     throw new ClosedCliError(
@@ -140,7 +207,16 @@ export async function nativeProjectExec(opts: {
       process.stderr.write(`${line}\n`);
     },
   });
-  const refreshed = await refreshNativeProjectDependencies(opts);
+  // Both requests that may wait for the lock (the refresh, then the exec) share
+  // one progress line (HACK-2729).
+  const onLeaseWait = nativeCommandLeaseWaitReporter({
+    given: opts.onLeaseWait,
+  });
+  const refreshed = await refreshNativeProjectDependencies({
+    ...opts,
+    command: "hack exec",
+    onLeaseWait,
+  });
   const before = await nativeProjectPs(opts);
   if (before.status === "provider_pin_changed") {
     throw new NativeRuntimeRequestError({
@@ -177,7 +253,7 @@ export async function nativeProjectExec(opts: {
   ) {
     throw refused();
   }
-  const invoke = opts.invoke ?? invokeNativeRuntime;
+  const invoke = withExecLeaseRefusal(opts.invoke ?? invokeNativeRuntime);
   const { payload, extra, generation } = opts.composeFile
     ? await freshDelivery({
         ...opts,
@@ -219,12 +295,14 @@ export async function nativeProjectExec(opts: {
     value = await invoke({
       runtime: opts.runtime,
       cwd: opts.scope.projectRoot,
-      // The runtime may first wait up to 15 s for a provider lease a ready owner holds
-      // briefly (HACK-2669). Its 30 s exec bound may then be followed by up to 20 s of
-      // reading output that is still arriving and a 5 s inspection grace (HACK-2357);
-      // do not kill it first.
-      timeoutMs: 75_000,
+      // The runtime may first wait up to 35 s for the provider lease, which a ready
+      // owner holds briefly (HACK-2669) and another project's stop holds for its
+      // whole stop (HACK-2729). Its 30 s exec bound may then be followed by up to
+      // 20 s of reading output that is still arriving and a 5 s inspection grace
+      // (HACK-2357); do not kill it first.
+      timeoutMs: NATIVE_EXEC_REQUEST_TIMEOUT_MS,
       serviceExecResponse: true,
+      onLeaseWait,
       privateInput: payload,
       args: [
         "graph",

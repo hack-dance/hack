@@ -2,6 +2,7 @@ import { noteNativeExitConfirmed } from "../lib/background-command/native-exit.t
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { waitForNativeProjectReady } from "../lib/native-start-wait.ts";
+import { isNativeCommandNotRun } from "./native-command-lease.ts";
 import { prepareNativeExecEnvironment } from "./native-exec-environment.ts";
 import { resolveNativeStartTimeoutSeconds } from "./native-graph-start-budget.ts";
 import { refreshNativeProjectDependencies } from "./native-project-dependency-refresh.ts";
@@ -117,8 +118,26 @@ export function requireNativeRunSelection(opts: {
   }
 }
 
-/** A separate service container; completion requires confirmed job cleanup. */
-export async function nativeProjectOneOff(opts: {
+/**
+ * A separate service container; completion requires confirmed job cleanup. A
+ * refusal whose command was never sent (its dependency refresh could not take
+ * the lease, HACK-2729) releases a native background command's admission slot:
+ * no job exists for it.
+ */
+export async function nativeProjectOneOff(
+  opts: Parameters<typeof nativeProjectOneOffAttempt>[0]
+): Promise<Awaited<ReturnType<typeof nativeProjectOneOffAttempt>>> {
+  try {
+    return await nativeProjectOneOffAttempt(opts);
+  } catch (error) {
+    if (isNativeCommandNotRun(error)) {
+      await noteNativeExitConfirmed();
+    }
+    throw error;
+  }
+}
+
+async function nativeProjectOneOffAttempt(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   readonly service: string;
@@ -167,7 +186,10 @@ export async function nativeProjectOneOff(opts: {
       process.stderr.write(`${line}\n`);
     },
   });
-  const refreshed = await refreshNativeProjectDependencies(opts);
+  const refreshed = await refreshNativeProjectDependencies({
+    ...opts,
+    command: "hack run",
+  });
   if (JSON.stringify(refreshed.mapping) !== JSON.stringify(mapping)) {
     throw refused();
   }

@@ -1011,10 +1011,10 @@ that stops its own run records itself as `project stop` in the lock, whether aft
 names the project. If the holder keeps the lease past 35 seconds, the start refuses
 `provider_busy` with nothing started, names the holder, and tells you to retry the
 same command once that holder finishes. You do not need `hack down` or a pool stop
-first. This wait is only for starts: `hack exec` keeps its own 15-second wait,
-`hack ps` and `hack logs` keep their short observer behavior, and the inspection a
-foreground start makes after it ends (after Ctrl-C, for example) keeps its 5-second
-bound.
+first. `hack exec` waits up to the same 35 seconds for each of its two lease steps
+(see [Normal native exec](#normal-native-exec)). `hack ps` and `hack logs` keep their
+short observer behavior, and the inspection a foreground start makes after it ends
+(after Ctrl-C, for example) keeps its 5-second bound.
 
 When two projects start on a stopped pool at the same time, the first boots it. The
 second waits for the lease and, once it holds it, finds the pool running and joins
@@ -3875,12 +3875,19 @@ A component acknowledgement is not application readiness, and this recovery does
 not diagnose or fix an upstream engine panic. Changed or incomplete evidence
 remains available for inspection; do not remove journals or ownership pins to retry.
 
-Native `hack exec` and `hack run` make this request once with a 200-second frontend
-budget before selecting their command or reading managed environment values. Both
-the request and the owner's answer first wait up to 15 seconds for a briefly held
-provider lease instead of refusing `provider_busy` at once.
-If refresh refuses, the frontend preserves only reviewed native error identifiers
-such as `provider_busy` or `graph_owner_recovery: graph_dependency_rebind_incomplete`.
+Native `hack exec` and `hack run` make this request once with a 220-second frontend
+budget before selecting their command or reading managed environment values. The
+request first waits up to 35 seconds for the provider lease, which a ready owner
+holds briefly and another project's `hack down` holds for its whole stop. The
+owner's answer waits up to 15 seconds, because it waits on the owner's only loop.
+If the request's own wait expires, it has sent nothing to the owner, so the command
+says that nothing ran, names the holder, and tells you to retry once that holder
+finishes (see [Normal native exec](#normal-native-exec)). The same applies when the
+owner's own 15-second wait expires before its rebind (another waiter took the
+lease first): the owner answers `graph_dependency_refresh_lease_busy`, and the
+command says that nothing ran, with the holder unavailable.
+If refresh refuses after that, the frontend preserves only reviewed native error
+identifiers such as `graph_owner_recovery: graph_dependency_rebind_incomplete`.
 Subprocess text and unknown codes remain omitted. These diagnostics do not confirm
 whether refresh effects occurred or authorize replay; the command is not dispatched.
 `ps` and `logs` remain observations and do not request refresh. Authenticated relay
@@ -5409,14 +5416,36 @@ the current owned project/branch mapping, preserves binary stdout/stderr and the
 command exit code, and never falls back to Compose. With piped input/output or
 `HACK_NO_INTERACTIVE=1`, it uses finite exec with a 30-second observation budget;
 a timeout may leave the command running and is not
-retried. A ready foreground owner holds the provider lease briefly and often, so exec,
-and the dependency refresh it sends first, wait up to 15 seconds for another holder
-to release that lease before refusing with `provider_busy` naming the holder. For
-compose-backed exec the 30-second budget starts after that wait; an authored project's
-exec and one-off `run` count the wait inside their own 30-second budget. A compose
-project's one-off `run` waits the same way before its job is reserved, within one
-15-second bound for its selection and admission. A pending
-Ctrl-C or `hack down` ends the wait at once without starting the command. When fresh values are delivered through private stdin, output that is still arriving
+retried. A ready foreground owner holds the provider lease briefly and often, and
+another project's `hack down` holds it for its whole graph stop (about 31 seconds
+when a service has the 30-second stop grace limit). So exec, and the dependency
+refresh it sends first, wait up to 35 seconds each for another holder to release
+that lease. When nothing holds it, they take it at once and exec is as fast as
+before. When a wait lasts about 3 seconds, exec prints one line that names the
+holder, for example `Waiting for the native runtime lock, held by a project stop.
+This command continues once it is released (up to 35 s).` The line appears at most
+once per command. If the holder keeps the lease past 35 seconds during the
+refresh, exec refuses `provider_busy` before it sends anything:
+
+```text
+hack exec could not acquire the native runtime lock (provider_busy); nothing ran.
+Holder: project stop.
+Retry hack exec once that project stop finishes.
+```
+
+If the refresh completed and the exec's own wait expires, the first line ends with
+`the command did not run.` instead, because the refresh has already run. `hack run`
+says the same with `hack run` when its dependency refresh cannot take the lease. A
+refusal whose command never ran also releases a background command's admission
+slot. Fresh per-command values sent with exec have a 65-second delivery lifetime,
+which covers the whole 35-second wait. "Unconfirmed" is kept for outcomes where the command may have run: a
+refresh or exec that was sent and whose answer did not arrive or did not match.
+For compose-backed exec the 30-second budget starts after that wait. An authored
+project's exec and one-off `run`, and a compose project's one-off `run`, are
+answered by the project's owner, which waits at most 15 seconds on its only loop
+(inside the authored 30-second budget, or for a compose `run` within one 15-second
+bound for its selection and admission before its job is reserved). A pending
+Ctrl-C or `hack down` ends the owner's wait at once without starting the command. When fresh values are delivered through private stdin, output that is still arriving
 or already queued when that budget ends is read to the end, so a command that finished on a
 busy host returns its exit code (see below). `--env` and `--profile` changes are refused. A command name such as `bun`
 uses the selected container's PATH; no host PATH or implicit shell is used. For

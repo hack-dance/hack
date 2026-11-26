@@ -1,0 +1,20 @@
+---
+title: ExecStopWait · exec and a stop
+---
+stateDiagram-v2
+  direction TB
+  [*] --> refresh
+  refresh --> refresh : Tick [stop holds]
+  refresh --> exec : Acquire [free, reads only]
+  refresh --> refused : Expire [35 s]
+  exec --> exec : Tick [second holder]
+  exec --> sent : Acquire [free, sends]
+  exec --> refused : Expire [35 s]
+  sent --> done : Finish
+  refused --> [*] : did not run
+  done --> [*] : ran or unconfirmed
+  class refresh wait
+  class exec wait
+  class sent live
+  class done ok
+  class refused fail

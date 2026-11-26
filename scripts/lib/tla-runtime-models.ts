@@ -20,6 +20,7 @@ type ModelContract = {
       | "TerminalReuse"
       | "MetadataAliasing"
       | "PreReady"
+      | "RetainedGuard"
       | "ServingExit";
     readonly negative: boolean;
     readonly states?: number;
@@ -49,6 +50,30 @@ function runtimeServiceEither(first: ClientFields, ...others: ClientFields[]) {
       first("c2"),
       ...others.flatMap((fields) => [fields("c1"), fields("c2")]),
     ],
+  };
+}
+
+// RetainedGuard's two starts are symmetric too: either may be the one that
+// boots the pool and either the one that refuses (or, with `retried`, selects
+// again and joins).
+function retainedGuardEither(
+  first: string,
+  second: string,
+  shared: readonly string[],
+  retried = false
+) {
+  const at = (a: string, b: string, secondRetried: boolean) => [
+    `pc = [a |-> "${a}", b |-> "${b}"]`,
+    ...shared,
+    ...(retried
+      ? [
+          `retried = [a |-> ${secondRetried ? "FALSE" : "TRUE"}, b |-> ${secondRetried ? "TRUE" : "FALSE"}]`,
+        ]
+      : []),
+  ];
+  return {
+    fields: at(first, second, true),
+    alternativeWitnesses: [at(second, first, false)],
   };
 }
 
@@ -2071,6 +2096,57 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NeverResumed",
         fields: ['waiter = "resumed"', 'pool = "running"', 'holder = "second"'],
+      },
+      {
+        // HACK-2732: two retained starts on one stopped pool. The guard reads
+        // eligibility under the startup lease; a selection stale only by the
+        // peer's boot is selected again once, and the start joins the pool.
+        name: "retained-guard",
+        module: "RetainedGuard",
+        negative: false,
+        states: 22,
+      },
+      {
+        // The old order: the guard before the lease sees the peer's boot in
+        // progress (`booting`) and refuses graph_retained_startup.
+        name: "retained-guard-before-lease",
+        module: "RetainedGuard",
+        negative: true,
+        invariant: "NoRefusal",
+        ...retainedGuardEither("booting", "refused", ['pool = "booting"']),
+      },
+      {
+        // Under the lease but without the changed-pool retry, the start that
+        // waited out the peer's boot refuses its stale selection.
+        name: "retained-guard-no-join",
+        module: "RetainedGuard",
+        negative: true,
+        invariant: "NoRefusal",
+        ...retainedGuardEither("booted", "refused", ['pool = "running"']),
+      },
+      {
+        // A replaced owner (new token, machine and disks) never starts, even
+        // with the retry.
+        name: "retained-guard-replaced",
+        module: "RetainedGuard",
+        negative: false,
+        states: 38,
+      },
+      {
+        // ... and it is refused, not waited out or joined.
+        name: "retained-guard-replaced-refuses",
+        module: "RetainedGuard",
+        negative: true,
+        invariant: "NoRefusal",
+        fields: ["token = 1"],
+      },
+      {
+        // The retry then the join is reachable.
+        name: "retained-guard-rejoins",
+        module: "RetainedGuard",
+        negative: true,
+        invariant: "NeverJoinedAfterRetry",
+        ...retainedGuardEither("booted", "joined", [], true),
       },
     ],
   },

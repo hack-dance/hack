@@ -8,18 +8,22 @@ import type {
   NativeProjectRun,
   NativeProjectRunScope,
 } from "./native-project-run.ts";
-import type {
-  invokeNativeRuntime,
-  NativeRuntimeSelection,
+import {
+  type invokeNativeRuntime,
+  NativeRuntimeRequestError,
+  type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 import { NATIVE_START_LEASE_REQUEST_TIMEOUT_MS } from "./native-start-lease.ts";
 
 const SHA = /^[a-f0-9]{64}$/;
 /**
  * Stopped runtime phases the runtime's retained preflight accepts, besides a
- * clean `stopped` (HACK-2376): a later boot that failed before recording its
- * guest boot, after `runtime recover` where needed. To this caller each is a
- * stopped runtime that `runtime up` boots; the runtime itself keeps the checks.
+ * clean `stopped`: a later boot that failed before recording its guest boot,
+ * after `runtime recover` where needed (HACK-2376), and a pool whose provider
+ * ended uncleanly after its boot recorded one, with its provider proven gone
+ * (HACK-2730: the provider died after `hack down`, then `runtime recover`). To
+ * this caller each is a stopped runtime that `runtime up` boots; the runtime
+ * itself keeps the checks.
  */
 const RETAINED_STOPPED_PHASES = new Set([
   "stopped",
@@ -79,6 +83,104 @@ export async function preflightNativeRetainedStartup(opts: {
     ],
   };
 }
+/** The runtime's refusal of a retained start whose pool another start booted
+ * or stopped after its preflight; the run and the pool's identity are
+ * unchanged (HACK-2732). */
+export const NATIVE_RETAINED_POOL_CHANGED = "graph_retained_pool_changed";
+
+/**
+ * `runtime up` for a retained start, which joins a pool another start booted
+ * meanwhile (HACK-2732). Two projects' `hack up -d` on a stopped pool: each
+ * preflight selects the stopped pool; one start boots it, and the other's
+ * `runtime up`, under the startup lease, finds the pool booted since its
+ * selection. The runtime refuses that with `graph_retained_pool_changed` only
+ * when the run's receipt and the pool's stable identity (token, machine, HOME
+ * alias, disks, root files, profile, shares, network, layout) are unchanged.
+ * Then `reselect` takes the selection again (the preflight and, on a running
+ * pool, the graph confirmation) and `runtime up` runs once more, which joins
+ * the running pool. Any other refusal, or a second one, is kept: a replaced
+ * owner, token or disk refuses with `graph_retained_startup`.
+ */
+export async function runtimeUpJoiningChangedPool<T>(opts: {
+  readonly flags: readonly string[];
+  readonly up: (flags: readonly string[]) => Promise<T>;
+  readonly reselect: () => Promise<readonly string[]>;
+}): Promise<T> {
+  try {
+    return await opts.up(opts.flags);
+  } catch (error) {
+    if (
+      !(
+        opts.flags.length > 0 &&
+        error instanceof NativeRuntimeRequestError &&
+        error.nativeCode === NATIVE_RETAINED_POOL_CHANGED
+      )
+    ) {
+      throw error;
+    }
+  }
+  return await opts.up(await opts.reselect());
+}
+
+/**
+ * The retained run's eligibility once more, for a start whose selection the
+ * runtime found stale (HACK-2732): the run mapping is still the one selected,
+ * the preflight accepts it, and on a running pool its graph is still the
+ * confirmed retained stop. Returns the new `runtime up` flags.
+ */
+export async function reselectNativeRetainedStartup(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly scope: NativeProjectRunScope;
+  readonly run: NativeProjectRun;
+  readonly invoke: typeof invokeNativeRuntime;
+  readonly load: typeof loadNativeProjectRun;
+  readonly signal?: AbortSignal;
+}): Promise<string[]> {
+  await verifyNativeRetainedMapping(opts);
+  const preflight = await preflightNativeRetainedStartup({
+    runtime: opts.runtime,
+    projectRoot: opts.scope.projectRoot,
+    run: opts.run,
+    invoke: opts.invoke,
+    signal: opts.signal,
+  });
+  await confirmRunningRetainedGraph({
+    runtime: opts.runtime,
+    projectRoot: opts.scope.projectRoot,
+    run: opts.run,
+    invoke: opts.invoke,
+    runtimePhase: preflight.runtimePhase,
+  });
+  requireActive(opts.signal);
+  return preflight.flags;
+}
+
+/** On a running pool, the retained run's graph must still be its confirmed
+ * retained stop before a start is requested for it. */
+export async function confirmRunningRetainedGraph(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly run: NativeProjectRun;
+  readonly invoke: typeof invokeNativeRuntime;
+  readonly runtimePhase: "running" | "stopped";
+}): Promise<void> {
+  if (opts.runtimePhase !== "running") {
+    return;
+  }
+  const observed = await inspectNativeProjectGraph({
+    startupWait: true,
+    runtime: opts.runtime,
+    projectRoot: opts.projectRoot,
+    run: opts.run.run,
+    invoke: opts.invoke,
+  });
+  if (!confirmedNativeRetainedGraph(observed, opts.run)) {
+    throw new ClosedCliError(
+      "Native project already has an owned run mapping that is not safely stopped; inspect it before starting another run."
+    );
+  }
+}
+
 function requireActive(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
     throw new ClosedCliError(

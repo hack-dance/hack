@@ -124,12 +124,13 @@ fn verify_running(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateE
 }
 
 /// Re-verify a selected running pool under the startup lease and report it.
-/// `verify_retained` rechecks a retained-startup guard, if the caller holds one.
+/// `verify_retained` rechecks a retained-startup guard, if the caller holds one, under
+/// that lease (HACK-2732).
 pub(super) fn resume(
     candidate: &Candidate,
     running: Running,
     request: &StartRequest<'_>,
-    verify_retained: impl Fn() -> Result<(), CandidateError>,
+    verify_retained: impl Fn(&state::Lock) -> Result<(), CandidateError>,
 ) -> Result<RuntimeStatus, CandidateError> {
     let lock = startup_lease(&root(candidate), START_LEASE_WAIT)?;
     resume_leased(candidate, running, request, &lock, verify_retained)
@@ -143,10 +144,10 @@ pub(super) fn resume_leased(
     running: Running,
     request: &StartRequest<'_>,
     lock: &state::Lock,
-    verify_retained: impl Fn() -> Result<(), CandidateError>,
+    verify_retained: impl Fn(&state::Lock) -> Result<(), CandidateError>,
 ) -> Result<RuntimeStatus, CandidateError> {
     restore_released_short_home(candidate)?;
-    verify_retained()?;
+    verify_retained(lock)?;
     super::super::network_update::require_complete(candidate)?;
     super::super::share_update::require_complete(candidate)?;
     let owner = Owner::load(candidate)?;
@@ -160,7 +161,7 @@ pub(super) fn resume_leased(
     super::super::dependency_socket::verify(candidate, &owner)?;
     verify_trees(candidate, &owner, lock)?;
     super::super::network_tools::verify(candidate)?;
-    verify_retained()?;
+    verify_retained(lock)?;
     audit_boot(candidate, &owner)?;
     status(candidate)
 }

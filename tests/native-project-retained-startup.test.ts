@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test";
 import {
   preflightNativeRetainedStartup,
+  runtimeUpJoiningChangedPool,
   verifyNativeResumedRetainedGraph,
   verifyNativeRetainedMapping,
 } from "../src/backends/native-project-retained-startup.ts";
 import type { NativeProjectRun } from "../src/backends/native-project-run.ts";
+import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 
 /**
@@ -148,4 +150,45 @@ test("a resumed retained graph that differs refuses", async () => {
     }),
     "Native resumed retained graph differs; no graph restore was requested."
   );
+});
+
+test("a changed pool is retried only for a retained start, once (HACK-2732)", async () => {
+  const changed = () =>
+    new NativeRuntimeRequestError({
+      nativeCode: "graph_retained_pool_changed",
+      message: "Native runtime request failed (graph_retained_pool_changed).",
+    });
+  const calls: (readonly string[])[] = [];
+  // A fresh start sends no retained flags: nothing is selected again.
+  await expect(
+    runtimeUpJoiningChangedPool({
+      flags: [],
+      up: async (flags) => {
+        calls.push(flags);
+        throw changed();
+      },
+      reselect: async () => {
+        throw new Error("not selected again");
+      },
+    })
+  ).rejects.toMatchObject({ nativeCode: "graph_retained_pool_changed" });
+  expect(calls).toEqual([[]]);
+  calls.length = 0;
+  expect(
+    await runtimeUpJoiningChangedPool({
+      flags: ["--expect-retained-selection", "7"],
+      up: async (flags) => {
+        calls.push(flags);
+        if (calls.length === 1) {
+          throw changed();
+        }
+        return "joined";
+      },
+      reselect: async () => ["--expect-retained-selection", "8"],
+    })
+  ).toBe("joined");
+  expect(calls).toEqual([
+    ["--expect-retained-selection", "7"],
+    ["--expect-retained-selection", "8"],
+  ]);
 });

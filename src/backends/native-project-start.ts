@@ -194,10 +194,12 @@ import {
 } from "./native-project-ports.ts";
 import { serveNativeProjectGraph } from "./native-project-process.ts";
 import { selectNativeProjectRestore } from "./native-project-restore.ts";
-import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
 import { selectNativeRetainedImages } from "./native-project-retained-images.ts";
 import {
+  confirmRunningRetainedGraph,
   preflightNativeRetainedStartup,
+  reselectNativeRetainedStartup,
+  runtimeUpJoiningChangedPool,
   verifyNativeResumedRetainedGraph,
   verifyNativeRetainedMapping,
 } from "./native-project-retained-startup.ts";
@@ -2250,24 +2252,13 @@ async function selectNativeStartup(opts: {
       return preflight;
     }
     retainedFlags = preflight.flags;
-    const observed =
-      preflight.runtimePhase === "running"
-        ? await inspectNativeProjectGraph({
-            startupWait: true,
-            runtime: opts.runtime,
-            projectRoot: opts.scope.projectRoot,
-            run: retained.run,
-            invoke: opts.invoke,
-          })
-        : undefined;
-    if (
-      preflight.runtimePhase === "running" &&
-      !confirmedNativeRetainedGraph(observed, retained)
-    ) {
-      throw new ClosedCliError(
-        "Native project already has an owned run mapping that is not safely stopped; inspect it before starting another run."
-      );
-    }
+    await confirmRunningRetainedGraph({
+      runtime: opts.runtime,
+      projectRoot: opts.scope.projectRoot,
+      run: retained,
+      invoke: opts.invoke,
+      runtimePhase: preflight.runtimePhase,
+    });
   }
   const restore = opts.restore ?? retained ?? undefined;
   return { retained, restore, selection, retainedFlags, extension: undefined };
@@ -3972,37 +3963,60 @@ async function startNativeProjectAttempt(
           args: ["runtime", "status", "--json"],
           signal: controller.signal,
         })
-      : await runtimeUpRecoveringExitedProvider({
-          invoke: deps.invoke,
-          warn: deps.warn,
-          signal: controller.signal,
-        })({
-          runtime: opts.runtime,
-          cwd: opts.scope.projectRoot,
-          args: [
-            ...nativeProjectRuntimeUpArgs(opts.scope.projectRoot),
-            ...retainedFlags,
-            ...(hostDependencies.length > 0
-              ? [
-                  "--minimum-dependency-sockets",
-                  String(
-                    new Set(hostDependencies.map((binding) => binding.slot))
-                      .size
-                  ),
-                ]
-              : []),
-            ...(bridgeCapacity > 0
-              ? ["--minimum-bridge-sockets", String(bridgeCapacity)]
-              : []),
-            ...(allowedHosts.length > 0
-              ? allowedHosts.flatMap((host) => ["--allow-host", host])
-              : ["--internet"]),
-            ...preparedBaseArguments(opts.preparedBase),
-            ...nativeAmd64EmulationUpArgs(input.amd64Emulation),
-            "--json",
-          ],
-          signal: controller.signal,
-          onLeaseWait: reportNativeStartLeaseWait,
+      : await runtimeUpJoiningChangedPool({
+          flags: retainedFlags,
+          // HACK-2732: another start booted the pool after this one's preflight.
+          reselect: async () => {
+            if (!retained) {
+              // Only a retained start sends retained flags.
+              throw new ClosedCliError(
+                "Native retained startup eligibility changed; no runtime start was requested."
+              );
+            }
+            const flags = await reselectNativeRetainedStartup({
+              runtime: opts.runtime,
+              scope: opts.scope,
+              run: retained,
+              invoke: deps.invoke,
+              load: deps.load,
+              signal: controller.signal,
+            });
+            requireActiveStartup(controller.signal);
+            return flags;
+          },
+          up: (flags) =>
+            runtimeUpRecoveringExitedProvider({
+              invoke: deps.invoke,
+              warn: deps.warn,
+              signal: controller.signal,
+            })({
+              runtime: opts.runtime,
+              cwd: opts.scope.projectRoot,
+              args: [
+                ...nativeProjectRuntimeUpArgs(opts.scope.projectRoot),
+                ...flags,
+                ...(hostDependencies.length > 0
+                  ? [
+                      "--minimum-dependency-sockets",
+                      String(
+                        new Set(hostDependencies.map((binding) => binding.slot))
+                          .size
+                      ),
+                    ]
+                  : []),
+                ...(bridgeCapacity > 0
+                  ? ["--minimum-bridge-sockets", String(bridgeCapacity)]
+                  : []),
+                ...(allowedHosts.length > 0
+                  ? allowedHosts.flatMap((host) => ["--allow-host", host])
+                  : ["--internet"]),
+                ...preparedBaseArguments(opts.preparedBase),
+                ...nativeAmd64EmulationUpArgs(input.amd64Emulation),
+                "--json",
+              ],
+              signal: controller.signal,
+              onLeaseWait: reportNativeStartLeaseWait,
+            }),
         });
     emitNativeHotReloadNotice(pool, deps.warn);
     requireActiveStartup(controller.signal);

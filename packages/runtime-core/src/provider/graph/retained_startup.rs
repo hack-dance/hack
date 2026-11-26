@@ -75,6 +75,11 @@ fn no_file(root: &Path, name: &str) -> Result<(), CandidateError> {
 
 /// Offline eligibility of a retained start, except the foreground publication:
 /// a clean unchanged owned runtime and an acknowledged retained stop of `run`.
+///
+/// The pool record is read without a lease here. Every caller that acts on the result
+/// holds the startup lease (`Guard::verify`, `preflight`) or only presents it; a pool
+/// that a concurrent start is booting holds that lease, so a leased read never sees it
+/// mid-boot (`booting`, or the `owner.pending` of a record write) (HACK-2732).
 pub(in crate::provider::graph) fn checked(
     candidate: &Candidate,
     run: &str,
@@ -87,13 +92,12 @@ pub(in crate::provider::graph) fn checked(
             "The runtime's last boot failed and was stopped; run hack native recover (runtime recover --json with the executor) first, then hack up. The retained data is untouched.",
         ));
     }
-    let clean = matches!(owner.phase.as_str(), "running" | "stopped")
-        && !owner.guest_boot_id.as_deref().is_none_or(str::is_empty);
+    let clean = matches!(owner.phase.as_str(), "running" | "stopped") && has_boot_id(&owner);
     if !owner.created
         || owner.profile != super::super::Profile::Development
         || owner.storage.is_none()
         || owner.overlay.is_none()
-        || !(clean || after_guestless_boot(&owner))
+        || !(clean || after_engine_loss(&owner) || after_guestless_boot(&owner))
     {
         return Err(refused());
     }
@@ -104,7 +108,7 @@ pub(in crate::provider::graph) fn checked(
             }
         }
         // A later boot that failed before recording its provider leaves none recorded.
-        (None, false) if !clean => {}
+        (None, false) if after_guestless_boot(&owner) => {}
         _ => return Err(refused()),
     }
     if owner.phase == "running" {
@@ -113,6 +117,7 @@ pub(in crate::provider::graph) fn checked(
     lifecycle::verify_disks(candidate, &owner)?;
     lifecycle::verify_retained_rootfs(candidate, &owner)?;
     super::super::network_update::require_complete(candidate)?;
+    super::super::share_update::require_complete(candidate)?;
     verify_owner_registry(candidate, &owner)?;
     let (receipt, root) = load_at(directory(candidate, run)?, run, &owner.token)?;
     if receipt.phase != "stopped-data-retained"
@@ -141,6 +146,10 @@ pub(in crate::provider::graph) fn checked(
     Ok((owner, receipt))
 }
 
+fn has_boot_id(owner: &Owner) -> bool {
+    !owner.guest_boot_id.as_deref().is_none_or(str::is_empty)
+}
+
 /// Stopped phases a later boot can leave after it failed before it recorded a guest boot id
 /// (HACK-2376), once `runtime recover` has run where needed. `stopped` is the phase a start
 /// writes when its boot admission refuses before anything boots: that start never calls
@@ -164,7 +173,7 @@ const AFTER_GUESTLESS_BOOT: [&str; 4] = [
 /// created, started or written by the engine, and restore still checks the volumes' recorded
 /// identities and the containers' and networks' absence. An unclean stop of that guest leaves
 /// the storage file system to its journal, as after any unclean stop. A boot that recorded
-/// its boot id (and so may have started the engine) still refuses.
+/// its boot id (and so may have started the engine) is [`after_engine_loss`] instead.
 fn after_guestless_boot(owner: &Owner) -> bool {
     AFTER_GUESTLESS_BOOT.contains(&owner.phase.as_str())
         && owner.guest_boot_id.is_none()
@@ -174,45 +183,147 @@ fn after_guestless_boot(owner: &Owner) -> bool {
             .is_none_or(str::is_empty)
 }
 
-fn selection(owner: &Owner, receipt: &Receipt) -> Result<String, CandidateError> {
-    let bytes =
-        serde_json::to_vec(&("hack-retained-startup-v1", owner, receipt)).map_err(|_| refused())?;
+/// Unclean stopped phases of a boot that recorded its guest boot id: `runtime recover` after
+/// the provider exited or the guest stopped answering (`recovered-unclean`), or a boot whose
+/// engine failed to start (`stopped-after-engine-failure`).
+const AFTER_ENGINE_LOSS: [&str; 2] = ["recovered-unclean", "stopped-after-engine-failure"];
+
+/// A pool whose provider ended uncleanly in a boot that recorded its guest boot id, so its
+/// engine may have run (HACK-2730). The common case: `hack down` stopped the run with its data
+/// retained while the pool kept running, then the provider died (killed, crashed, or the
+/// machine restarted) before the pool went idle, and `runtime recover` recorded the pool
+/// `recovered-unclean` with that boot's id. The receipt is still the acknowledged retained
+/// stop, which [`checked`] requires: every container and network of the run was removed, and
+/// a later engine changes the run's resources only through this run's own graph operations,
+/// which leave that receipt (or a pending journal beside it, also refused) first. So what an
+/// engine did after the stop did not touch this run, and what it did not finish writing
+/// before the provider ended is left to the storage journal, as after any unclean stop.
+/// Restore still checks the volumes' recorded identities and the containers' and networks'
+/// absence live, after the next boot.
+///
+/// The recorded provider must be present and proven gone ([`checked`]): a record without one
+/// is not this shape. The guard's other identity checks (disks, rootfs, token, registry)
+/// apply as for a clean stop.
+fn after_engine_loss(owner: &Owner) -> bool {
+    AFTER_ENGINE_LOSS.contains(&owner.phase.as_str())
+        && has_boot_id(owner)
+        && owner.process.is_some()
+}
+
+/// What no boot or stop of the same pool changes: its owner token and machine, HOME alias,
+/// disks, root files, profile, socket layout, shares, network and capacity. A replacement
+/// owner, token or disk, a changed share, or a changed network differs here. The phase, the
+/// provider process, the boot ids, the engine's identity, the clean-stop marker and the
+/// per-boot settings (`reclamation`, `hot_reload`) are left out: `Owner::begin_boot` and a
+/// stop rewrite them.
+fn stable_identity(owner: &Owner) -> impl serde::Serialize + '_ {
+    (
+        (
+            &owner.version,
+            &owner.checkout,
+            &owner.token,
+            &owner.machine,
+            &owner.short_home,
+            &owner.created,
+            &owner.storage,
+            &owner.overlay,
+            &owner.rootfs_digest,
+        ),
+        (
+            &owner.profile,
+            &owner.socket_layout,
+            &owner.project_share,
+            &owner.additional_project_shares,
+            &owner.network,
+            &owner.application_bridge,
+            &owner.dependency_sockets,
+            &owner.amd64_emulation,
+        ),
+    )
+}
+
+fn digest(value: &impl serde::Serialize) -> Result<String, CandidateError> {
+    let bytes = serde_json::to_vec(value).map_err(|_| refused())?;
     Ok(format!("{:x}", crate::Hex(Sha256::digest(bytes))))
+}
+
+/// The selection a retained start is bound to: 64 hex digits, the first 32 of a digest of
+/// the pool's [`stable_identity`] and the receipt, then the first 32 of a digest of the whole
+/// pool record and the receipt. Any change to either refuses the start. Only a change to
+/// the pool record outside its stable identity, with the same receipt, is
+/// [`pool_changed`]: another start booted (or stopped) this same pool in between.
+fn selection(owner: &Owner, receipt: &Receipt) -> Result<String, CandidateError> {
+    let stable = digest(&(
+        "hack-retained-startup-stable-v1",
+        stable_identity(owner),
+        receipt,
+    ))?;
+    let whole = digest(&("hack-retained-startup-v2", owner, receipt))?;
+    Ok(format!("{}{}", &stable[..32], &whole[..32]))
+}
+
+/// The retained start's selection is stale only because the same pool booted or stopped
+/// since it was taken (HACK-2732). The caller takes the selection again and retries once.
+fn pool_changed() -> CandidateError {
+    error(
+        "graph_retained_pool_changed",
+        "Another start booted or stopped the native pool after this start checked its retained run; the run, its data and the pool's identity are unchanged. Check the run's eligibility again, then start.",
+    )
 }
 
 /// Holds publication retirement across the provider's boot-effect boundary.
 /// Acquisition never creates absent ownership state or repairs stale publications.
+///
+/// Eligibility and the selection are compared only under the startup lease
+/// ([`Guard::verify`]): a concurrent start holds that lease for its whole boot, so a
+/// pool it is booting is waited out, not refused (HACK-2732).
 pub(in crate::provider) struct Guard {
     run: String,
     selection: String,
     retired: foreground::transport::Retired,
 }
 impl Guard {
+    /// Retire the publication now, then check eligibility once under a brief startup
+    /// lease, so a stale or ineligible selection refuses before any admission work.
     pub(in crate::provider) fn acquire(
         candidate: &Candidate,
         run: &str,
-        expected: Option<&str>,
+        expected: &str,
     ) -> Result<Self, CandidateError> {
-        let retired = foreground::transport::Retired::acquire(candidate, run)?
-            .ok_or_else(|| published_owner_refused(candidate, run))?;
-        let (owner, receipt) = checked(candidate, run)?;
-        let selected = selection(&owner, &receipt)?;
-        if expected.is_some_and(|value| !hex(value, 64) || value != selected) {
+        if !hex(expected, 64) {
             return Err(refused());
         }
+        let retired = foreground::transport::Retired::acquire(candidate, run)?
+            .ok_or_else(|| published_owner_refused(candidate, run))?;
         let guard = Self {
             run: run.into(),
-            selection: selected,
+            selection: expected.into(),
             retired,
         };
-        guard.verify(candidate)?;
+        let lease = lifecycle::startup_lease(
+            &candidate.state_root.join("run/smolvm"),
+            lifecycle::START_LEASE_WAIT,
+        )?;
+        guard.verify(candidate, &lease)?;
         Ok(guard)
     }
-    pub(in crate::provider) fn verify(&self, candidate: &Candidate) -> Result<(), CandidateError> {
+    /// Recheck eligibility and the exact selection under `lease`, the startup lease of
+    /// this pool that the caller holds.
+    pub(in crate::provider) fn verify(
+        &self,
+        candidate: &Candidate,
+        lease: &state::Lock,
+    ) -> Result<(), CandidateError> {
+        lease.verify_path(&candidate.state_root.join("run/smolvm"))?;
         self.retired.verify()?;
         let (owner, receipt) = checked(candidate, &self.run)?;
-        if selection(&owner, &receipt)? != self.selection {
-            return Err(refused());
+        let selected = selection(&owner, &receipt)?;
+        if selected != self.selection {
+            return Err(if selected[..32] == self.selection[..32] {
+                pool_changed()
+            } else {
+                refused()
+            });
         }
         self.retired.verify()
     }
@@ -221,19 +332,21 @@ impl Guard {
 /// Eligibility only: no guest connection, live resource observations, environment
 /// values or restore authority are returned. An absent/uncertain owner refuses.
 pub fn preflight(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
-    let guard = Guard::acquire(candidate, run, None)?;
-    // Eligibility is read-only: wait out a holder such as the inspection behind `hack ps`
-    // or another project's stop, as runtime startup does, rather than failing the `up`
-    // that asked (HACK-2724).
-    let _lease = state::Lock::acquire_existing_waiting(
-        &candidate.state_root.join("run/smolvm"),
-        lifecycle::START_LEASE_WAIT,
-    )?;
-    guard.verify(candidate)?;
+    let retired = foreground::transport::Retired::acquire(candidate, run)?
+        .ok_or_else(|| published_owner_refused(candidate, run))?;
+    // Eligibility is read-only, but read under the lease: wait out a holder such as the
+    // inspection behind `hack ps`, another project's stop (HACK-2724) or another start's
+    // boot (HACK-2732), as runtime startup does, rather than failing the `up` that asked.
+    let pool = candidate.state_root.join("run/smolvm");
+    let lease = state::Lock::acquire_existing_waiting(&pool, lifecycle::START_LEASE_WAIT)?;
+    lease.verify_path(&pool)?;
+    retired.verify()?;
     let (owner, receipt) = checked(candidate, run)?;
+    let selected = selection(&owner, &receipt)?;
+    retired.verify()?;
     Ok(
         json!({"version":1,"run":receipt.run,"owner":receipt.owner,"namespace":receipt.namespace,
-        "plan":receipt.plan_id,"runtime_phase":owner.phase,"selection":guard.selection,
+        "plan":receipt.plan_id,"runtime_phase":owner.phase,"selection":selected,
         "live_resources_verified":false}),
     )
 }
@@ -511,23 +624,16 @@ pub(in crate::provider::graph) mod tests {
             assert_eq!(value["runtime_phase"], phase, "{phase}");
             assert!(hex(value["selection"].as_str().unwrap(), 64), "{phase}");
         }
-        // Still refused: the failed boot not yet recovered, a failed boot that recorded its
-        // boot id (so may have started the engine), no previous boot, and a live recorded
-        // provider.
-        for case in [
-            "failed-boot-stopped",
-            "boot-recorded",
-            "no-previous",
-            "live-pid",
-        ] {
+        // Still refused: the failed boot not yet recovered, no previous boot, and a live
+        // recorded provider. A failed boot that recorded its boot id (so may have started
+        // the engine) is the engine-loss shape, accepted only with its provider recorded
+        // and gone (`a_provider_lost_after_a_retained_stop_keeps_the_run_startable`).
+        for case in ["failed-boot-stopped", "no-previous", "live-pid"] {
             let fixture = Fixture::new();
             let mut owner = Owner::load(&fixture.candidate).unwrap();
             after_failed_boot(&mut owner, "recovered-unclean");
             match case {
                 "failed-boot-stopped" => owner.phase = "failed-boot-stopped".into(),
-                "boot-recorded" => {
-                    owner.guest_boot_id = Some("22222222-2222-2222-2222-222222222222".into())
-                }
                 "no-previous" => owner.previous_guest_boot_id = None,
                 _ => {
                     owner.process = Some(identity::observe(std::process::id() as i32).unwrap());
@@ -551,7 +657,8 @@ pub(in crate::provider::graph) mod tests {
         for mutation in [
             "dirty",
             "compute",
-            "phase",
+            "booting",
+            "engine-loss-no-process",
             "ack",
             "owner",
             "disk",
@@ -572,8 +679,16 @@ pub(in crate::provider::graph) mod tests {
                 "compute" => {
                     receipt.resources.get_mut("container:web").unwrap().phase = "started".into();
                 }
-                "phase" => {
+                // A pool that is booting is never retained-startable: a concurrent start
+                // holds the lease across its boot, so this is a boot that did not finish.
+                "booting" => {
+                    owner.phase = "booting".into();
+                    owner.save(&fixture.candidate).unwrap();
+                }
+                // An unclean stop of a boot with its id but no recorded provider.
+                "engine-loss-no-process" => {
                     owner.phase = "recovered-unclean".into();
+                    owner.process = None;
                     owner.save(&fixture.candidate).unwrap();
                 }
                 "ack" => {
@@ -779,72 +894,313 @@ pub(in crate::provider::graph) mod tests {
         assert_eq!(value["runtime_phase"], "stopped");
     }
 
-    #[test]
-    fn preflight_selection_and_held_guard_refuse_a_valid_replacement_owner_before_up() {
-        let mut fixture = Fixture::new();
-        let value = preflight(&fixture.candidate, &fixture.run).unwrap();
-        let selected = value["selection"].as_str().unwrap();
-        let guard = Guard::acquire(&fixture.candidate, &fixture.run, Some(selected)).unwrap();
-        guard.verify(&fixture.candidate).unwrap();
-        fixture.replace_owner();
-        assert!(guard.verify(&fixture.candidate).is_err());
-        drop(guard);
-        let replacement = preflight(&fixture.candidate, &fixture.run).unwrap();
-        assert_ne!(replacement["selection"], value["selection"]);
-        let before = fs::read(fixture.candidate.state_root.join("run/smolvm/owner.json")).unwrap();
-        let error = lifecycle::up_with_retained_project_share(
+    /// The startup lease of the fixture's pool, as a start holds it.
+    fn lease(fixture: &Fixture) -> state::Lock {
+        lifecycle::startup_lease(
+            &fixture.candidate.state_root.join("run/smolvm"),
+            lifecycle::START_LEASE_WAIT,
+        )
+        .unwrap()
+    }
+
+    fn start_with(fixture: &Fixture, selection: &str) -> CandidateError {
+        lifecycle::up_with_retained_project_share(
             &fixture.candidate,
             super::super::super::Profile::Development,
             None,
             None,
             None,
             None,
-            (&fixture.run, selected),
+            (&fixture.run, selection),
         )
-        .unwrap_err();
-        assert_eq!(error.code, "graph_retained_startup");
+        .unwrap_err()
+    }
+
+    fn no_admission(fixture: &Fixture) -> bool {
+        !fixture
+            .candidate
+            .state_root
+            .join("run/smolvm/admission.json")
+            .exists()
+    }
+
+    /// What another start's boot of the same pool leaves in its record: a new boot,
+    /// provider and engine, and no clean-stop marker of the boot the selection saw.
+    /// Nothing in the pool's stable identity changes.
+    fn peer_boot(owner: &mut Owner, phase: &str) {
+        owner.begin_boot();
+        owner.guest_boot_id = Some("33333333-3333-3333-3333-333333333333".into());
+        owner.daemon_pid = Some(42);
+        owner.daemon_start = Some(7);
+        let process = owner.process.as_mut().unwrap();
+        process.pid += 1;
+        process.start_micros += 1;
+        owner.phase = phase.into();
+    }
+
+    #[test]
+    fn preflight_selection_and_held_guard_refuse_a_valid_replacement_owner_before_up() {
+        let mut fixture = Fixture::new();
+        let value = preflight(&fixture.candidate, &fixture.run).unwrap();
+        let selected = value["selection"].as_str().unwrap();
+        let guard = Guard::acquire(&fixture.candidate, &fixture.run, selected).unwrap();
+        let held = lease(&fixture);
+        guard.verify(&fixture.candidate, &held).unwrap();
+        fixture.replace_owner();
+        // A replaced owner is not a changed pool: its token, machine and disks differ.
+        assert_eq!(
+            guard.verify(&fixture.candidate, &held).unwrap_err().code,
+            "graph_retained_startup"
+        );
+        drop(held);
+        drop(guard);
+        let replacement = preflight(&fixture.candidate, &fixture.run).unwrap();
+        assert_ne!(replacement["selection"], value["selection"]);
+        let before = fs::read(fixture.candidate.state_root.join("run/smolvm/owner.json")).unwrap();
+        assert_eq!(
+            start_with(&fixture, selected).code,
+            "graph_retained_startup"
+        );
         assert_eq!(
             fs::read(fixture.candidate.state_root.join("run/smolvm/owner.json")).unwrap(),
             before
         );
-        assert!(
-            !fixture
-                .candidate
-                .state_root
-                .join("run/smolvm/admission.json")
-                .exists()
-        );
+        assert!(no_admission(&fixture));
     }
 
     #[test]
-    fn same_mapping_owner_does_not_allow_changed_process_identity_at_effect_boundary() {
+    fn a_changed_process_identity_at_the_effect_boundary_refuses_as_a_changed_pool() {
+        // The selection still binds the whole pool record: a provider identity that
+        // changed since the preflight refuses the start. With the same token, disks and
+        // receipt that refusal is `graph_retained_pool_changed`, so the caller takes the
+        // selection again instead of stopping (HACK-2732).
         let fixture = Fixture::new();
         let selected = preflight(&fixture.candidate, &fixture.run).unwrap();
+        let selected = selected["selection"].as_str().unwrap().to_owned();
         let mut owner = Owner::load(&fixture.candidate).unwrap();
         let token = owner.token.clone();
         owner.process.as_mut().unwrap().start_micros += 1;
         owner.save(&fixture.candidate).unwrap();
         let now = preflight(&fixture.candidate, &fixture.run).unwrap();
         assert_eq!(now["owner"], token);
-        assert_eq!(now["plan"], selected["plan"]);
-        assert_ne!(now["selection"], selected["selection"]);
-        let failure = lifecycle::up_with_retained_project_share(
-            &fixture.candidate,
-            super::super::super::Profile::Development,
-            None,
-            None,
-            None,
-            None,
-            (&fixture.run, selected["selection"].as_str().unwrap()),
-        )
-        .unwrap_err();
-        assert_eq!(failure.code, "graph_retained_startup");
-        assert!(
-            !fixture
+        let now = now["selection"].as_str().unwrap();
+        assert_ne!(now, selected);
+        assert_eq!(now[..32], selected[..32]);
+        let failure = start_with(&fixture, &selected);
+        assert_eq!(failure.code, "graph_retained_pool_changed");
+        assert!(no_admission(&fixture));
+    }
+
+    #[test]
+    fn a_start_selected_before_a_peer_boot_refuses_as_a_changed_pool_and_its_new_selection_holds() {
+        for phase in [
+            "stopped",
+            "recovered-unclean",
+            "stopped-after-engine-failure",
+        ] {
+            let fixture = Fixture::new();
+            let before = preflight(&fixture.candidate, &fixture.run).unwrap();
+            let before = before["selection"].as_str().unwrap().to_owned();
+            let mut owner = Owner::load(&fixture.candidate).unwrap();
+            peer_boot(&mut owner, phase);
+            owner.save(&fixture.candidate).unwrap();
+            let error = Guard::acquire(&fixture.candidate, &fixture.run, &before)
+                .err()
+                .unwrap();
+            assert_eq!(error.code, "graph_retained_pool_changed", "{phase}");
+            assert_eq!(
+                start_with(&fixture, &before).code,
+                "graph_retained_pool_changed"
+            );
+            assert!(no_admission(&fixture), "{phase}");
+            let after = preflight(&fixture.candidate, &fixture.run).unwrap();
+            let after = after["selection"].as_str().unwrap();
+            assert_eq!(after[..32], before[..32], "{phase}");
+            let guard = Guard::acquire(&fixture.candidate, &fixture.run, after).unwrap();
+            guard.verify(&fixture.candidate, &lease(&fixture)).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_changed_disk_network_or_receipt_still_refuses_and_is_never_a_changed_pool() {
+        for case in ["disk", "network", "receipt"] {
+            let fixture = Fixture::new();
+            let before = preflight(&fixture.candidate, &fixture.run).unwrap();
+            let before = before["selection"].as_str().unwrap().to_owned();
+            let mut owner = Owner::load(&fixture.candidate).unwrap();
+            peer_boot(&mut owner, "stopped");
+            match case {
+                // A replaced storage disk whose record was updated to match it.
+                "disk" => {
+                    let data = owner.real_data_dir(&fixture.candidate).unwrap();
+                    let path = data.join("storage.raw");
+                    let bytes = fs::read(&path).unwrap();
+                    fs::remove_file(&path).unwrap();
+                    fs::write(&path, bytes).unwrap();
+                    owner.storage = Some(identity::disk(&path).unwrap());
+                }
+                "network" => owner.network = super::super::super::NetworkIntent::Internet,
+                _ => {
+                    let mut receipt = fixture.receipt();
+                    receipt.plan_id = "9".repeat(64);
+                    state::write(&fixture.graph().join("state.json"), &receipt).unwrap();
+                }
+            }
+            owner.save(&fixture.candidate).unwrap();
+            // The current state is eligible: only the selection binds the change.
+            let after = preflight(&fixture.candidate, &fixture.run).unwrap();
+            assert_ne!(
+                after["selection"].as_str().unwrap()[..32],
+                before[..32],
+                "{case}"
+            );
+            let error = Guard::acquire(&fixture.candidate, &fixture.run, &before)
+                .err()
+                .unwrap();
+            assert_eq!(error.code, "graph_retained_startup", "{case}");
+            assert_eq!(start_with(&fixture, &before).code, "graph_retained_startup");
+        }
+    }
+
+    #[test]
+    fn preflight_and_the_guard_wait_out_a_peer_boot_instead_of_refusing_it() {
+        // HACK-2732: another project's start holds the startup lease for its whole boot,
+        // with the pool record `booting` and, while it writes the record, `owner.pending`.
+        // Unleased, that state refuses. Under the lease it is never seen: the read waits
+        // for the boot to end and then checks what it left.
+        for check in ["preflight", "guard"] {
+            let fixture = Fixture::new();
+            let selected = preflight(&fixture.candidate, &fixture.run).unwrap();
+            let selected = selected["selection"].as_str().unwrap().to_owned();
+            let held = lease(&fixture);
+            let mut owner = Owner::load(&fixture.candidate).unwrap();
+            let pending = fixture
                 .candidate
                 .state_root
-                .join("run/smolvm/admission.json")
-                .exists()
-        );
+                .join("run/smolvm/owner.pending");
+            peer_boot(&mut owner, "booting");
+            owner.save(&fixture.candidate).unwrap();
+            fs::write(&pending, b"{}").unwrap();
+            // The old order: eligibility read before the lease refuses the peer's boot.
+            assert_eq!(
+                checked(&fixture.candidate, &fixture.run).unwrap_err().code,
+                "graph_retained_startup"
+            );
+            fs::remove_file(&pending).unwrap();
+            assert_eq!(
+                checked(&fixture.candidate, &fixture.run).unwrap_err().code,
+                "graph_retained_startup"
+            );
+            let candidate = &fixture.candidate;
+            let started = std::time::Instant::now();
+            std::thread::scope(|scope| {
+                scope.spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    // The peer's boot stopped again (a refused boot admission records
+                    // `stopped`), then released the lease.
+                    owner.phase = "stopped".into();
+                    owner.save(candidate).unwrap();
+                    drop(held);
+                });
+                if check == "preflight" {
+                    let value = preflight(candidate, &fixture.run).unwrap();
+                    assert_eq!(value["runtime_phase"], "stopped");
+                    let now = value["selection"].as_str().unwrap();
+                    assert_eq!(now[..32], selected[..32]);
+                    assert_ne!(now, selected);
+                } else {
+                    let error = Guard::acquire(candidate, &fixture.run, &selected)
+                        .err()
+                        .unwrap();
+                    assert_eq!(error.code, "graph_retained_pool_changed");
+                }
+            });
+            assert!(started.elapsed() >= std::time::Duration::from_millis(150));
+        }
+    }
+
+    #[test]
+    fn a_provider_lost_after_a_retained_stop_keeps_the_run_startable() {
+        // HACK-2730: `hack down` stopped the run with data retained while the pool kept
+        // running; the provider then died, and `runtime recover` recorded the pool
+        // `recovered-unclean` with that boot's id and its dead provider. A boot whose engine
+        // failed after recording its id leaves `stopped-after-engine-failure` the same way.
+        let lost = |owner: &mut Owner, phase: &str, later_boot: bool| {
+            if later_boot {
+                owner.begin_boot();
+                owner.guest_boot_id = Some("22222222-2222-2222-2222-222222222222".into());
+            }
+            owner.phase = phase.into();
+        };
+        for phase in ["recovered-unclean", "stopped-after-engine-failure"] {
+            for later_boot in [false, true] {
+                let fixture = Fixture::new();
+                let mut owner = Owner::load(&fixture.candidate).unwrap();
+                lost(&mut owner, phase, later_boot);
+                owner.save(&fixture.candidate).unwrap();
+                let value = preflight(&fixture.candidate, &fixture.run).unwrap();
+                assert_eq!(value["runtime_phase"], phase, "{phase} {later_boot}");
+                let selected = value["selection"].as_str().unwrap();
+                let guard = Guard::acquire(&fixture.candidate, &fixture.run, selected).unwrap();
+                guard.verify(&fixture.candidate, &lease(&fixture)).unwrap();
+            }
+        }
+        // Still refused: a live recorded provider, no recorded provider, a receipt that left
+        // the retained stop (a restore in progress, a dirty receipt, a pending one-off), a
+        // pending owner update, a pending share update, a boot that failed and was not yet
+        // recovered, and an unclean stop with no boot id and no earlier boot.
+        for case in [
+            "live-pid",
+            "no-process",
+            "restoring",
+            "state-pending",
+            "one-off-pending",
+            "owner-pending",
+            "share-update-pending",
+            "failed-boot-stopped",
+            "no-boot",
+        ] {
+            let fixture = Fixture::new();
+            let mut owner = Owner::load(&fixture.candidate).unwrap();
+            lost(&mut owner, "recovered-unclean", false);
+            let pool = fixture.candidate.state_root.join("run/smolvm");
+            match case {
+                "live-pid" => {
+                    owner.process = Some(identity::observe(std::process::id() as i32).unwrap());
+                }
+                "no-process" => owner.process = None,
+                "restoring" => {
+                    let mut receipt = fixture.receipt();
+                    receipt.phase = "restoring".into();
+                    state::write(&fixture.graph().join("state.json"), &receipt).unwrap();
+                }
+                "state-pending" => {
+                    fs::write(fixture.graph().join("state.pending"), b"pending").unwrap()
+                }
+                "one-off-pending" => {
+                    fs::write(fixture.graph().join("one-off.pending"), b"pending").unwrap()
+                }
+                "owner-pending" => {}
+                "share-update-pending" => {
+                    fs::write(pool.join("share-update.pending"), b"pending").unwrap()
+                }
+                "failed-boot-stopped" => owner.phase = "failed-boot-stopped".into(),
+                _ => {
+                    owner.guest_boot_id = None;
+                    owner.previous_guest_boot_id = None;
+                }
+            }
+            owner.save(&fixture.candidate).unwrap();
+            if case == "owner-pending" {
+                fs::write(pool.join("owner.pending"), b"pending").unwrap();
+            }
+            let error = preflight(&fixture.candidate, &fixture.run).unwrap_err();
+            let expected = if case == "share-update-pending" {
+                "project_share_update"
+            } else {
+                "graph_retained_startup"
+            };
+            assert_eq!(error.code, expected, "{case}");
+        }
     }
 }

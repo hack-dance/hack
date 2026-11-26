@@ -477,7 +477,7 @@ mod live {
         owner.guest_boot_id = Some("22222222-2222-2222-2222-222222222222".into());
         owner.save(&live.home.candidate).unwrap();
         assert_eq!(
-            resume(&live.home.candidate, selected, &no_request(), || Ok(()))
+            resume(&live.home.candidate, selected, &no_request(), |_| Ok(()))
                 .unwrap_err()
                 .code,
             "runtime_changed"
@@ -582,7 +582,7 @@ mod live {
             ..no_request()
         };
         assert_eq!(
-            resume(&live.home.candidate, selected, &request, || Ok(()))
+            resume(&live.home.candidate, selected, &request, |_| Ok(()))
                 .unwrap_err()
                 .code,
             "amd64_emulation_restart_required"

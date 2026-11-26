@@ -5248,8 +5248,14 @@ export class NativeForegroundVmLostError extends ClosedCliError {
     readonly loss: NativeForegroundLossStage;
     readonly cause: unknown;
   }) {
+    // The cause's own `hack down --recover` sentence goes wherever the stage
+    // message decides the command: a requested loss, and a ready one the
+    // runtime cannot retire (`retirable` false, #1279 review), whose message
+    // names no command.
     const cause = nativeLostVmCauseLine(opts.cause, {
-      dropRecoverAdvice: opts.loss.stage === "requested",
+      dropRecoverAdvice:
+        opts.loss.stage === "requested" ||
+        (opts.loss.stage === "ready" && opts.loss.retirable === false),
     });
     super(
       [

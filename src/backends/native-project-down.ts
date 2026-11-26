@@ -762,18 +762,20 @@ export function nativeRestartLockHeldNote(lock: string): string {
 }
 
 /**
- * Shown when `hack down --recover` stopped the run but could not read (or
- * remove) its pending restart intent (HACK-2096). The stop itself stands.
- */
-/**
  * Shown when `hack down --recover` stopped the run but kept its pending
  * restart because, under the restart lock, it could not confirm the run still
  * stopped: the runtime stayed busy past the wait, the inspect failed, or the
  * run no longer read as stopped (HACK-2096 review). The stop itself stands.
+ * A run that is running again may have been resumed on purpose, so the next
+ * step is conditional.
  */
 export const NATIVE_RESTART_KEPT_UNCONFIRMED_NOTE =
-  "The run was stopped with its data kept, but its pending hack restart was kept: the run could not be confirmed still stopped (the native runtime was busy or the run changed). Run hack down --recover again to retire it; hack up refuses while it is pending.";
+  "The run was stopped with its data kept, but its pending hack restart was kept: the run could not be confirmed still stopped (the native runtime stayed busy, or the run is running again). If the run should not be running, run hack down --recover again to retire it; hack up refuses while it is pending.";
 
+/**
+ * Shown when `hack down --recover` stopped the run but could not read (or
+ * remove) its pending restart intent (HACK-2096). The stop itself stands.
+ */
 export const NATIVE_RESTART_INTENT_UNREADABLE_NOTE =
   "The run was stopped with its data kept, but its pending hack restart could not be read, so it was not retired; hack up refuses while it is pending. Inspect native state before recovery.";
 

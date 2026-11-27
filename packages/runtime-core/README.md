@@ -594,6 +594,11 @@ another test's spawned child to inherit a socket and delay EOF. Retries are zero
 The admission-pool test group retains the old mutex's serialization of whole-host
 disk-handle scans. Ignored helpers remain ignored and their owning tests still invoke
 them explicitly; `cargo test --doc` runs separately because nextest omits doctests.
+For a refused TCP connection in a test, keep the bound, unlistened loopback
+socket from `provider::test_socket::bound_unlistened_tcp` alive through the
+assertion. Dropping a port-zero listener releases its port to other sockets
+while the test still uses the address. A test that stalls an HTTP reply can
+hold that connection open while its server accepts the retry.
 Candidate core runs the rest of each scheduled test suite and its doctests after
 a test failure. A failed qualification pass still stops subsequent repetitions.
 The job runs independent later checks and summarizes failed step IDs. Setup

@@ -39,6 +39,7 @@ fn build_admission_rechecks_stored_proof_without_the_registry() {
 use crate::provider::image_load::tests::{Layer, compress};
 use crate::provider::image_policy::LocalRegistry;
 use crate::provider::registry_credentials::tests::DockerFixture;
+use crate::provider::test_socket::bound_unlistened_tcp;
 use base64::Engine as _;
 use std::{
     collections::BTreeMap,
@@ -70,8 +71,8 @@ struct Reply {
     body: Vec<u8>,
     /// Send only this many body bytes (after the full `Content-Length`), then close.
     cut: Option<usize>,
-    /// Hold the connection this long after the bytes sent, on its own thread.
-    stall: Option<Duration>,
+    /// Retain the connection until fixture teardown without blocking later requests.
+    hold_open: bool,
 }
 
 impl Reply {
@@ -81,15 +82,18 @@ impl Reply {
             headers: Vec::new(),
             body: body.into(),
             cut: None,
-            stall: None,
+            hold_open: false,
         }
     }
     fn cut(mut self, bytes: usize) -> Self {
         self.cut = Some(bytes);
         self
     }
-    fn stall(mut self, duration: Duration) -> Self {
-        self.stall = Some(duration);
+    fn before_headers() -> Self {
+        Self::new(0, [])
+    }
+    fn stall(mut self) -> Self {
+        self.hold_open = true;
         self
     }
     fn header(mut self, name: &str, value: impl Into<String>) -> Self {
@@ -250,6 +254,7 @@ impl Registry {
         let stop = Arc::new(AtomicBool::new(false));
         let (thread_log, thread_stop) = (log.clone(), stop.clone());
         let thread = std::thread::spawn(move || {
+            let mut stalled = Vec::new();
             for stream in listener.incoming() {
                 if thread_stop.load(AtomicOrdering::SeqCst) {
                     return;
@@ -260,27 +265,22 @@ impl Registry {
                 };
                 thread_log.lock().unwrap().push(request.clone());
                 let reply = handler(&request, port);
-                if reply.status == 0 {
-                    continue;
+                if reply.status != 0 {
+                    let mut head = format!(
+                        "HTTP/1.1 {} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n",
+                        reply.status,
+                        reply.body.len()
+                    );
+                    for (name, value) in &reply.headers {
+                        head.push_str(&format!("{name}: {value}\r\n"));
+                    }
+                    head.push_str("\r\n");
+                    let sent = reply.cut.unwrap_or(reply.body.len()).min(reply.body.len());
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(&reply.body[..sent]);
                 }
-                let mut head = format!(
-                    "HTTP/1.1 {} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n",
-                    reply.status,
-                    reply.body.len()
-                );
-                for (name, value) in &reply.headers {
-                    head.push_str(&format!("{name}: {value}\r\n"));
-                }
-                head.push_str("\r\n");
-                let sent = reply.cut.unwrap_or(reply.body.len()).min(reply.body.len());
-                let _ = stream.write_all(head.as_bytes());
-                let _ = stream.write_all(&reply.body[..sent]);
-                if let Some(stall) = reply.stall {
-                    // Keep the connection open without blocking later connections.
-                    std::thread::spawn(move || {
-                        std::thread::sleep(stall);
-                        drop(stream);
-                    });
+                if reply.hold_open {
+                    stalled.push(stream);
                 }
             }
         });
@@ -301,18 +301,28 @@ impl Registry {
     }
 
     fn policy(&self, docker: &DockerFixture) -> ImagePolicy {
-        ImagePolicy {
-            local_registries: vec![LocalRegistry {
-                domain: self.domain(),
-                plain_http: true,
-            }],
-            ..docker.policy()
-        }
+        loopback_policy(self.port, docker)
     }
 
     fn requests(&self) -> Vec<Request> {
         self.log.lock().unwrap().clone()
     }
+}
+
+fn loopback_policy(port: u16, docker: &DockerFixture) -> ImagePolicy {
+    ImagePolicy {
+        local_registries: vec![LocalRegistry {
+            domain: format!("127.0.0.1:{port}"),
+            plain_http: true,
+        }],
+        ..docker.policy()
+    }
+}
+
+fn loopback_fetch(port: u16, policy: &ImagePolicy) -> Fetch<'_> {
+    let named = named(&format!("127.0.0.1:{port}/{REPOSITORY}:latest")).unwrap();
+    let registry = super::registry(&named, policy).unwrap();
+    Fetch::new(&registry, REPOSITORY, policy).unwrap()
 }
 
 impl Drop for Registry {
@@ -2041,9 +2051,11 @@ fn retry_registry_preheader_failure(close: bool) {
         let fixture = Registry::serve(Box::new(move |_, _| {
             if counted.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
                 if close {
-                    return Reply::new(0, "");
+                    return Reply::before_headers();
                 }
-                std::thread::sleep(Duration::from_millis(150));
+                // Let the client's own deadline end this attempt. The server
+                // can accept the retry even while the first socket stays open.
+                return Reply::before_headers().stall();
             }
             Reply::new(
                 200,
@@ -2056,16 +2068,15 @@ fn retry_registry_preheader_failure(close: bool) {
         }));
         let docker = empty_docker();
         let policy = fixture.policy(&docker);
-        let named = named(&format!("{}/{REPOSITORY}:latest", fixture.domain())).unwrap();
-        let registry = super::registry(&named, &policy).unwrap();
-        let mut fetch = Fetch::new(&registry, REPOSITORY, &policy).unwrap();
-        fetch.request_timeout = Duration::from_millis(100);
-        fetch.deadline = Instant::now() + Duration::from_secs(3);
+        let mut fetch = loopback_fetch(fixture.port, &policy);
+        fetch.request_timeout = Duration::from_secs(1);
+        let budget = Duration::from_secs(10);
         let start = Instant::now();
+        fetch.deadline = start + budget;
         if token {
             assert_eq!(
                 fetch
-                    .token(&registry.origin.join("/token").unwrap(), None, None)
+                    .token(&fetch.registry.origin.join("/token").unwrap(), None, None)
                     .unwrap()
                     .as_str(),
                 "fixture"
@@ -2074,7 +2085,7 @@ fn retry_registry_preheader_failure(close: bool) {
             assert_eq!(fetch.manifest("latest").unwrap(), b"manifest");
         }
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
-        assert!(start.elapsed() < Duration::from_secs(3));
+        assert!(start.elapsed() < budget);
     }
 }
 
@@ -2086,17 +2097,13 @@ fn retry_blob_closed_connection_and_name_the_host_when_it_keeps_failing() {
     let counted = calls.clone();
     let fixture = Registry::serve(Box::new(move |_, _| {
         if counted.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
-            return Reply::new(0, "");
+            return Reply::before_headers();
         }
         Reply::new(200, std::str::from_utf8(body).unwrap())
     }));
     let docker = empty_docker();
     let policy = fixture.policy(&docker);
-    let named = named(&format!("{}/{REPOSITORY}:latest", fixture.domain())).unwrap();
-    let registry = super::registry(&named, &policy).unwrap();
-    let mut fetch = Fetch::new(&registry, REPOSITORY, &policy).unwrap();
-    fetch.request_timeout = Duration::from_millis(100);
-    fetch.deadline = Instant::now() + Duration::from_secs(3);
+    let mut fetch = loopback_fetch(fixture.port, &policy);
     let descriptor = Descriptor {
         digest: digest(body),
         size: body.len() as u64,
@@ -2107,7 +2114,9 @@ fn retry_blob_closed_connection_and_name_the_host_when_it_keeps_failing() {
     assert_eq!(fetch.object("blobs", &descriptor).unwrap(), body);
     assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
     // A blob host that never answers is named, with its attempt count.
-    drop(fixture);
+    let (_reservation, address) = bound_unlistened_tcp();
+    let policy = loopback_policy(address.port(), &docker);
+    let mut fetch = loopback_fetch(address.port(), &policy);
     let failure = fetch.object("blobs", &descriptor).unwrap_err();
     assert_eq!(failure.code, "registry_image");
     assert!(failure.message.contains("127.0.0.1"), "{}", failure.message);
@@ -2120,16 +2129,13 @@ fn retry_blob_closed_connection_and_name_the_host_when_it_keeps_failing() {
 
 #[test]
 fn retry_registry_permanent_failure_names_host_and_attempts() {
-    let fixture = Registry::serve(Box::new(|_, _| Reply::new(200, "unused")));
+    let (_reservation, address) = bound_unlistened_tcp();
     let docker = empty_docker();
-    let policy = fixture.policy(&docker);
-    let named = named(&format!("{}/{REPOSITORY}:latest", fixture.domain())).unwrap();
-    let registry = super::registry(&named, &policy).unwrap();
-    let fetch = Fetch::new(&registry, REPOSITORY, &policy).unwrap();
-    drop(fixture);
+    let policy = loopback_policy(address.port(), &docker);
+    let fetch = loopback_fetch(address.port(), &policy);
     let start = Instant::now();
     let failure = fetch
-        .token(&registry.origin.join("/token").unwrap(), None, None)
+        .token(&fetch.registry.origin.join("/token").unwrap(), None, None)
         .unwrap_err();
     assert!(failure.message.contains("127.0.0.1"));
     assert!(failure.message.contains("3 attempt(s)"));
@@ -2161,17 +2167,14 @@ fn retry_does_not_replay_http_refusals_or_invalid_token_bodies() {
 
 #[test]
 fn retry_does_not_replay_oauth_refresh_posts() {
-    let fixture = Registry::serve(Box::new(|_, _| Reply::new(200, "unused")));
+    let (_reservation, address) = bound_unlistened_tcp();
     let docker = empty_docker();
-    let policy = fixture.policy(&docker);
-    let named = named(&format!("{}/{REPOSITORY}:latest", fixture.domain())).unwrap();
-    let registry = super::registry(&named, &policy).unwrap();
-    let fetch = Fetch::new(&registry, REPOSITORY, &policy).unwrap();
-    drop(fixture);
+    let policy = loopback_policy(address.port(), &docker);
+    let fetch = loopback_fetch(address.port(), &policy);
     let credential = Credential::IdentityToken(Zeroizing::new("fixture-refresh".into()));
     let failure = fetch
         .token(
-            &registry.origin.join("/token").unwrap(),
+            &fetch.registry.origin.join("/token").unwrap(),
             None,
             Some(&credential),
         )
@@ -2461,9 +2464,7 @@ fn a_stalled_layer_body_times_out_within_its_attempt_limit() {
     let bytes: Vec<u8> = (0..20_000_u32).map(|n| (n % 7) as u8).collect();
     let body = bytes.clone();
     let fixture = Registry::serve(Box::new(move |_, _| {
-        Reply::new(200, body.clone())
-            .cut(100)
-            .stall(Duration::from_secs(2))
+        Reply::new(200, body.clone()).cut(100).stall()
     }));
     let docker = empty_docker();
     let policy = fixture.policy(&docker);
@@ -2497,7 +2498,7 @@ fn the_deadline_reached_mid_retry_ends_the_layer_without_extending_it() {
             // The first attempt ends at once; the second outlives the deadline.
             reply
         } else {
-            reply.stall(Duration::from_secs(5))
+            reply.stall()
         }
     }));
     let docker = empty_docker();

@@ -69,6 +69,9 @@ flate2 = { version = "=1.1.10", default-features = false, features = ["rust_back
 ruzstd = "=0.8.2"
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time"] }
 
+[dev-dependencies]
+socket2 = "0.6"
+
 # The detection `sha2` itself uses, to report which SHA-256 backend a process runs.
 [target.'cfg(any(target_arch = "aarch64", target_arch = "x86_64"))'.dependencies]
 cpufeatures = "0.3"

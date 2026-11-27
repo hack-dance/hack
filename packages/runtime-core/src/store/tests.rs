@@ -180,11 +180,12 @@ fn a_slow_initialization_is_waited_for_until_the_time_deadline() {
         .open(root.join("lock"))
         .unwrap();
     flock(&lock, libc::LOCK_EX).unwrap();
+    // The release thread can start running before spawn returns.
+    let started = Instant::now();
     let releaser = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(400));
         drop(lock);
     });
-    let started = Instant::now();
     let store = disk::open_until(&fixture.base(), started + Duration::from_secs(3));
     let elapsed = started.elapsed();
     releaser.join().unwrap();

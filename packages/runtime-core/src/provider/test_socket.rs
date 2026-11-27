@@ -1,10 +1,27 @@
 use std::{
+    net::{Ipv4Addr, SocketAddrV4},
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd},
         unix::ffi::OsStrExt,
     },
     path::Path,
 };
+
+/// Reserve a kernel-selected loopback port that refuses TCP connections.
+///
+/// Keep the returned descriptor for the entire failure check. Dropping a
+/// listener would let another fixture or outbound connection take its port.
+/// This socket never listens, including when a fork still holds a copy.
+pub(super) fn bound_unlistened_tcp() -> (OwnedFd, SocketAddrV4) {
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+    socket
+        .bind(&SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0).into())
+        .unwrap();
+    let address = socket.local_addr().unwrap().as_socket_ipv4().unwrap();
+    (socket.into(), address)
+}
 
 /// Bind a stream socket inode at `path` without ever listening on it, for fixtures that need
 /// a stale (closed) socket pathname.
@@ -112,6 +129,25 @@ pub(super) fn unallocated_tcp_port() -> u16 {
 mod tests {
     use super::*;
     use std::os::unix::{fs::FileTypeExt, net::UnixStream};
+
+    #[test]
+    fn a_reserved_tcp_port_refuses_connections_and_excludes_other_binders() {
+        use std::net::{TcpListener, TcpStream};
+
+        let (socket, address) = bound_unlistened_tcp();
+        let copy = socket.try_clone().unwrap();
+        drop(socket);
+        assert_ne!(address.port(), 0);
+        assert_eq!(
+            TcpStream::connect(address).unwrap_err().kind(),
+            std::io::ErrorKind::ConnectionRefused
+        );
+        assert_eq!(
+            TcpListener::bind(address).unwrap_err().kind(),
+            std::io::ErrorKind::AddrInUse
+        );
+        drop(copy);
+    }
 
     #[test]
     fn an_inherited_copy_of_an_unlistened_socket_still_refuses_connections() {

@@ -1852,3 +1852,88 @@ fn an_interactive_request_left_in_the_backlog_of_an_ended_owner_is_not_started()
         });
     }
 }
+
+/// HACK-2742 re-review (L1): dead-owner recovery saves the run removed and
+/// archives the publication rather than deleting it, which otherwise looks like
+/// the owner's own retirement. While either archive path is present the owner's
+/// clean end is not proven, so the unanswered backlog request stays unconfirmed.
+#[test]
+fn a_backlog_request_after_a_recovery_archived_retirement_stays_unconfirmed() {
+    for archive in [
+        "control-feedface.retired.sock",
+        "owner-feedface.retired.json",
+    ] {
+        let fixture = Fixture::new();
+        let receipt = admitted(fixture.receipt());
+        let publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+        let root = journal::reserve(&fixture.candidate, &receipt).unwrap();
+        fs::write(fixture.owner_root().join(archive), b"").unwrap();
+        std::thread::scope(|scope| {
+            let caller =
+                scope.spawn(|| exec(&fixture.candidate, RUN, "web", &["true".into()], None));
+            pending_connection(&publication);
+            end_through_cleanup(publication, &root, &receipt);
+            let error = caller.join().unwrap().err().unwrap();
+            assert_eq!(error.code, "native_graph_foreground", "{archive}");
+            assert!(
+                error.cause_code.is_none(),
+                "{archive}: {:?}",
+                error.cause_code
+            );
+        });
+    }
+}
+
+/// HACK-2742 re-review (L2): a retained receipt for this exact session means the
+/// owner had admitted it, so even an unanswered close followed by the owner's
+/// clean end stays session-correlated (uncertain), never not-started.
+#[test]
+fn an_unanswered_interactive_request_with_its_session_receipt_stays_uncertain() {
+    use crate::provider::{
+        graph::interactive_exec::Options,
+        interactive_session::{self, Backend, Binding},
+        interactive_terminal::Leash,
+    };
+    use std::os::unix::net::UnixStream;
+    const SESSION: &str = "12345678-abcd-abcd-abcd-123456789abc";
+    let fixture = Fixture::new();
+    let receipt = admitted(fixture.receipt());
+    let publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+    let root = journal::reserve(&fixture.candidate, &receipt).unwrap();
+    let binding = Binding {
+        backend: Backend::Authored,
+        namespace: "a".repeat(64),
+        run: RUN.into(),
+        owner: "c".repeat(32),
+        boot: "00000000-0000-4000-8000-000000000001".into(),
+        container: "d".repeat(64),
+        generation: "2026-11-12T01:02:03.123456789Z".into(),
+        service: "web".into(),
+    };
+    drop(interactive_session::admit(&fixture.candidate, binding, SESSION).unwrap());
+    let (input, mut frontend) = UnixStream::pair().unwrap();
+    frontend.write_all(&[0; 4]).unwrap();
+    let (leash, _) = Leash::receive(input.into()).unwrap();
+    let argv = vec!["tool".into()];
+    let options = Options {
+        session: SESSION,
+        run: RUN,
+        service: "web",
+        owner: &receipt.owner,
+        plan: receipt.review.review_id(),
+        namespace: receipt.review.scope().namespace,
+        native: true,
+        argv: &argv,
+        workdir: None,
+        expected_container: None,
+        expected_generation: None,
+    };
+    std::thread::scope(|scope| {
+        let caller = scope.spawn(|| interactive(&fixture.candidate, &options, [43, 91], &leash));
+        pending_connection(&publication);
+        end_through_cleanup(publication, &root, &receipt);
+        let error = caller.join().unwrap().err().unwrap();
+        assert_ne!(error.code, "graph_authored_command_not_started");
+        assert_eq!(error.session(), Some(SESSION));
+    });
+}

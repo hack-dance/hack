@@ -42,9 +42,10 @@ export const NATIVE_CROSS_BOOT_START_PHASES: ReadonlySet<string> = new Set([
  * The phase of a stop its owner left inside its enrolled relay cleanup when
  * its VM was lost (HACK-2746: Ctrl-C, then the provider killed). The runtime's
  * cross-boot recovery finishes it once the pool boots again, when
- * `graph foreground-owner` reports `cross_boot_stop` (a pending relay cleanup
- * marker of the run's boot, its persisted bridge selection, and a provable
- * relay owner).
+ * `graph foreground-owner` reports `cross_boot_stop`: a pending relay cleanup
+ * marker of a boot that has ended (never a boot whose provider is still
+ * alive, HACK-2757), the bridge selection that stop persisted, and a relay owner the
+ * recovery can prove from them.
  */
 export const NATIVE_CROSS_BOOT_STOP_PHASE = "cleanup-intent";
 
@@ -88,15 +89,46 @@ export function nativeCrossBootRecoverable(selection: {
  * same-boot recovery) keeps the down advice, whose own paths handle it.
  */
 export function nativeReadyLossRetirable(
-  selection: Pick<
-    NativeForegroundOwnerSelection,
-    "phase" | "crossBootRelay" | "crossBootStop" | "deadOwnerRecovery"
-  >
+  selection: NativeReadyLossSelection
 ): boolean {
+  return nativeReadyLossWithheld(selection) === undefined;
+}
+
+/** The selection fields a ready-stage loss reads. */
+type NativeReadyLossSelection = Pick<
+  NativeForegroundOwnerSelection,
+  | "phase"
+  | "crossBootRelay"
+  | "crossBootStop"
+  | "crossBootStopReported"
+  | "deadOwnerRecovery"
+>;
+
+/**
+ * Why a run lost once ready is not retired by `hack down --recover`, so its
+ * message names the real reason (HACK-2757):
+ * - `relay`: a live receipt whose relay owner the runtime cannot prove (no
+ *   published port and an unsettled relay startup, HACK-2731).
+ * - `stop`: a stop interrupted at `cleanup-intent` that the runtime reports
+ *   it cannot finish across the boot (`cross_boot_stop` false: its relay
+ *   cleanup marker names no ended boot of this pool, or the bridge selection
+ *   the stop saved is missing or is not one the recovery accepts).
+ * - `stop-unreported`: the same receipt from a runtime too old to report
+ *   `cross_boot_stop`, which never finished one.
+ * Undefined when the down retires it.
+ */
+export type NativeReadyLossWithheld = "relay" | "stop" | "stop-unreported";
+
+export function nativeReadyLossWithheld(
+  selection: NativeReadyLossSelection
+): NativeReadyLossWithheld | undefined {
   if (selection.phase === NATIVE_CROSS_BOOT_STOP_PHASE) {
-    return selection.crossBootStop || selection.deadOwnerRecovery !== null;
+    if (selection.crossBootStop || selection.deadOwnerRecovery !== null) {
+      return;
+    }
+    return selection.crossBootStopReported ? "stop" : "stop-unreported";
   }
-  return !nativeLiveRelayUnprovable(selection);
+  return nativeLiveRelayUnprovable(selection) ? "relay" : undefined;
 }
 
 /**
@@ -151,6 +183,8 @@ export type NativeForegroundOwnerSelection = {
    * which never finished one: false.
    */
   readonly crossBootStop: boolean;
+  /** Whether the runtime reported `cross_boot_stop` at all (older ones do not). */
+  readonly crossBootStopReported: boolean;
   /**
    * A lost-removal repair whose storage barrier has not confirmed
    * (`lost_removal_pending`, HACK-2719), read from its host marker. Absent
@@ -218,6 +252,7 @@ export function parseNativeForegroundOwner(
     crossBootStart: value.cross_boot_start === true,
     crossBootRelay: value.cross_boot_relay !== false,
     crossBootStop: value.cross_boot_stop === true,
+    crossBootStopReported: typeof value.cross_boot_stop === "boolean",
     lostRemovalPending: value.lost_removal_pending === true,
     receiptSha256: value.receipt_sha256,
     foreground:

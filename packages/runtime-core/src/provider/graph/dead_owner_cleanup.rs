@@ -93,6 +93,45 @@ pub(super) fn unconfirmed_start(receipt: &Receipt) -> bool {
         })
 }
 
+/// A stop its owner left inside its enrolled relay cleanup, at `cleanup-intent`,
+/// when its VM was lost (HACK-2746, real VM: Ctrl-C, then the provider killed while
+/// the receipt read `cleanup-intent`). The relay cleanup marker is still `pending`
+/// for one of the pool's recorded boots and the bridge selection it persisted is
+/// beside it. The cross-boot recovery admits that receipt once the pool boots again
+/// (`interrupted_enrollment` in `prepare`), provided it can prove the dead relay
+/// owner: by the routes that selection names, or by a settled relay startup. So a
+/// caller starts a stopped pool, or names `hack down --recover`, only for one this
+/// returns. Selection only, read from host files; the recovery revalidates the dead
+/// owner, the ended boot and every inventory.
+pub(super) fn interrupted_stop(
+    candidate: &Candidate,
+    root: &std::path::Path,
+    receipt: &Receipt,
+    owner: &Owner,
+) -> bool {
+    let Some(marker) = receipt
+        .relay_cleanup
+        .as_ref()
+        .filter(|marker| marker.valid() && marker.phase == cleanup_enrollment::Phase::Pending)
+    else {
+        return false;
+    };
+    if receipt.phase != "cleanup-intent" || receipt.relay_startup.is_none() {
+        return false;
+    }
+    let mut boots: Vec<String> = owner.guest_boot_id.iter().cloned().collect();
+    boots
+        .extend(crate::provider::boot_history::earlier_boots(candidate, owner).unwrap_or_default());
+    let enrolled_boot = boots.iter().any(|boot| {
+        host_relay::context(&receipt.owner, boot)
+            .is_ok_and(|context| marker.runtime == context.runtime && marker.boot == context.boot)
+    });
+    enrolled_boot
+        && exists(&root.join("relay-cleanup-bridges.json")).unwrap_or(false)
+        && (bridges::cleanup::relay_owner_provable(candidate, &owner.token, receipt)
+            || bridges::cleanup::interrupted_selection_routes(root, &owner.token, &receipt.run))
+}
+
 fn validate(
     intent: &Intent,
     receipt: &Receipt,
@@ -3184,5 +3223,74 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pending(&fixture), true);
+    }
+
+    #[test]
+    fn a_stop_interrupted_inside_its_enrolled_relay_cleanup_is_a_cross_boot_stop() {
+        // HACK-2746 (real VM, 3 of 3): Ctrl-C, then the provider killed while the
+        // receipt read `cleanup-intent`. The enrolled cleanup's marker is pending for
+        // the run's boot, its bridge selection is persisted beside it, and its slots
+        // were already released. The cross-boot recovery admits that receipt
+        // (`interrupted_enrollment`), so `graph foreground-owner` reports
+        // `cross_boot_stop` and `hack up` names `hack down --recover`.
+        let fixture = super::super::retained_startup::tests::Fixture::new();
+        let owner = Owner::load(&fixture.candidate).unwrap();
+        let boot = owner.guest_boot_id.clone().unwrap();
+        let root = fixture.graph();
+        let mut receipt = fixture.receipt();
+        receipt.phase = "cleanup-intent".into();
+        let stop = |receipt: &Receipt| interrupted_stop(&fixture.candidate, &root, receipt, &owner);
+        let marker = |boot: &str, phase: &str| {
+            let context = host_relay::context(&receipt.owner, boot).unwrap();
+            serde_json::from_value::<cleanup_enrollment::RelayCleanup>(json!({
+                "version":1,"runtime":context.runtime,"boot":context.boot,"operation":([3;16]),
+                "effect":([4;32]),"control_root":"/private/owned","phase":phase
+            }))
+            .unwrap()
+        };
+        // Before HACK-2746 nothing reported it: no relay startup or marker.
+        assert!(!stop(&receipt));
+        receipt.relay_startup = Some(serde_json::from_value(json!({"control_only":true,"guest_root":null,"control_root":"/private/owned","control_generation":"a".repeat(32),"artifact":"e".repeat(64),"services":{}})).unwrap());
+        receipt.relay_cleanup = Some(marker(&boot, "pending"));
+        // The persisted selection is required.
+        assert!(!stop(&receipt));
+        let selection = |selected: serde_json::Value| {
+            json!({"version":1,"owner":owner.token,"boot":boot,"run":receipt.run,
+                "plan":receipt.plan_id,"capacity":2,"serial":1,"selected":selected})
+        };
+        state::write(
+            &root.join("relay-cleanup-bridges.json"),
+            &selection(json!({})),
+        )
+        .unwrap();
+        assert!(stop(&receipt));
+        state::write(&root.join("state.json"), &receipt).unwrap();
+        assert_eq!(
+            foreground_owner(&fixture.candidate, &fixture.run).unwrap()["cross_boot_stop"],
+            true
+        );
+        // A confirmed marker, one of another boot, or another phase is not one.
+        let mut confirmed = receipt.clone();
+        confirmed.relay_cleanup = Some(marker(&boot, "confirmed"));
+        assert!(!stop(&confirmed));
+        let mut foreign = receipt.clone();
+        foreign.relay_cleanup = Some(marker("33333333-3333-3333-3333-333333333333", "pending"));
+        assert!(!stop(&foreign));
+        let mut ready = receipt.clone();
+        ready.phase = "ready-observed".into();
+        assert!(!stop(&ready));
+        // Without a settled relay startup, only the persisted routes prove the dead
+        // relay owner: none, then one.
+        let mut unsettled = receipt.clone();
+        unsettled.relay_startup.as_mut().unwrap().control_only = false;
+        assert!(!stop(&unsettled));
+        state::write(
+            &root.join("relay-cleanup-bridges.json"),
+            &selection(json!({"1":{"assignment":{
+                "reservation":"r","run":receipt.run,"service":"web","generation":"g",
+                "container_id":"c","network_id":"n","boot_id":boot,"phase":"reserved"}}})),
+        )
+        .unwrap();
+        assert!(stop(&unsettled));
     }
 }

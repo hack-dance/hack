@@ -5506,8 +5506,10 @@ service that mounts persistent storage, or in a project with a live source, is
 refused with `graph_authored_run_mounts_unsupported` before anything is created: the
 command says nothing ran and to use `hack exec <service> -- <command>` in the
 service's own container instead. In a project with persistent storage, an authored
-exec or run proves the storage identity once before its command and again after it,
-before any output is released, rather than around each of its engine requests. A
+finite exec or one-off run proves the storage identity once before its command and
+again after it, before any output is released, rather than around each of its engine
+requests. An interactive exec proves it once before its session starts, because its
+output is streamed as it arrives. A
 compose project's one-off `run` is answered by its owner, which waits at most 15 seconds on
 its only loop, within one 15-second bound for its selection and admission before its
 job is reserved; a pending Ctrl-C or `hack down` ends that wait at once without

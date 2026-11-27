@@ -410,7 +410,7 @@ mod automatic_tests {
 mod owner_lease_tests {
     use super::*;
     use crate::provider::engine::command_lease_tests::{
-        PAST_ACQUISITION, PROJECT_STOP_REFUSAL, hold_lease, hold_lease_as_project_stop,
+        PROJECT_STOP_REFUSAL, assert_waited_then_acquired, hold_lease, hold_lease_as_project_stop,
         running_pool,
     };
     use std::cell::Cell;
@@ -448,9 +448,9 @@ mod owner_lease_tests {
     }
 
     /// HACK-2729: the requesting side's selection, before anything is sent to the
-    /// owner, outlasts a project stop (scaled: 600 ms against a 700 ms bound), and a
-    /// stop past its bound is refused with the raw, uncaused `provider_busy` naming
-    /// the stop. That is the refusal the CLI reports as "nothing ran".
+    /// owner, outlasts a project stop, and a stop past its bound is refused with
+    /// the raw, uncaused `provider_busy` naming the stop. That is the refusal the
+    /// CLI reports as "nothing ran".
     #[test]
     fn the_requested_selection_waits_out_a_project_stop_and_refuses_one_past_its_bound() {
         let (_home, candidate) = running_pool();
@@ -458,21 +458,21 @@ mod owner_lease_tests {
         let hold = Duration::from_millis(600);
         let (_release, holder) = hold_lease_as_project_stop(&candidate, hold);
         let started = Instant::now();
-        let after = requested_selection(&candidate, &run, started + Duration::from_millis(700))
+        // The backoff caps at 50 ms and is not scaled with the hold. Allow ten
+        // poll intervals for the holder to run, unlock and be observed on CI.
+        let deadline = started + hold + Duration::from_millis(500);
+        let after = requested_selection(&candidate, &run, deadline)
             .err()
             .unwrap();
-        assert!(started.elapsed() >= hold - Duration::from_millis(50));
-        assert_eq!(after.code, PAST_ACQUISITION, "{}", after.message);
+        assert_waited_then_acquired(started, hold, &after);
         holder.join().unwrap();
 
         let (release, holder) = hold_lease_as_project_stop(&candidate, Duration::from_secs(30));
-        let refused = requested_selection(
-            &candidate,
-            &run,
-            Instant::now() + Duration::from_millis(300),
-        )
-        .err()
-        .unwrap();
+        let deadline = Instant::now() + Duration::from_millis(300);
+        let refused = requested_selection(&candidate, &run, deadline)
+            .err()
+            .unwrap();
+        assert!(Instant::now() >= deadline);
         assert_eq!(refused.code, "provider_busy");
         assert_eq!(refused.message, PROJECT_STOP_REFUSAL);
         assert!(refused.cause_code.is_none());

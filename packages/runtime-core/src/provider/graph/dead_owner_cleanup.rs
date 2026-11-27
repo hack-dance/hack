@@ -105,12 +105,16 @@ pub(super) fn unconfirmed_start(receipt: &Receipt) -> bool {
 /// pool, or names `hack down --recover`, only for one this returns.
 ///
 /// The ended boot is one of the pool's earlier boots, or its last recorded boot
-/// while it is not running (a provider lost with its VM leaves the pool
-/// `recovered-unclean` with that boot). While the pool runs, its current boot never
-/// counts (HACK-2757): the cross-boot recovery never selects the current boot, so
-/// an owner that died while its VM kept running is not one. Selection only, read
-/// from host files; the recovery revalidates the dead owner, the ended boot and
-/// every inventory.
+/// unless that boot is still live: the record says `running` and its provider is
+/// alive (the check `runtime status` makes, [`identity::provider_gone`]). A provider
+/// killed with its VM leaves the record `running` with the dead boot until
+/// `runtime recover` writes `recovered-unclean`; that boot has ended (`status` reads
+/// it `process-exited`), so it counts (#1291 review). A live boot never counts
+/// (HACK-2757): the cross-boot recovery never selects the current boot, so an owner
+/// that died while its VM kept running is not one. A provider whose state cannot
+/// be read counts as live, so nothing is promised. Selection only, read from host
+/// files; the recovery revalidates the dead owner, the ended boot and every
+/// inventory.
 pub(super) fn interrupted_stop(
     candidate: &Candidate,
     root: &std::path::Path,
@@ -127,18 +131,10 @@ pub(super) fn interrupted_stop(
     if receipt.phase != "cleanup-intent" || receipt.relay_startup.is_none() {
         return false;
     }
-    let mut boots: Vec<String> = owner
-        .guest_boot_id
-        .iter()
-        .filter(|_| owner.phase != "running")
-        .cloned()
-        .collect();
+    let current = owner.guest_boot_id.as_deref().filter(|_| live_boot(owner));
+    let mut boots: Vec<String> = owner.guest_boot_id.iter().cloned().collect();
     boots
         .extend(crate::provider::boot_history::earlier_boots(candidate, owner).unwrap_or_default());
-    let current = owner
-        .guest_boot_id
-        .as_deref()
-        .filter(|_| owner.phase == "running");
     let Some(old_boot) = boots.iter().find(|boot| {
         current != Some(boot.as_str())
             && host_relay::context(&receipt.owner, boot).is_ok_and(|context| {
@@ -149,6 +145,16 @@ pub(super) fn interrupted_stop(
     };
     exists(&root.join("relay-cleanup-bridges.json")).unwrap_or(false)
         && bridges::cleanup::interrupted_stop_provable(candidate, root, owner, receipt, old_boot)
+}
+
+/// Whether the pool record's boot is still live: `running`, with a provider that
+/// is not proven gone. An unreadable provider state counts as live.
+fn live_boot(owner: &Owner) -> bool {
+    owner.phase == "running"
+        && owner
+            .process
+            .as_ref()
+            .is_none_or(|process| !identity::provider_gone(process).unwrap_or(false))
 }
 
 fn validate(
@@ -3338,7 +3344,8 @@ mod tests {
     }
 
     #[test]
-    fn an_owner_that_died_while_its_vm_kept_running_is_not_a_cross_boot_stop() {
+    fn an_owner_that_died_while_its_vm_kept_running_is_not_a_cross_boot_stop_but_a_killed_provider_is()
+     {
         // HACK-2757 (review of #1290): the cross-boot recovery never selects the
         // pool's current boot, so while the pool runs a marker of that boot is not a
         // cross-boot stop; `hack up` and the advice do not send it to
@@ -3367,7 +3374,8 @@ mod tests {
                 "serial":0,"selected":{}}),
         )
         .unwrap();
-        // The VM was lost: the pool is stopped with that boot recorded.
+        // The VM was lost and `runtime recover` ran: the pool is stopped with that
+        // boot recorded.
         assert_ne!(owner.phase, "running");
         assert!(interrupted_stop(
             &fixture.candidate,
@@ -3375,8 +3383,21 @@ mod tests {
             &receipt,
             &owner
         ));
-        // The owner died while its VM kept running: the boot is still current.
+        // #1291 review: the provider was killed and nothing rewrote the record, so
+        // it still says `running` with the dead boot (`runtime status` reads it
+        // `process-exited`). That boot has ended: still a cross-boot stop, so the
+        // lost-VM advice and `hack up` name `hack down --recover` (HACK-2746 rows).
         owner.phase = "running".into();
+        assert!(identity::provider_gone(owner.process.as_ref().unwrap()).unwrap());
+        assert!(interrupted_stop(
+            &fixture.candidate,
+            &root,
+            &receipt,
+            &owner
+        ));
+        // The owner died while its VM kept running: a live provider, so the boot is
+        // still current and nothing is promised.
+        owner.process = Some(identity::observe(std::process::id() as i32).unwrap());
         assert!(!interrupted_stop(
             &fixture.candidate,
             &root,

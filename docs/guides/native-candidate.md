@@ -2947,8 +2947,9 @@ code 1, and what to run next, which depends on how far the start got:
   command and says why: the relay cleanup marker names no ended boot of the
   pool, the bridge selection the stop saved is missing or does not match, or
   the runtime is too old to report it (HACK-2757). An owner that dies during
-  its stop while its VM keeps running is not this case: the pool's current
-  boot never counts.
+  its stop while its VM keeps running (the provider still alive) is not this
+  case: that boot has not ended, and no command retires it yet (HACK-2763). A
+  provider killed with the VM counts as ended even before `runtime recover`.
 - Before any service was requested (while it resolved, reviewed, built or
   pulled images, or selected the restore): for a run with a record (a resumed
   stopped run, or a restart's old run), the same `hack down --recover`, then

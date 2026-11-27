@@ -43,8 +43,8 @@ export const NATIVE_CROSS_BOOT_START_PHASES: ReadonlySet<string> = new Set([
  * its VM was lost (HACK-2746: Ctrl-C, then the provider killed). The runtime's
  * cross-boot recovery finishes it once the pool boots again, when
  * `graph foreground-owner` reports `cross_boot_stop`: a pending relay cleanup
- * marker of a boot that has ended (never the boot of a pool still running,
- * HACK-2757), the bridge selection that stop persisted, and a relay owner the
+ * marker of a boot that has ended (never a boot whose provider is still
+ * alive, HACK-2757), the bridge selection that stop persisted, and a relay owner the
  * recovery can prove from them.
  */
 export const NATIVE_CROSS_BOOT_STOP_PHASE = "cleanup-intent";

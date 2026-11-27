@@ -7,6 +7,7 @@ import { openTerminalControl } from "../lib/tty-process-group.ts";
 import { withPinnedRuntimeBinary } from "./native-authored-runtime-binary.ts";
 import {
   invokeNativeRuntime,
+  NATIVE_EXEC_ENVIRONMENT_CHANGED_MESSAGE,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
@@ -399,7 +400,13 @@ async function finishInteractiveReport({
   return restorationFailed && report.code === 0 ? 1 : report.code;
 }
 
-function interactiveRefusalMessage(code: string): string {
+/** The terminal line for a refused interactive exec; the report carries only its code. */
+export function interactiveRefusalMessage(code: string): string {
+  if (code === "graph_service_exec_environment_changed") {
+    // HACK-2740: fresh values for a service that started without them. No
+    // command ran, so this is not an uncertain outcome.
+    return NATIVE_EXEC_ENVIRONMENT_CHANGED_MESSAGE;
+  }
   if (
     code === "interactive_exec_environment_required" ||
     code === "graph_service_exec_launcher"

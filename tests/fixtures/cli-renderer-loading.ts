@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { rendererCanary } from "./cli-renderer-canary.ts";
 
 declare const __RENDERER_CONTROL_COMPILED__: boolean | undefined;
@@ -10,6 +10,10 @@ if (!root) {
 }
 
 if (mode === "build") {
+  // The compiler stages a transient `.<hash>.bun-build` in this process's
+  // working directory. The test starts this control in the checkout, so move
+  // to the outfile's owned directory first (HACK-2727).
+  process.chdir(dirname(root));
   const result = await Bun.build({
     entrypoints: [import.meta.path],
     target: "bun",

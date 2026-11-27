@@ -48,7 +48,7 @@ const NATIVE_SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
 const NATIVE_TAIL = /^[1-9][0-9]{0,3}$/;
 const NATIVE_RUN = /^[a-f0-9]{32}$/;
 const NATIVE_HASH = /^[a-f0-9]{64}$/;
-interface NativeFailure {
+export interface NativeFailure {
   readonly configurationRefusals?: readonly NativeConfigurationRefusal[];
   readonly code: string;
   readonly logPhase?: NativeLogFailurePhase;
@@ -1214,9 +1214,24 @@ function validNativeAuthoredRecoveryDrainSelection(
 export const NATIVE_PROVIDER_PIN_MESSAGE =
   "This native home was prepared with a different provider version than this build's pin. Use the native executor from the release that started its pool to run runtime down --json on this home. Preserve the home for its retained data and prepare a fresh home for this build; see docs/guides/native-candidate.md.";
 
-function nativeFailureMessage(failure: NativeFailure | undefined): string {
+/**
+ * The whole line for an exec that brought fresh values to a service container
+ * that started without them (HACK-2740). Nothing ran and nothing is uncertain,
+ * so it carries no generic "inspect owned state" advice. Finite and interactive
+ * exec print the same line.
+ */
+export const NATIVE_EXEC_ENVIRONMENT_CHANGED_MESSAGE =
+  "Native exec refused (graph_service_exec_environment_changed): the service has env values that this run did not start with, for example after hack env set. Run hack down, then hack up, to start with them. No command was started.";
+
+/** The line a failed runtime request prints; exported for its tests. */
+export function nativeFailureMessage(
+  failure: NativeFailure | undefined
+): string {
   if (failure?.code === "provider_pin_changed") {
     return `Native runtime request failed (provider_pin_changed); ${NATIVE_PROVIDER_PIN_MESSAGE}`;
+  }
+  if (failure?.code === "graph_service_exec_environment_changed") {
+    return NATIVE_EXEC_ENVIRONMENT_CHANGED_MESSAGE;
   }
   const code = failure
     ? ` (${failure.code}${failure.causeCode ? `: ${failure.causeCode}` : ""})`
@@ -1361,7 +1376,10 @@ function nativeFailureCause(input: {
   ) ||
     (input.code === "native_graph_foreground" &&
       (input.cause === NATIVE_RUNTIME_NOT_RUNNING ||
-        input.cause === "graph_status_changed"))
+        input.cause === "graph_status_changed" ||
+        // The authored owner's pre-effect exec lease refusal (HACK-2739),
+        // `NATIVE_OWNER_AUTHORED_EXEC_LEASE_BUSY` in native-command-lease.ts.
+        input.cause === "graph_authored_exec_lease_busy"))
     ? input.cause
     : undefined;
 }

@@ -85,10 +85,16 @@ export function nativeStartLeaseHolder(
  * no holder.
  */
 export function nativeStartLeaseWaitLine(token: string | undefined): string {
+  return `Waiting for the native runtime lock, held by ${nativeLeaseHolderPhrase(token)}. This start continues once it is released (up to ${NATIVE_START_LEASE_WAIT_SECONDS} s).`;
+}
+
+/**
+ * The holder a progress line names, with its article, for the runtime's closed
+ * holder token. An unknown token names no holder.
+ */
+export function nativeLeaseHolderPhrase(token: string | undefined): string {
   const words = token === undefined ? undefined : HOLDER_WORDS[token];
-  const holder =
-    (words && HOLDER_PHRASE[words]) ?? "another native runtime operation";
-  return `Waiting for the native runtime lock, held by ${holder}. This start continues once it is released (up to ${NATIVE_START_LEASE_WAIT_SECONDS} s).`;
+  return (words && HOLDER_PHRASE[words]) ?? "another native runtime operation";
 }
 
 /**

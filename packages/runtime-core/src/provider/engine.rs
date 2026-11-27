@@ -248,6 +248,16 @@ fn failure(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("engine_protocol", message)
 }
 
+/// The end of a service command's lease wait: its caller's `deadline`, or `wait`
+/// after `now`, whichever comes first.
+pub(in crate::provider) fn command_lease_deadline(
+    now: Instant,
+    deadline: Instant,
+    wait: Duration,
+) -> Instant {
+    deadline.min(now + wait)
+}
+
 /// A bounded lease wait that ended before any attempt saw the lease busy.
 fn lease_expired() -> CandidateError {
     CandidateError::new(
@@ -617,24 +627,50 @@ impl<'a> Engine<'a> {
         Ok(engine)
     }
 
-    /// The mutation lease for one finite service command: the compose `hack exec`, and
-    /// the dependency refresh that `hack exec` and `hack run` send first (on both the
-    /// requesting and the owner side). A ready foreground owner holds the lease briefly
-    /// and often, so this waits while another holder has it, until `deadline` and for
-    /// at most [`COMMAND_LEASE_WAIT`](super::lifecycle::COMMAND_LEASE_WAIT), instead of
+    /// The mutation lease for one finite service command on an owner's loop thread:
+    /// the owner's answer to the dependency refresh that `hack exec` and `hack run`
+    /// send first, and a compose `hack run`'s job. A ready foreground owner holds the
+    /// lease briefly and often, so this waits while another holder has it, until
+    /// `deadline` and for at most
+    /// [`COMMAND_LEASE_WAIT`](super::lifecycle::COMMAND_LEASE_WAIT), instead of
     /// refusing at once (HACK-2669). It is the bounded acquisition of `connect_until`
     /// with that cap and a caller check: `check` runs before every attempt and once more after
     /// acquisition, so a caller on an owner's loop thread passes its signal and
     /// disconnect checks, and the wait ends within one backoff step of them. Waiting
     /// admits nothing; all identity checks run after acquisition, and a command never
-    /// replaces or cancels the holder. The compose exec's own timeout starts after
-    /// this returns; its frontend bound covers the wait.
+    /// replaces or cancels the holder. The requesting process uses
+    /// `connect_command_request` instead (HACK-2729).
+    #[cfg(target_os = "macos")]
     pub(in crate::provider) fn connect_command(
         candidate: &'a Candidate,
         deadline: Instant,
         check: &dyn Fn() -> Result<(), CandidateError>,
     ) -> Result<Self, CandidateError> {
-        let lease = deadline.min(Instant::now() + super::lifecycle::COMMAND_LEASE_WAIT);
+        let lease = command_lease_deadline(
+            Instant::now(),
+            deadline,
+            super::lifecycle::COMMAND_LEASE_WAIT,
+        );
+        Self::connect_for_start(candidate, ConnectionMode::Allocation, lease, check)
+    }
+
+    /// `connect_command` for the requesting process of `hack exec` (its
+    /// dependency refresh and the exec itself), which waits for at most
+    /// [`COMMAND_REQUEST_LEASE_WAIT`](super::lifecycle::COMMAND_REQUEST_LEASE_WAIT)
+    /// so that it outlasts another project's stop (HACK-2729). That process holds
+    /// nothing and serves no loop, so the longer wait delays only this command.
+    /// Waiting admits nothing: on expiry its own `provider_busy` refusal (holder
+    /// named) means nothing was sent to the owner and no command ran.
+    pub(in crate::provider) fn connect_command_request(
+        candidate: &'a Candidate,
+        deadline: Instant,
+        check: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<Self, CandidateError> {
+        let lease = command_lease_deadline(
+            Instant::now(),
+            deadline,
+            super::lifecycle::COMMAND_REQUEST_LEASE_WAIT,
+        );
         Self::connect_for_start(candidate, ConnectionMode::Allocation, lease, check)
     }
 

@@ -2,11 +2,42 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { parseInteractiveReport } from "../src/backends/native-interactive-exec.ts";
+import {
+  interactiveRefusalMessage,
+  parseInteractiveReport,
+} from "../src/backends/native-interactive-exec.ts";
+import { nativeFailureMessage } from "../src/backends/native-runtime-client.ts";
 import { HACK_KEY_MATERIAL_VARIABLES } from "../src/lib/child-environment.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const session = "00000000-0000-4000-8000-000000000001";
+test("an env change since up names the restart, not an uncertain outcome (HACK-2740)", () => {
+  const report = parseInteractiveReport({
+    version: 1,
+    outcome: "refused",
+    code: "graph_service_exec_environment_changed",
+    session,
+  });
+  expect(report.failure).toBe("graph_service_exec_environment_changed");
+  const line =
+    "Native exec refused (graph_service_exec_environment_changed): the service has env values that this run did not start with, for example after hack env set. Run hack down, then hack up, to start with them. No command was started.";
+  // The whole line: only the restart advice, the same as finite exec prints.
+  expect(interactiveRefusalMessage(report.failure ?? "")).toBe(line);
+  expect(
+    nativeFailureMessage({
+      code: "graph_service_exec_environment_changed",
+      message:
+        "The service has env values that this run did not start with, for example after hack env set. Run hack down, then hack up, to start with them. No command was started.",
+    })
+  ).toBe(line);
+  // Other codes keep their meaning.
+  expect(interactiveRefusalMessage("graph_service_exec_launcher")).toContain(
+    "managed-environment launcher"
+  );
+  expect(interactiveRefusalMessage("session_cleanup_uncertain")).toContain(
+    "could not confirm admission or completion"
+  );
+});
 test("interactive report is closed, value-free and preserves command status", () => {
   expect(
     parseInteractiveReport({
@@ -80,9 +111,35 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
       );
       const source = resolve("tests/fixtures/native-interactive-frontend.ts");
       const compiled = join(root, "frontend");
-      const env = privateCliEnv({ root });
-      const commands = [
+      const env = {
+        ...privateCliEnv({ root }),
+        ...Object.fromEntries(
+          [...HACK_KEY_MATERIAL_VARIABLES].map((name) => [
+            name,
+            "synthetic-parent-key-canary",
+          ])
+        ),
+      };
+      const build = Bun.spawn(
         [process.execPath, "build", "--compile", source, "--outfile", compiled],
+        {
+          // The compiler stages a transient `.<hash>.bun-build` in its working
+          // directory: this test's root, never the checkout (HACK-2727).
+          cwd: root,
+          env,
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+          timeout: 90_000,
+        }
+      );
+      const [buildOut, buildErr, buildCode] = await Promise.all([
+        new Response(build.stdout).text(),
+        new Response(build.stderr).text(),
+        build.exited,
+      ]);
+      expect(buildCode, buildErr + buildOut).toBe(0);
+      const commands = [
         [
           python,
           resolve("tests/fixtures/native-interactive-frontend.py"),
@@ -101,15 +158,7 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
       ];
       for (const cmd of commands) {
         const child = Bun.spawn(cmd, {
-          env: {
-            ...env,
-            ...Object.fromEntries(
-              [...HACK_KEY_MATERIAL_VARIABLES].map((name) => [
-                name,
-                "synthetic-parent-key-canary",
-              ])
-            ),
-          },
+          env,
           stdin: "ignore",
           stdout: "pipe",
           stderr: "pipe",
@@ -121,11 +170,9 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
           child.exited,
         ]);
         expect(code, err + out).toBe(0);
-        if (cmd[0] === python) {
-          expect(out).toBe(
-            "Frontend PTY: nine lifetime and five selection cases passed\n"
-          );
-        }
+        expect(out).toBe(
+          "Frontend PTY: nine lifetime and five selection cases passed\n"
+        );
       }
     } finally {
       await rm(root, { recursive: true, force: true });

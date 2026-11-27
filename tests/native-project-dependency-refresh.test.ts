@@ -50,7 +50,11 @@ async function fixture(saved = true) {
   if (saved) {
     await saveNativeProjectRun({ ...scope, run });
   }
-  return { scope, runtime: { binary: "/not-invoked", home: nativeHome } };
+  return {
+    scope,
+    runtime: { binary: "/not-invoked", home: nativeHome },
+    command: "hack exec" as const,
+  };
 }
 
 test("dependency refresh preserves the provider pin refusal before exec can be requested", async () => {
@@ -99,7 +103,8 @@ test("refresh validates the owned no-op or bounded changed slots with one public
             run.run,
             "--json",
           ],
-          timeoutMs: 200_000,
+          timeoutMs: 220_000,
+          onLeaseWait: expect.any(Function),
         });
         return { ...response(), changed_slots: changedSlots };
       },
@@ -203,7 +208,14 @@ test("lost refresh reply omits subprocess diagnostics and never replays", async 
 test("refresh preserves only allowlisted native codes without replay or raw diagnostics", async () => {
   const opts = await fixture();
   for (const [nativeCode, nativeCauseCode, diagnostic] of [
-    ["provider_busy", undefined, "Native diagnostic: provider_busy."],
+    ["provider_state", undefined, "Native diagnostic: provider_state."],
+    // A provider_busy that the runtime wraps or causes is not the requester's own
+    // expired lease wait, so it stays unconfirmed.
+    [
+      "provider_busy",
+      "provider_state",
+      "Native diagnostic: provider_busy: provider_state.",
+    ],
     [
       "graph_owner_recovery",
       "graph_dependency_rebind_incomplete",
@@ -235,6 +247,107 @@ test("refresh preserves only allowlisted native codes without replay or raw diag
     expect(String(failure)).not.toContain("secret-input");
     expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
   }
+});
+
+const PROJECT_STOP =
+  "Provider lease acquisition refused; recorded holder: project stop; no operation was admitted.";
+
+test("HACK-2729: the requester's own expired lease wait says nothing ran, names the holder and a retry", async () => {
+  const opts = await fixture();
+  for (const command of ["hack exec", "hack run"] as const) {
+    let calls = 0;
+    let failure: unknown;
+    try {
+      await refreshNativeProjectDependencies({
+        ...opts,
+        command,
+        invoke: async () => {
+          calls++;
+          throw new NativeRuntimeRequestError({
+            message: "private stderr",
+            nativeCode: "provider_busy",
+            nativeMessage: PROJECT_STOP,
+          });
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(calls).toBe(1);
+    expect(failure).toBeInstanceOf(NativeRuntimeRequestError);
+    expect(failure).toMatchObject({ nativeCode: "provider_busy" });
+    expect((failure as Error).message.split("\n")).toEqual([
+      `${command} could not acquire the native runtime lock (provider_busy); nothing ran.`,
+      "Holder: project stop.",
+      `Retry ${command} once that project stop finishes.`,
+    ]);
+    expect(String(failure)).not.toContain("unconfirmed");
+    expect(String(failure)).not.toContain("private stderr");
+    expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+  }
+  // An unlabelled holder still gets the plain retry.
+  await expect(
+    refreshNativeProjectDependencies({
+      ...opts,
+      invoke: async () => {
+        throw new NativeRuntimeRequestError({
+          message: "private stderr",
+          nativeCode: "provider_busy",
+        });
+      },
+    })
+  ).rejects.toThrow(
+    "nothing ran.\nHolder: unavailable.\nRetry hack exec once the holder finishes."
+  );
+});
+
+test("HACK-2729 review: the owner's own expired lease wait before its rebind also says nothing ran", async () => {
+  const opts = await fixture();
+  await expect(
+    refreshNativeProjectDependencies({
+      ...opts,
+      invoke: async () => {
+        throw new NativeRuntimeRequestError({
+          message: "private stderr",
+          nativeCode: "graph_owner_recovery",
+          nativeCauseCode: "graph_dependency_refresh_lease_busy",
+        });
+      },
+    })
+  ).rejects.toThrow(
+    [
+      "hack exec could not acquire the native runtime lock (provider_busy); nothing ran.",
+      "Holder: unavailable.",
+      "Retry hack exec once the holder finishes.",
+    ].join("\n")
+  );
+  // The owner's raw provider_busy from anywhere else stays unconfirmed.
+  await expect(
+    refreshNativeProjectDependencies({
+      ...opts,
+      invoke: async () => {
+        throw new NativeRuntimeRequestError({
+          message: "private stderr",
+          nativeCode: "graph_owner_recovery",
+          nativeCauseCode: "provider_busy",
+        });
+      },
+    })
+  ).rejects.toThrow("identity or outcome is unconfirmed");
+});
+
+test("HACK-2729: the refresh asks for the lease-wait report and reaches the command's reporter", async () => {
+  const opts = await fixture();
+  const holders: string[] = [];
+  await refreshNativeProjectDependencies({
+    ...opts,
+    onLeaseWait: (holder) => holders.push(holder),
+    invoke: async (request) => {
+      request.onLeaseWait?.("project-stop");
+      return response();
+    },
+  });
+  expect(holders).toEqual(["project-stop"]);
 });
 
 test("refresh omits unknown, malformed and forged diagnostic identifiers", async () => {

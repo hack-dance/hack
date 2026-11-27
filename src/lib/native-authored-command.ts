@@ -49,12 +49,14 @@ import {
   nativeAuthoredUnreservedStartSelected,
   retireNativeAuthoredUnreservedStart,
 } from "../backends/native-authored-unreserved-start.ts";
+import { isNativeCommandNotRun } from "../backends/native-command-lease.ts";
 import { resolveNativeAuthoredExecStaleEnvWarning } from "../backends/native-exec-stale-env.ts";
 import { NATIVE_RECOVERY_RUNTIME_STARTED_NOTE } from "../backends/native-project-runtime-up.ts";
 import { parseNativeHttpsSelection } from "../backends/native-project-start.ts";
 import {
   isNativeRuntimeNotRunning,
   NATIVE_RUNTIME_NOT_RUNNING,
+  NativeRuntimeRequestError,
   nativeCodesReportRuntimeNotRunning,
   resolveNativeRuntimeSelection,
 } from "../backends/native-runtime-client.ts";
@@ -1232,8 +1234,10 @@ const COMMAND_CONTRACTS: Readonly<Record<"exec" | "run", CommandContract>> = {
 /**
  * The closed CLI refusal for a failed exec or one-off run. A selection with no
  * saved Ready generation never sent a request, so it reports not started (or a
- * pending startup) instead of an unknown command outcome (HACK-1312). Every
- * other failure keeps the unconfirmed-completion contract.
+ * pending startup) instead of an unknown command outcome (HACK-1312). An exec
+ * whose lease wait expired before anything ran says so, names the holder and
+ * gives a retry step (HACK-2739). Every other failure keeps the
+ * unconfirmed-completion contract.
  */
 export function nativeAuthoredCommandFailure(input: {
   readonly error: unknown;
@@ -1248,10 +1252,48 @@ export function nativeAuthoredCommandFailure(input: {
       detail: { status: pending ? "pending" : "not_started" },
     });
   }
+  if (
+    isNativeCommandNotRun(input.error) &&
+    input.error instanceof NativeRuntimeRequestError
+  ) {
+    // The wire code and cause as they arrived: the requester's raw
+    // `provider_busy`, or `native_graph_foreground` caused by the owner's
+    // `graph_authored_exec_lease_busy`.
+    return new HackCliError({
+      code: "E_LIFECYCLE_FAILED",
+      message: input.error.message,
+      detail: {
+        status: "not_run",
+        nativeCode: input.error.nativeCode,
+        ...(input.error.nativeCauseCode
+          ? { nativeCauseCode: input.error.nativeCauseCode }
+          : {}),
+      },
+    });
+  }
   return new HackCliError({
     code: "E_LIFECYCLE_FAILED",
     message: contract.unconfirmed,
   });
+}
+/**
+ * Write one captured stream of an authored exec or one-off run to this
+ * process's stdout or stderr (HACK-2744). `Bun.write` with an empty payload
+ * truncates a regular-file destination to zero bytes, even one opened for
+ * append: with `>> log 2>&1`, a command with no stderr erased the whole file,
+ * its earlier content and the command's stdout included, and with `>> log`
+ * a command with no stdout erased the log. An empty stream therefore writes
+ * nothing; a non-empty one is written at the stream's current position, so
+ * append and truncate redirects behave as they do for any other command.
+ */
+export async function writeNativeCommandStream(
+  destination: typeof Bun.stdout,
+  bytes: Uint8Array
+): Promise<void> {
+  if (bytes.byteLength === 0) {
+    return;
+  }
+  await Bun.write(destination, bytes);
 }
 type CommandCompletion = {
   readonly exitCode: number;
@@ -1308,11 +1350,11 @@ async function runAuthoredCommand(input: {
     if (controller.signal.aborted) {
       return 130;
     }
-    await Bun.write(Bun.stdout, result.stdout);
+    await writeNativeCommandStream(Bun.stdout, result.stdout);
     if (controller.signal.aborted) {
       return 130;
     }
-    await Bun.write(Bun.stderr, result.stderr);
+    await writeNativeCommandStream(Bun.stderr, result.stderr);
     if (controller.signal.aborted) {
       return 130;
     }

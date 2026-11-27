@@ -886,7 +886,9 @@ describe("authored native command wiring", () => {
       }
       expect(code).toBe(4);
       expect(received.signal?.aborted).toBe(true);
-      expect(written).toEqual(["command-out\n", ""]);
+      // The empty stderr is deliberately not written: an empty `Bun.write`
+      // truncates a redirected file (HACK-2744).
+      expect(written).toEqual(["command-out\n"]);
       expect(stderr).toEqual([]);
     },
     2000

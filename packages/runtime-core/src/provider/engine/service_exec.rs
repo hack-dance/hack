@@ -348,6 +348,7 @@ impl Engine<'_> {
     /// Attach to a created container's output before it starts, and read it to its
     /// end on a thread of its own (HACK-2759). The thread ends when the container
     /// exits (or is removed) and its stream closes, or at `deadline`.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(in crate::provider) fn attach_output(
         &self,
         id: &str,

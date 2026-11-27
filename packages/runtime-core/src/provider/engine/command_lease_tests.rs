@@ -553,6 +553,13 @@ fn the_authored_run_requester_waits_before_it_contacts_the_owner() {
         after.code
     );
     assert_ne!(after.code, "provider_busy", "{}", after.message);
+    // HACK-2742 review: no owner pin, so nothing was sent; the CLI reads this pair
+    // as "did not start, nothing ran".
+    assert_eq!(after.code, "native_graph_foreground", "{}", after.message);
+    assert_eq!(
+        after.cause_code.as_deref(),
+        Some("graph_authored_command_not_started")
+    );
     holder.join().unwrap();
 }
 
@@ -583,5 +590,12 @@ fn the_authored_exec_requester_waits_before_it_contacts_the_owner() {
         after.code
     );
     assert_ne!(after.code, "provider_busy", "{}", after.message);
+    // HACK-2742 review: no owner pin, so nothing was sent; the CLI reads this pair
+    // as "did not start, nothing ran".
+    assert_eq!(after.code, "native_graph_foreground", "{}", after.message);
+    assert_eq!(
+        after.cause_code.as_deref(),
+        Some("graph_authored_command_not_started")
+    );
     holder.join().unwrap();
 }

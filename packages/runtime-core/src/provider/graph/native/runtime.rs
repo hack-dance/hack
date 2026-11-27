@@ -14,7 +14,7 @@ pub(super) use exec::execute as service_exec;
 #[cfg(target_os = "macos")]
 pub(super) use exec::interactive as interactive_exec;
 #[cfg(target_os = "macos")]
-pub(super) use exec::owner_pre_effect_code;
+pub(super) use exec::{OWNER_COMMAND_NOT_STARTED, owner_pre_effect_code};
 #[cfg(any(target_os = "macos", test))]
 mod run;
 #[cfg(target_os = "macos")]

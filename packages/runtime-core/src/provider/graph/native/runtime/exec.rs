@@ -84,7 +84,8 @@ pub(super) const OWNER_RUN_LEASE_BUSY: &str = "graph_authored_run_lease_busy";
 /// the wait and before every lease attempt, so nothing was read, touched or
 /// started. Without this code the owner's plain `refused()` reached the CLI as
 /// "unconfirmed".
-pub(super) const OWNER_COMMAND_NOT_STARTED: &str = "graph_authored_command_not_started";
+pub(in crate::provider::graph::native) const OWNER_COMMAND_NOT_STARTED: &str =
+    "graph_authored_command_not_started";
 
 /// The owner's pre-effect wait code that `code` names, if it is one. Only the
 /// macOS interactive requester reads it.
@@ -159,6 +160,17 @@ pub(super) fn owner_command_engine<'a>(
         .map_err(|error| owner_wait_refusal(error, guard_refused.get(), command))
 }
 
+/// The owner's guard and lease wait for a finite or interactive exec, with the
+/// exec's own lease code.
+#[cfg(target_os = "macos")]
+pub(super) fn owner_exec_engine<'a>(
+    candidate: &'a Candidate,
+    deadline: Instant,
+    guard: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<Engine<'a>, CandidateError> {
+    owner_command_engine(candidate, deadline, guard, OwnerCommand::Exec)
+}
+
 #[cfg(target_os = "macos")]
 pub(in crate::provider::graph::native) fn execute(
     candidate: &Candidate,
@@ -174,7 +186,7 @@ pub(in crate::provider::graph::native) fn execute(
     // attempt, and the wait counts against this 30 s budget (HACK-2669). The
     // requester already waited out a longer holder before it sent this
     // (HACK-2739), so this wait only covers a holder that took the lease since.
-    let engine = owner_command_engine(candidate, deadline, guard, OwnerCommand::Exec)?;
+    let engine = owner_exec_engine(candidate, deadline, guard)?;
     let (receipt, _) = journal::load(
         candidate,
         expected.review.scope().run,
@@ -286,7 +298,7 @@ pub(in crate::provider::graph::native) fn interactive(
     // before every lease attempt, and the wait counts against this 30 s budget
     // (HACK-2669). Its failures are pre-intent: no session receipt exists yet,
     // so they carry their own codes (HACK-2742).
-    let engine = owner_command_engine(candidate, deadline, guard, OwnerCommand::Exec)?;
+    let engine = owner_exec_engine(candidate, deadline, guard)?;
     let (receipt, _) = journal::load(
         candidate,
         expected.review.scope().run,

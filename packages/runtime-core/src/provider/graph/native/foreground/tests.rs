@@ -1614,3 +1614,88 @@ fn presentation_observation_never_satisfies_readiness_status() {
             .is_err()
     );
 }
+
+/// HACK-2742 review (L4): the interactive requester forwards the owner's
+/// pre-effect wait codes as their own code, because the interactive report
+/// carries only one code; every other owner refusal is wrapped as before.
+#[test]
+fn the_interactive_requester_forwards_only_the_owners_pre_effect_codes() {
+    for code in [
+        "graph_authored_exec_lease_busy",
+        "graph_authored_run_lease_busy",
+        "graph_authored_command_not_started",
+    ] {
+        let forwarded = interactive_owner_refusal(code.to_owned());
+        assert_eq!(forwarded.code, code);
+        assert!(forwarded.cause_code.is_none());
+        assert!(forwarded.session().is_none());
+    }
+    for code in [
+        "provider_busy",
+        "engine_protocol",
+        "native_graph_foreground",
+    ] {
+        let wrapped = interactive_owner_refusal(code.to_owned());
+        assert_eq!(wrapped.code, "native_graph_foreground");
+        assert_eq!(wrapped.cause_code.as_deref(), Some(code));
+    }
+}
+
+/// HACK-2742 review (VM row 4): the owner exited while the requester waited for
+/// the lease (its own `hack down`), so its pin is gone. Every requester failure
+/// before the request is written answers the not-started code: for finite exec
+/// and run as the cause of this module's refusal, for interactive exec as the
+/// report code with no session. Nothing was sent. Status and logs keep theirs.
+#[test]
+fn a_requester_whose_owner_is_gone_before_the_write_answers_not_started() {
+    use crate::provider::{graph::interactive_exec::Options, interactive_terminal::Leash};
+    use std::os::unix::net::UnixStream;
+
+    let fixture = Fixture::new();
+    let receipt = fixture.receipt();
+    // No publication: the owner's pin does not exist.
+    for result in [
+        exec(&fixture.candidate, RUN, "web", &["true".into()], None),
+        one_off(&fixture.candidate, RUN, "web", &["true".into()], None),
+    ] {
+        let error = result.err().unwrap();
+        assert_eq!(error.code, "native_graph_foreground", "{}", error.message);
+        assert_eq!(
+            error.cause_code.as_deref(),
+            Some("graph_authored_command_not_started")
+        );
+    }
+    let status = request(
+        &fixture.candidate,
+        RequestOptions {
+            run: RUN,
+            action: Action::Status,
+        },
+    )
+    .err()
+    .unwrap();
+    assert!(status.cause_code.is_none(), "{}", status.code);
+
+    let (input, mut frontend) = UnixStream::pair().unwrap();
+    frontend.write_all(&[0; 4]).unwrap();
+    let (leash, _) = Leash::receive(input.into()).unwrap();
+    let argv = vec!["tool".into()];
+    let options = Options {
+        session: "12345678-abcd-abcd-abcd-123456789abc",
+        run: RUN,
+        service: "web",
+        owner: &receipt.owner,
+        plan: receipt.review.review_id(),
+        namespace: receipt.review.scope().namespace,
+        native: true,
+        argv: &argv,
+        workdir: None,
+        expected_container: None,
+        expected_generation: None,
+    };
+    let error = interactive(&fixture.candidate, &options, [43, 91], &leash)
+        .err()
+        .unwrap();
+    assert_eq!(error.code, "graph_authored_command_not_started");
+    assert!(error.session().is_none());
+}

@@ -249,6 +249,33 @@ fn the_owners_lease_wait_expires_with_each_commands_pre_effect_code() {
         assert!(Instant::now() >= deadline);
         assert_eq!(refused.code, code);
     }
+    // HACK-2742 review (L4): each call site passes its own command. `exec::execute`
+    // and `exec::interactive` go through `owner_exec_engine`; `run::execute` goes
+    // through `run::owner_engine`.
+    for (code, refused) in [
+        (
+            exec::OWNER_EXEC_LEASE_BUSY,
+            exec::owner_exec_engine(
+                &candidate,
+                Instant::now() + Duration::from_millis(300),
+                &|| Ok(()),
+            )
+            .err()
+            .unwrap(),
+        ),
+        (
+            exec::OWNER_RUN_LEASE_BUSY,
+            run::owner_engine(
+                &candidate,
+                Instant::now() + Duration::from_millis(300),
+                &|| Ok(()),
+            )
+            .err()
+            .unwrap(),
+        ),
+    ] {
+        assert_eq!(refused.code, code);
+    }
     release.send(()).unwrap();
     holder.join().unwrap();
 }

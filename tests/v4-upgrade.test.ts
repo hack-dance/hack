@@ -23,7 +23,7 @@ beforeAll(async () => {
       process.execPath,
       "--no-env-file",
       "build",
-      "tests/fixtures/v4-upgrade-cli.ts",
+      join(repository, "tests/fixtures/v4-upgrade-cli.ts"),
       "--compile",
       ...CLI_COMPILE_DEFINE_ARGS,
       "--no-compile-autoload-dotenv",
@@ -34,7 +34,9 @@ beforeAll(async () => {
       binary,
     ],
     {
-      cwd: repository,
+      // The compiler stages a transient `.<hash>.bun-build` in its working
+      // directory: the build root, never the checkout (HACK-2727).
+      cwd: buildRoot,
       env: privateCliEnv({ root: buildRoot }),
       stdout: "pipe",
       stderr: "pipe",

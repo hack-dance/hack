@@ -1,26 +1,73 @@
 use std::{
-    net::{Ipv4Addr, SocketAddrV4},
+    io,
+    net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener},
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd},
         unix::ffi::OsStrExt,
     },
     path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
 };
 
-/// Reserve a kernel-selected loopback port that refuses TCP connections.
-///
-/// Keep the returned descriptor for the entire failure check. Dropping a
-/// listener would let another fixture or outbound connection take its port.
-/// This socket never listens, including when a fork still holds a copy.
-pub(super) fn bound_unlistened_tcp() -> (OwnedFd, SocketAddrV4) {
-    use socket2::{Domain, Protocol, Socket, Type};
+pub(super) struct TcpCloseFixture {
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<io::Result<()>>>,
+}
 
-    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
-    socket
-        .bind(&SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0).into())
-        .unwrap();
-    let address = socket.local_addr().unwrap().as_socket_ipv4().unwrap();
-    (socket.into(), address)
+impl Drop for TcpCloseFixture {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            worker.thread().unpark();
+            let result = worker.join();
+            if !thread::panicking() {
+                result.expect("TCP close worker panicked").unwrap();
+            }
+        }
+    }
+}
+
+/// Reserve a kernel-selected loopback port and close connections before any reply.
+///
+/// Keep the guard alive through the check. Dropping a listener would free the
+/// port, and a bound socket that never listens can silently drop SYNs on macOS.
+pub(super) fn closing_loopback_tcp() -> (TcpCloseFixture, SocketAddr) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
+    let worker = thread::spawn(move || {
+        while !worker_stop.load(Ordering::Acquire) {
+            match listener.accept() {
+                // Shutdown ends the connection even if a concurrent fork still
+                // holds a copy of the accepted descriptor.
+                Ok((stream, _)) => match stream.shutdown(Shutdown::Both) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotConnected => {}
+                    Err(error) => return Err(error),
+                },
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    thread::park_timeout(Duration::from_millis(2));
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    });
+    (
+        TcpCloseFixture {
+            stop,
+            worker: Some(worker),
+        },
+        address,
+    )
 }
 
 /// Bind a stream socket inode at `path` without ever listening on it, for fixtures that need
@@ -131,22 +178,21 @@ mod tests {
     use std::os::unix::{fs::FileTypeExt, net::UnixStream};
 
     #[test]
-    fn a_reserved_tcp_port_refuses_connections_and_excludes_other_binders() {
-        use std::net::{TcpListener, TcpStream};
+    fn a_reserved_tcp_port_closes_connections_and_excludes_other_binders() {
+        use std::{io::Read, net::TcpStream};
 
-        let (socket, address) = bound_unlistened_tcp();
-        let copy = socket.try_clone().unwrap();
-        drop(socket);
+        let (_fixture, address) = closing_loopback_tcp();
         assert_ne!(address.port(), 0);
         assert_eq!(
-            TcpStream::connect(address).unwrap_err().kind(),
-            std::io::ErrorKind::ConnectionRefused
-        );
-        assert_eq!(
             TcpListener::bind(address).unwrap_err().kind(),
-            std::io::ErrorKind::AddrInUse
+            io::ErrorKind::AddrInUse
         );
-        drop(copy);
+        let timeout = Duration::from_secs(5);
+        for _ in 0..3 {
+            let mut client = TcpStream::connect_timeout(&address, timeout).unwrap();
+            client.set_read_timeout(Some(timeout)).unwrap();
+            assert_eq!(client.read(&mut [0]).unwrap(), 0);
+        }
     }
 
     #[test]

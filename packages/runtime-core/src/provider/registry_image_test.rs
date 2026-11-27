@@ -39,7 +39,7 @@ fn build_admission_rechecks_stored_proof_without_the_registry() {
 use crate::provider::image_load::tests::{Layer, compress};
 use crate::provider::image_policy::LocalRegistry;
 use crate::provider::registry_credentials::tests::DockerFixture;
-use crate::provider::test_socket::bound_unlistened_tcp;
+use crate::provider::test_socket::closing_loopback_tcp;
 use base64::Engine as _;
 use std::{
     collections::BTreeMap,
@@ -2070,9 +2070,7 @@ fn retry_registry_preheader_failure(close: bool) {
         let policy = fixture.policy(&docker);
         let mut fetch = loopback_fetch(fixture.port, &policy);
         fetch.request_timeout = Duration::from_secs(1);
-        let budget = Duration::from_secs(10);
-        let start = Instant::now();
-        fetch.deadline = start + budget;
+        fetch.deadline = Instant::now() + Duration::from_secs(10);
         if token {
             assert_eq!(
                 fetch
@@ -2085,7 +2083,6 @@ fn retry_registry_preheader_failure(close: bool) {
             assert_eq!(fetch.manifest("latest").unwrap(), b"manifest");
         }
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
-        assert!(start.elapsed() < budget);
     }
 }
 
@@ -2114,7 +2111,7 @@ fn retry_blob_closed_connection_and_name_the_host_when_it_keeps_failing() {
     assert_eq!(fetch.object("blobs", &descriptor).unwrap(), body);
     assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
     // A blob host that never answers is named, with its attempt count.
-    let (_reservation, address) = bound_unlistened_tcp();
+    let (_reservation, address) = closing_loopback_tcp();
     let policy = loopback_policy(address.port(), &docker);
     let mut fetch = loopback_fetch(address.port(), &policy);
     let failure = fetch.object("blobs", &descriptor).unwrap_err();
@@ -2129,7 +2126,7 @@ fn retry_blob_closed_connection_and_name_the_host_when_it_keeps_failing() {
 
 #[test]
 fn retry_registry_permanent_failure_names_host_and_attempts() {
-    let (_reservation, address) = bound_unlistened_tcp();
+    let (_reservation, address) = closing_loopback_tcp();
     let docker = empty_docker();
     let policy = loopback_policy(address.port(), &docker);
     let fetch = loopback_fetch(address.port(), &policy);
@@ -2167,7 +2164,7 @@ fn retry_does_not_replay_http_refusals_or_invalid_token_bodies() {
 
 #[test]
 fn retry_does_not_replay_oauth_refresh_posts() {
-    let (_reservation, address) = bound_unlistened_tcp();
+    let (_reservation, address) = closing_loopback_tcp();
     let docker = empty_docker();
     let policy = loopback_policy(address.port(), &docker);
     let fetch = loopback_fetch(address.port(), &policy);

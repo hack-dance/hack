@@ -400,7 +400,6 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2",
- "socket2",
  "tar",
  "tokio",
  "unicode-normalization",

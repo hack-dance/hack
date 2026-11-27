@@ -1074,7 +1074,7 @@ fn retry_preheader_failure(close: bool) {
 fn retry_permanent_connection_failure_is_bounded_and_names_host_and_attempts() {
     use std::time::{Duration, Instant};
     let root = Fixture::new();
-    let (_reservation, address) = crate::provider::test_socket::bound_unlistened_tcp();
+    let (_reservation, address) = crate::provider::test_socket::closing_loopback_tcp();
     let pin = FilePin {
         url: format!("http://{address}/archive.tgz"),
         archive_sha256: format!("{:x}", crate::Hex(Sha256::digest(b"hello"))),

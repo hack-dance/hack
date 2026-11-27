@@ -2073,29 +2073,67 @@ fn incremental_archive_contains_only_changed_content_and_orders_removals() {
     assert!(first.delta_archive(&delta).is_err());
 }
 
+/// Native watchers armed on one source root: an independent control client and the one
+/// under test. The control is armed first, so a watcher that arms late or drops a change
+/// still fails against an observed delivery.
+///
+/// FSEvents promises delivery, not latency. On a loaded Mac it has taken seconds to deliver
+/// a single rename, and in one run nothing from a burst arrived within 8 s (HACK-2748), so time
+/// since the change is not a bound the test controls. The control's delivery is an observed
+/// event: after it, the watcher under test must report the change within
+/// `WATCHER_AFTER_DELIVERY`.
+struct NativeWatchers {
+    control: project::watcher::SourceWatcher,
+    watcher: project::watcher::SourceWatcher,
+}
+
+/// Bound on the watcher once the native service has delivered the change to the control.
+const WATCHER_AFTER_DELIVERY: std::time::Duration = std::time::Duration::from_secs(8);
+/// Hang guard for the host's own delivery. Production waits without a latency bound.
+const NATIVE_DELIVERY_LIVENESS: std::time::Duration = std::time::Duration::from_secs(120);
+
+impl NativeWatchers {
+    fn arm(source: &Path) -> Self {
+        let control = project::watcher::SourceWatcher::new(source).unwrap();
+        let watcher = project::watcher::SourceWatcher::new(source).unwrap();
+        Self { control, watcher }
+    }
+
+    fn wait_for_observed_change(&self) {
+        let started = std::time::Instant::now();
+        assert!(
+            self.control
+                .wait(NATIVE_DELIVERY_LIVENESS)
+                .unwrap()
+                .is_some(),
+            "the native service delivered nothing to the control within {NATIVE_DELIVERY_LIVENESS:?}"
+        );
+        let delivered = started.elapsed();
+        assert!(
+            self.watcher.wait(WATCHER_AFTER_DELIVERY).unwrap().is_some(),
+            "the watcher missed a change the control observed after {delivered:?}"
+        );
+    }
+}
+
 #[test]
 fn native_watcher_observes_atomic_replacement_without_polling_source() {
     let fixture = Fixture::new(BASIC);
     fs::write(fixture.project.join(".editor-save"), "saved").unwrap();
-    let watcher = project::watcher::SourceWatcher::new(&fixture.project).unwrap();
+    let watchers = NativeWatchers::arm(&fixture.project);
     fs::rename(
         fixture.project.join(".editor-save"),
         fixture.project.join("saved.txt"),
     )
     .unwrap();
-    assert!(
-        watcher
-            .wait(std::time::Duration::from_secs(8))
-            .unwrap()
-            .is_some()
-    );
+    watchers.wait_for_observed_change();
 }
 
 #[test]
 fn native_watcher_coalesces_a_burst_into_a_complete_inventory() {
     let fixture = Fixture::new(BASIC);
     let selection = fixture.plan().plan.source_selection.metadata_sha256;
-    let watcher = project::watcher::SourceWatcher::new(&fixture.project).unwrap();
+    let watchers = NativeWatchers::arm(&fixture.project);
     let batch = fixture.project.join("burst");
     fs::create_dir(&batch).unwrap();
     for index in 0..512 {
@@ -2110,12 +2148,7 @@ fn native_watcher_coalesces_a_burst_into_a_complete_inventory() {
             fs::rename(original, batch.join(format!("renamed-{index}.txt"))).unwrap();
         }
     }
-    assert!(
-        watcher
-            .wait(std::time::Duration::from_secs(8))
-            .unwrap()
-            .is_some()
-    );
+    watchers.wait_for_observed_change();
     assert_eq!(
         project::snapshot::capture(&fixture.project, &Default::default(), &selection)
             .err()

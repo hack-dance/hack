@@ -161,6 +161,12 @@ test("malformed inherited alias data fails rather than silently removing aliases
   );
 });
 
+// Budget (60 s, below): this case waits on no timer. It starts the CLI from
+// source five times in a row, so its wall time is five cold Bun starts of the
+// whole CLI, which grows with host load. It reached 4.5 s of Bun's 5 s default
+// with 12 test files running at once on a 16-CPU Mac and passed it under more
+// load beside it, where the CLI still running at the timeout was killed into
+// the next case (HACK-2727). A hang guard, not a speed assertion.
 test("CLI list provenance, unset tombstone, and set affect only the linked checkout", async () => {
   const f = await fixture();
   for (const dir of [f.primary, f.branch]) {
@@ -212,7 +218,7 @@ test("CLI list provenance, unset tombstone, and set affect only the linked check
   ).toEqual({ "search.test": "host-gateway" });
   await cli("set", "search.test", "127.0.0.2");
   expect(JSON.parse(await cli("list"))).toEqual({ "search.test": "127.0.0.2" });
-});
+}, 60_000);
 
 test("CI and slim runners do not read primary aliases", async () => {
   const f = await fixture();

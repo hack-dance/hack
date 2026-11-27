@@ -86,21 +86,29 @@ fn closed_unanswered(stream: &std::os::unix::net::UnixStream, deadline: Instant)
 /// removed and then retires its publication. A connection it closed without a
 /// byte of answer, followed by that retirement, was therefore never processed:
 /// it was still in the listen backlog, or its request never fully arrived. An
-/// owner that failed instead keeps its publication, so this answers false. The
-/// retirement is awaited briefly, because the connection can close as the
-/// process exits a moment after its files are removed.
+/// owner that failed instead keeps its publication, so this answers false; so
+/// does a publication that another process's dead-owner recovery retired, which
+/// it archives rather than deletes (`verify_retired_by_owner`). For an
+/// interactive `session`, a retained session receipt also answers false: the
+/// owner had started that session. The retirement is awaited briefly, because
+/// the connection can close as the process exits a moment after its files are
+/// removed.
 fn owner_ended_unanswered(
     candidate: &Candidate,
     pin: &owner::Pin,
     review: &native_input::Review,
+    session: Option<&str>,
 ) -> bool {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        if pin.verify_retired().is_ok()
+        if pin.verify_retired_by_owner().is_ok()
             && journal::read_control(candidate, review)
                 .is_ok_and(|receipt| receipt.phase == Phase::Removed)
         {
-            return true;
+            return session.is_none_or(|session| {
+                crate::provider::interactive_session::retained(candidate)
+                    .is_ok_and(|records| records.iter().all(|record| record.session != session))
+            });
         }
         if Instant::now() >= deadline {
             return false;
@@ -691,6 +699,17 @@ pub fn serve_with_storage_tool(
                 std::time::Instant::now() + Duration::from_secs(5),
             )
             .is_err()
+                // HACK-2742 review: the session may already have started. Never
+                // leave this connection closed with no byte, which the requester
+                // could read as an unprocessed request: send an empty handoff and
+                // then the bound reply, which the requester answers as a retained
+                // session (no descriptor) or the owner's own pre-effect refusal.
+                && crate::provider::interactive_handoff::send(
+                    &stream,
+                    None,
+                    std::time::Instant::now() + Duration::from_secs(5),
+                )
+                .is_err()
             {
                 continue;
             }
@@ -851,7 +870,7 @@ pub(in crate::provider) fn interactive(
     // the owner's own retirement and removed run as evidence, is the attempt
     // proven unprocessed and reported with no session.
     let unanswered = |error: CandidateError| {
-        if owner_ended_unanswered(candidate, &pin, review) {
+        if owner_ended_unanswered(candidate, &pin, review, Some(options.session)) {
             interactive_not_sent(error)
         } else {
             uncertain(error)
@@ -939,7 +958,7 @@ fn request_selected(
     // owner closed the connection without a single byte of answer and then
     // retired its publication with its run removed (`owner_ended_unanswered`).
     let unanswered = |error: CandidateError| {
-        if command && owner_ended_unanswered(candidate, &pin, review) {
+        if command && owner_ended_unanswered(candidate, &pin, review, None) {
             command_not_sent(error)
         } else {
             error

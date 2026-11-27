@@ -291,6 +291,24 @@ impl Pin {
     pub(super) fn review(&self) -> &native_input::Review {
         &self.record.review
     }
+    /// [`Self::verify_retired`], and the retirement was the owner's own `finish()`
+    /// rather than another process's dead-owner recovery (HACK-2742 review). The
+    /// owner deletes its socket and owner record; recovery moves them aside as
+    /// `control-<fp>.retired.sock` and `owner-<fp>.retired.json`, so any such
+    /// archive in the owner root refuses.
+    pub(super) fn verify_retired_by_owner(&self) -> Result<(), CandidateError> {
+        self.verify_retired()?;
+        for entry in fs::read_dir(&self.root).map_err(|_| refused())? {
+            let name = entry.map_err(|_| refused())?.file_name();
+            let name = name.to_string_lossy();
+            if (name.starts_with("control-") && name.ends_with(".retired.sock"))
+                || (name.starts_with("owner-") && name.ends_with(".retired.json"))
+            {
+                return Err(refused());
+            }
+        }
+        Ok(())
+    }
     /// The caller already authenticated its retained connection before the owner
     /// retired. Absence grants no new connection, process or cleanup authority.
     pub(super) fn verify_retired(&self) -> Result<(), CandidateError> {

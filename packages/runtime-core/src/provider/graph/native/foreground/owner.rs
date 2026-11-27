@@ -64,6 +64,13 @@ impl BootQualifiedRecord {
         )
     }
 }
+/// The owner record version that advertises command acceptance (HACK-2742
+/// review): the same session-qualified record as version 4, from an owner that
+/// accepts version-3 commands with its acceptance byte. A requester sends those
+/// only to such an owner; an owner of version 4 or earlier gets the version-2
+/// commands it serves, without the not-started proof.
+pub(super) const ACCEPTING_RECORD_VERSION: u32 = 5;
+const ACCEPTING_RECORD_VERSION_U64: u64 = ACCEPTING_RECORD_VERSION as u64;
 /// Version4 has no calendar qualifier: exact process incarnation remains a separate fence.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,7 +128,7 @@ fn decode(bytes: &[u8]) -> Result<(Record, Option<HostBoot>), CandidateError> {
             }
             Ok(record.into_record())
         }
-        Some(4) => {
+        Some(4 | ACCEPTING_RECORD_VERSION_U64) => {
             let record: SessionQualifiedRecord =
                 serde_json::from_slice(bytes).map_err(|_| refused())?;
             if record.process.start_micros == 0 {
@@ -291,6 +298,10 @@ impl Pin {
     pub(super) fn review(&self) -> &native_input::Review {
         &self.record.review
     }
+    /// Whether this owner advertises command acceptance in its publication.
+    pub(super) fn accepts_commands(&self) -> bool {
+        self.record.version == ACCEPTING_RECORD_VERSION
+    }
     /// The caller already authenticated its retained connection before the owner
     /// retired. Absence grants no new connection, process or cleanup authority.
     pub(super) fn verify_retired(&self) -> Result<(), CandidateError> {
@@ -387,7 +398,7 @@ impl RecoverySelection {
             .validate(record.review.scope())
             .map_err(|_| refused())?;
         // SAFETY: geteuid has no preconditions; private state remains same-user.
-        if !matches!(record.version, 3 | 4)
+        if !matches!(record.version, 3 | 4 | ACCEPTING_RECORD_VERSION)
             || record.candidate != candidate.checkout
             || record.review.scope().run != run
             || record.process.uid != unsafe { libc::geteuid() }
@@ -575,6 +586,23 @@ impl Publication {
         candidate: &Candidate,
         review: &native_input::Review,
     ) -> Result<Self, CandidateError> {
+        Self::bind_as(candidate, review, ACCEPTING_RECORD_VERSION)
+    }
+    /// An owner as an earlier prerelease published it (record version 4): it
+    /// does not accept commands (HACK-2742 review), so requesters send it the
+    /// version-2 commands it serves.
+    #[cfg(test)]
+    pub(super) fn bind_legacy(
+        candidate: &Candidate,
+        review: &native_input::Review,
+    ) -> Result<Self, CandidateError> {
+        Self::bind_as(candidate, review, 4)
+    }
+    fn bind_as(
+        candidate: &Candidate,
+        review: &native_input::Review,
+        version: u32,
+    ) -> Result<Self, CandidateError> {
         review.validate(review.scope()).map_err(|_| refused())?;
         let host_boot_uuid = host_boot::read()?;
         let gate = super::super::super::publication_gate::Guard::acquire(candidate)?;
@@ -593,7 +621,7 @@ impl Publication {
             .map_err(|_| refused())?;
         listener.set_nonblocking(true).map_err(|_| refused())?;
         let record = SessionQualifiedRecord {
-            version: 4,
+            version,
             kind: Kind::NativeGraphOwner,
             candidate: candidate.checkout.clone(),
             review: review.clone(),

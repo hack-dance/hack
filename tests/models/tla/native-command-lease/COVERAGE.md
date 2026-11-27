@@ -289,6 +289,54 @@ not started within 2 s; a later failure keeps its code),
 messages, and a PTY case each for a lease refusal and a not-started refusal),
 `native-runtime-client` (the new causes pass the closed filter).
 
+## The owner's acceptance of a command (HACK-2742 review)
+
+Codex found that "not started" after the request was sent rested on the
+owner's retirement: a connection closed with no byte of answer, then the
+owner's own cleanup. A command that ran but whose reply was lost (a reply
+past the request bound failed to serialize with nothing sent), followed by the
+owner's `hack down`, matched it. The owner now accepts each command (request
+version 3) with one byte after it read and validated the request and before
+any effect, and drops a command whose byte it cannot queue. The requester
+says not started (`graph_authored_command_not_started`) only when the
+connection closed with no byte at all. The interactive requester also needs
+its frontend leash to hold, because its own watcher's shutdown can hide a
+queued byte. The owner advertises acceptance in its publication (owner record
+version 5); a requester sends version 3 only to such an owner, and an owner
+started by an earlier prerelease gets version 2 as before, without the proof.
+
+`CommandAccept.tla` models one command on one connection: the owner takes,
+drops, accepts, starts, replies or loses the reply, fails, or ends between
+requests through its cleanup or a failure (a backlog connection then closes
+unread); the requester may shut down (the leash watcher) and decides once the
+connection ended. `AcceptRule = FALSE` is the retirement rule before the fix;
+`LeashCheck = FALSE` drops the leash check.
+
+| Config | Constants | Result | Shows |
+| --- | --- | --- | --- |
+| `accept-positive` | `AcceptRule = TRUE`, `LeashCheck = TRUE` | 68 distinct states, no error; `StartOnlyAfterAccept`, `NotStartedOnlyWithoutAccept`, `NothingRanWhenNotStarted` and `UnconfirmedAfterAccept` hold | "not started" only without the byte and true; after it every failure is unconfirmed |
+| `accept-old-retirement` | `AcceptRule = FALSE` | `NothingRanWhenNotStarted` violated: `report = "not-started"`, `started = TRUE`, `owner = "cleanup"` | Codex's case under the old rule |
+| `accept-no-leash-check` | `LeashCheck = FALSE` | `NotStartedOnlyWithoutAccept` violated: `report = "not-started"`, `accepted = TRUE`, `local = TRUE` | A local shutdown read as the owner's close |
+| `accept-backlog-reach` | positive constants | `NeverBacklogNotStarted` violated: `report = "not-started"`, `took = FALSE`, `owner = "cleanup"` | VM row 4 is reachable and reported as not started |
+| `accept-lost-reply-reach` | positive constants | `NeverLostReplyUnconfirmed` violated: `report = "unconfirmed"`, `started = TRUE`, `replied = FALSE`, `owner = "cleanup"` | Codex's case is reachable and unconfirmed |
+
+The model covers an owner that advertises acceptance. The version choice is
+not modelled: against an owner of record version 4 the requester sends
+version 2 and keeps the behaviour from before the fix, where every failure
+after the send is unconfirmed.
+
+Tests: `native/foreground/tests.rs` (a capped reply is refused by the request
+bound and delivered whole by the reply writer; a command taken but not
+accepted is not started while the owner is published; an accepted command
+closed before its reply stays unconfirmed, also after the owner's cleanup; a
+backlog request is not started whatever retired the publication; interactive
+requests are not started only without acceptance, and a leash shutdown stays
+uncertain; an owner from before the upgrade, publishing record version 4,
+still runs exec and run on version 2 and gets no not-started proof; and the
+real per-request step of the owner's loop sends the byte while another
+project's stop still holds the lease, with the journal and one-off records
+unchanged, before its pending signal ends the wait as not started).
+
 ## Code and tests
 
 - `provider/lifecycle.rs`: `COMMAND_LEASE_WAIT`.

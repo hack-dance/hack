@@ -33,7 +33,9 @@ fn command_not_sent(_error: CandidateError) -> CandidateError {
 /// The request version of a command (exec, interactive exec, one-off run) that
 /// the owner accepts before it starts (HACK-2742 review). Status, observe, logs
 /// and cleanup keep version 2, as does any request from an older requester. An
-/// older owner refuses this version unprocessed, by closing the connection.
+/// older owner would refuse this version by closing, so a requester sends it
+/// only to an owner whose publication advertises acceptance
+/// (`owner::ACCEPTING_RECORD_VERSION`); any other owner gets version 2, as before.
 const ACCEPTING_VERSION: u32 = 3;
 
 /// The byte an owner sends for an [`ACCEPTING_VERSION`] command after it read
@@ -47,11 +49,15 @@ const ACCEPTING_VERSION: u32 = 3;
 const ACCEPTED: u8 = 0xAC;
 
 /// A command reply: two streams of up to 1 MiB in base64 (1,398,104 bytes each,
-/// `runtime::exec::valid_stream`) with a bounded receipt in its envelope. The
-/// request bound used by [`transport::write`] is smaller, and an oversized reply
-/// would fail to serialize with nothing sent (HACK-2742 review).
+/// `runtime::exec::valid_stream`) with one receipt (at most
+/// `state::MAX_RECEIPT_BYTES`) and a small envelope. The request bound used by
+/// [`transport::write`] is smaller, and an oversized reply would fail to
+/// serialize with nothing sent (HACK-2742 review).
 const COMMAND_REPLY_LIMIT: usize = 4 * 1024 * 1024;
-const _: () = assert!(2 * 1_398_104 + 4 * LIMIT < COMMAND_REPLY_LIMIT);
+const _: () = assert!(
+    2 * 1_398_104 + crate::provider::state::MAX_RECEIPT_BYTES as usize + 64 * 1024
+        < COMMAND_REPLY_LIMIT
+);
 
 /// Write the owner's reply. A command reply has its own bound. A failed write
 /// leaves the requester with an accepted request and no answer, which it reports
@@ -568,16 +574,75 @@ pub fn serve_with_storage_tool(
             }
             _ => {}
         }
-        let Some(mut stream) = publication.accept()? else {
+        let Some(stream) = publication.accept()? else {
             continue;
         };
+        let served = Loop {
+            candidate,
+            review: &review,
+            run: &run,
+            receipt: &receipt,
+            publication: &publication,
+            read_pin: &read_pin,
+            pending: &|| signals.pending(),
+            clean: &clean,
+        };
+        if let Answered::Cleaned { mut stream, reply } = served.answer(stream)? {
+            // Retire before writing on the retained authenticated stream. Clients
+            // verify both absent publication paths and the exact durable Removed journal.
+            publication.finish()?;
+            let _ = deliver_reply(&mut stream, &reply, Action::Cleanup);
+            let Outcome::Cleaned { receipt } = reply.result else {
+                return Err(refused());
+            };
+            return Ok(receipt);
+        }
+    }
+}
+
+/// What the owner's loop answers one request with (HACK-2742 review): its
+/// context is borrowed from the loop, so one real request can be driven
+/// through it in a test.
+struct Loop<'a> {
+    candidate: &'a Candidate,
+    review: &'a native_input::Review,
+    run: &'a str,
+    receipt: &'a Receipt,
+    publication: &'a owner::Publication,
+    read_pin: &'a selection::ReadPin,
+    /// A pending signal of the owner (its Ctrl-C or `hack down`).
+    pending: &'a dyn Fn() -> bool,
+    clean: &'a dyn Fn() -> Result<Receipt, CandidateError>,
+}
+enum Answered {
+    /// The request was answered or dropped; serve the next one.
+    Next,
+    /// A cleanup completed: the loop retires the publication, then replies.
+    Cleaned {
+        stream: std::os::unix::net::UnixStream,
+        reply: Box<Reply>,
+    },
+}
+impl Loop<'_> {
+    fn answer(
+        &self,
+        mut stream: std::os::unix::net::UnixStream,
+    ) -> Result<Answered, CandidateError> {
+        let (candidate, receipt, run, publication, read_pin, pending) = (
+            self.candidate,
+            self.receipt,
+            self.run,
+            self.publication,
+            self.read_pin,
+            self.pending,
+        );
         let request: Request =
             match transport::read(&mut stream, Duration::from_secs(5), 512 * 1024) {
                 Ok(request) => request,
-                Err(_) => continue,
+                Err(_) => return Ok(Answered::Next),
             };
-        if request.validate(&review).is_err() {
-            continue;
+        if request.validate(self.review).is_err() {
+            return Ok(Answered::Next);
         }
         publication.verify()?;
         // HACK-2742 review: accept the command before any effect. If the byte
@@ -585,7 +650,7 @@ pub fn serve_with_storage_tool(
         if request.version == ACCEPTING_VERSION
             && transport::send_marker(&stream, ACCEPTED, Duration::from_secs(5)).is_err()
         {
-            continue;
+            return Ok(Answered::Next);
         }
         let mut attached = None;
         let result = match request.action {
@@ -594,14 +659,14 @@ pub fn serve_with_storage_tool(
                 let client = transport::ClientWatch::half_closed(&stream)?;
                 let check = || {
                     publication.verify()?;
-                    if signals.pending() || client.disconnected() {
+                    if pending() || client.disconnected() {
                         return Err(refused());
                     }
                     read_pin.verify(candidate)
                 };
                 match runtime::interactive_exec(
                     candidate,
-                    &receipt,
+                    receipt,
                     selected,
                     request.console_size.ok_or_else(refused)?,
                     request.session.as_deref().ok_or_else(refused)?,
@@ -620,33 +685,33 @@ pub fn serve_with_storage_tool(
                     Err(error) => Err(error),
                 }
             }
-            Action::Status => inspect(candidate, &run).map(|snapshot| Outcome::Status { snapshot }),
+            Action::Status => inspect(candidate, run).map(|snapshot| Outcome::Status { snapshot }),
             Action::Observe => {
-                runtime::status(candidate, &run).map(|snapshot| Outcome::Observed { snapshot })
+                runtime::status(candidate, run).map(|snapshot| Outcome::Observed { snapshot })
             }
-            Action::Cleanup => clean().map(|receipt| Outcome::Cleaned { receipt }),
+            Action::Cleanup => (self.clean)().map(|receipt| Outcome::Cleaned { receipt }),
             Action::Exec => {
                 let selected = request.exec.as_ref().ok_or_else(refused)?;
                 let check = || {
                     publication.verify()?;
-                    if signals.pending() {
+                    if pending() {
                         return Err(refused());
                     }
                     read_pin.verify(candidate)
                 };
-                runtime::service_exec(candidate, &receipt, selected, &check)
+                runtime::service_exec(candidate, receipt, selected, &check)
                     .map(|exec| Outcome::Exec { exec })
             }
             Action::Run => {
                 let selected = request.one_off.as_ref().ok_or_else(refused)?;
                 let check = || {
                     publication.verify()?;
-                    if signals.pending() {
+                    if pending() {
                         return Err(refused());
                     }
                     read_pin.verify(candidate)
                 };
-                runtime::service_run(candidate, &receipt, selected, &check)
+                runtime::service_run(candidate, receipt, selected, &check)
                     .map(|one_off| Outcome::OneOff { one_off })
             }
             Action::Logs => {
@@ -655,7 +720,7 @@ pub fn serve_with_storage_tool(
                     publication.verify()?;
                     read_pin.verify(candidate)
                 };
-                runtime::logs(candidate, &receipt, &logs.service, logs.tail, &check)
+                runtime::logs(candidate, receipt, &logs.service, logs.tail, &check)
                     .map(|logs| Outcome::Logs { logs })
             }
         };
@@ -667,26 +732,22 @@ pub fn serve_with_storage_tool(
         let reply = Reply {
             version: 2,
             kind: ReplyKind::NativeGraphControlReply,
-            run: run.clone(),
-            review: review.review_id().into(),
+            run: run.to_owned(),
+            review: self.review.review_id().into(),
             result,
         };
         reply.validate(
-            &receipt,
+            receipt,
             request.action,
             request.logs.as_ref(),
             request.exec.as_ref(),
             request.one_off.as_ref(),
         )?;
         if cleaned {
-            // Retire before writing on the retained authenticated stream. Clients
-            // verify both absent publication paths and the exact durable Removed journal.
-            publication.finish()?;
-            let _ = deliver_reply(&mut stream, &reply, request.action);
-            let Outcome::Cleaned { receipt } = reply.result else {
-                return Err(refused());
-            };
-            return Ok(receipt);
+            return Ok(Answered::Cleaned {
+                stream,
+                reply: Box::new(reply),
+            });
         }
         if request.action == Action::InteractiveExec {
             // The connected stream is handed over before the bound reply; its
@@ -709,10 +770,11 @@ pub fn serve_with_storage_tool(
                 )
                 .is_err()
             {
-                continue;
+                return Ok(Answered::Next);
             }
         }
         let _ = deliver_reply(&mut stream, &reply, request.action);
+        Ok(Answered::Next)
     }
 }
 
@@ -847,8 +909,9 @@ pub(in crate::provider) fn interactive(
     // no longer connects, and nothing was sent.
     let mut stream = pin.connect().map_err(interactive_not_sent)?;
     let _lifetime = leash.watch_control(&stream).map_err(interactive_not_sent)?;
+    let accepting = pin.accepts_commands();
     let input = Request {
-        version: ACCEPTING_VERSION,
+        version: if accepting { ACCEPTING_VERSION } else { 2 },
         kind: RequestKind::NativeGraphControl,
         run: run.into(),
         review: review.review_id().into(),
@@ -871,13 +934,19 @@ pub(in crate::provider) fn interactive(
     // shuts it down only once the frontend is gone, and that loss is permanent,
     // so a leash that still holds after the close proves the close was the
     // owner's. A write failure alone proves nothing until that answer arrives.
-    match owner_accepted(&stream, deadline) {
-        Ok(true) => {}
-        Ok(false) if leash.check().is_ok() => {
-            return Err(interactive_not_sent(written.err().unwrap_or_else(refused)));
+    // An owner that does not advertise acceptance (started before the upgrade)
+    // gets version 2 as before, and a failure after the write stays uncertain.
+    if accepting {
+        match owner_accepted(&stream, deadline) {
+            Ok(true) => {}
+            Ok(false) if leash.check().is_ok() => {
+                return Err(interactive_not_sent(written.err().unwrap_or_else(refused)));
+            }
+            Ok(false) => return Err(uncertain(written.err().unwrap_or_else(refused))),
+            Err(error) => return Err(uncertain(written.err().unwrap_or(error))),
         }
-        Ok(false) => return Err(uncertain(written.err().unwrap_or_else(refused))),
-        Err(error) => return Err(uncertain(written.err().unwrap_or(error))),
+    } else {
+        written.map_err(uncertain)?;
     }
     let descriptor =
         crate::provider::interactive_handoff::receive(&stream, deadline).map_err(uncertain)?;
@@ -932,8 +1001,11 @@ fn request_selected(
     let review = pin.review();
     let expected = journal::read_control(candidate, review).map_err(not_sent)?;
     let mut stream = pin.connect().map_err(not_sent)?;
+    // Only an owner that advertises acceptance gets the version-3 command and
+    // its not-started proof; an older owner serves version 2 as before.
+    let accepting = command && pin.accepts_commands();
     let input = Request {
-        version: if command { ACCEPTING_VERSION } else { 2 },
+        version: if accepting { ACCEPTING_VERSION } else { 2 },
         kind: RequestKind::NativeGraphControl,
         run: run.into(),
         review: review.review_id().into(),
@@ -951,7 +1023,7 @@ fn request_selected(
         Duration::from_secs(30)
     };
     let started = Instant::now();
-    if command {
+    if accepting {
         // HACK-2742 review (VM row 4): the owner may have left this connection in
         // its listen backlog and ended, or refused the request, without taking
         // it. It accepts a command before any effect, so a close with no byte at

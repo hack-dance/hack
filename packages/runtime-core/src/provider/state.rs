@@ -8,7 +8,8 @@ use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const MAX_RECEIPT_BYTES: u64 = 1024 * 1024;
+/// The largest receipt `read_bounded` reads back from private state.
+pub(crate) const MAX_RECEIPT_BYTES: u64 = 1024 * 1024;
 
 pub fn io(error: std::io::Error) -> CandidateError {
     CandidateError::new("provider_state", error.to_string())

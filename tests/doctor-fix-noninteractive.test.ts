@@ -4,6 +4,7 @@ import {
   beforeAll,
   beforeEach,
   expect,
+  setDefaultTimeout,
   test,
 } from "bun:test";
 import { existsSync } from "node:fs";
@@ -47,6 +48,22 @@ import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
  *
  * Follows the module-mock pattern from tests/global-command.macos.test.ts.
  */
+
+/**
+ * Bun timeout for every case and hook here that sets none of its own, the
+ * same 30 s most cases below already name. The cases wait on no timer: each
+ * runs `hack doctor --fix` in process against a fixture project, with Docker
+ * mocked, so its wall time is the doctor's file-system work and real `git`
+ * probes, which grows with host load. The HACK-1695 contract migration case
+ * takes 1.05 s alone on a 16-CPU Mac; with 12 test files running at once it
+ * passed at up to 4.94 s and timed out at Bun's 5 s default in several runs,
+ * while its assertions held. The timed-out case kept running after its
+ * fixture was removed and failed the next case with an ENOENT from its
+ * ingress-generation rename (HACK-2727). A hang guard, not a speed assertion;
+ * `setDefaultTimeout` is scoped to this file.
+ */
+const DOCTOR_CASE_BUDGET_MS = 30_000;
+setDefaultTimeout(DOCTOR_CASE_BUDGET_MS);
 
 const runCalls: string[][] = [];
 const runEnvs: (Record<string, string> | undefined)[] = [];

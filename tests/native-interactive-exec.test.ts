@@ -111,9 +111,35 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
       );
       const source = resolve("tests/fixtures/native-interactive-frontend.ts");
       const compiled = join(root, "frontend");
-      const env = privateCliEnv({ root });
-      const commands = [
+      const env = {
+        ...privateCliEnv({ root }),
+        ...Object.fromEntries(
+          [...HACK_KEY_MATERIAL_VARIABLES].map((name) => [
+            name,
+            "synthetic-parent-key-canary",
+          ])
+        ),
+      };
+      const build = Bun.spawn(
         [process.execPath, "build", "--compile", source, "--outfile", compiled],
+        {
+          // The compiler stages a transient `.<hash>.bun-build` in its working
+          // directory: this test's root, never the checkout (HACK-2727).
+          cwd: root,
+          env,
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+          timeout: 90_000,
+        }
+      );
+      const [buildOut, buildErr, buildCode] = await Promise.all([
+        new Response(build.stdout).text(),
+        new Response(build.stderr).text(),
+        build.exited,
+      ]);
+      expect(buildCode, buildErr + buildOut).toBe(0);
+      const commands = [
         [
           python,
           resolve("tests/fixtures/native-interactive-frontend.py"),
@@ -132,15 +158,7 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
       ];
       for (const cmd of commands) {
         const child = Bun.spawn(cmd, {
-          env: {
-            ...env,
-            ...Object.fromEntries(
-              [...HACK_KEY_MATERIAL_VARIABLES].map((name) => [
-                name,
-                "synthetic-parent-key-canary",
-              ])
-            ),
-          },
+          env,
           stdin: "ignore",
           stdout: "pipe",
           stderr: "pipe",
@@ -152,11 +170,9 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
           child.exited,
         ]);
         expect(code, err + out).toBe(0);
-        if (cmd[0] === python) {
-          expect(out).toBe(
-            "Frontend PTY: nine lifetime and five selection cases passed\n"
-          );
-        }
+        expect(out).toBe(
+          "Frontend PTY: nine lifetime and five selection cases passed\n"
+        );
       }
     } finally {
       await rm(root, { recursive: true, force: true });

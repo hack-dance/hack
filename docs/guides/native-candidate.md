@@ -2935,6 +2935,16 @@ code 1, and what to run next, which depends on how far the start got:
   (`relay_owner_refused`). The start asks the runtime once the VM is gone, and
   for such a run it names no command and says to keep the native home for
   inspection (HACK-2731); `hack down --recover` does not start the pool for it.
+- During its own stop (you pressed Ctrl-C and the VM was lost before the stop
+  was confirmed, with the receipt at `cleanup-intent`): `hack down --recover`,
+  then `hack up` (HACK-2746). The stop runs inside the owner's enrolled relay
+  cleanup, and the runtime finishes it across the boot with data kept, once the
+  down has started the pool. `graph foreground-owner` reports it as
+  `cross_boot_stop`; a `hack up` run first names the same down
+  (`graph_foreground_owner_exited`) and runs it for you as for a ready run.
+  Earlier versions named the down, which answered `runtime_not_running`, and
+  `hack up` refused the run. A stop the runtime cannot finish this way names no
+  command.
 - Before any service was requested (while it resolved, reviewed, built or
   pulled images, or selected the restore): for a run with a record (a resumed
   stopped run, or a restart's old run), the same `hack down --recover`, then

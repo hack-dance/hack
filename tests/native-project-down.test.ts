@@ -2811,6 +2811,14 @@ test.each([
     phase: "ready-observed",
     extra: { live_owner_recovery: "a".repeat(64) },
   },
+  // A stop at `cleanup-intent` the runtime does not finish across the boot
+  // (no `cross_boot_stop`; HACK-2746).
+  { foreground: "exited", phase: "cleanup-intent" },
+  {
+    foreground: "exited",
+    phase: "cleanup-intent",
+    extra: { cross_boot_stop: false, cross_boot_relay: true },
+  },
   // HACK-2731: a live run with no published port and an unsettled relay
   // startup, whose dead relay owner the runtime cannot prove
   // (`relay_owner_refused` once the pool is started).
@@ -2863,6 +2871,10 @@ test.each([
 test.each([
   { phase: "failed-retained" },
   { phase: "preparing" },
+  // HACK-2746 (real VM, 3 of 3): Ctrl-C, then the VM lost while the receipt
+  // read `cleanup-intent`, inside the owner's enrolled relay cleanup. Before,
+  // the down kept `runtime_not_running` and the run was stuck.
+  { phase: "cleanup-intent", extra: { cross_boot_stop: true } },
   // An owner killed mid-restore, without its unwind (reviewer finding).
   { phase: "restoring" },
   // The same-boot hint does not matter once the boot has ended.

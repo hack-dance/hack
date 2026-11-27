@@ -193,6 +193,12 @@ test("the scanner tells bounded from unbounded synchronous spawns", () => {
   expect(countUnboundedSyncSpawns('spawnSyncBounded(["true"])')).toBe(0);
 });
 
+// Budget (60 s, below): the scan waits on no timer. It reads and
+// TypeScript-parses every file the patterns match (about a thousand), so its
+// wall time is CPU and file-system work that grows with host load: about 1 s
+// alone, up to 3.6 s with 12 test files running at once on a 16-CPU Mac, and
+// past Bun's 5 s default under more load beside it (HACK-2727). A hang guard,
+// not a speed assertion.
 test("no new synchronous spawn without a timeout in tests/ or scripts/check-*.ts", async () => {
   const found = await scan();
   const added: string[] = [];
@@ -217,4 +223,4 @@ test("no new synchronous spawn without a timeout in tests/ or scripts/check-*.ts
     lowered,
     "Fewer unbounded spawns than listed: lower KNOWN_UNBOUNDED in tests/sync-spawn-bound.test.ts."
   ).toEqual([]);
-});
+}, 60_000);

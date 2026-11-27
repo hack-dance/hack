@@ -422,12 +422,35 @@ describe("step store build", () => {
         source,
         `import { stepStoreBuild } from ${JSON.stringify(location)};\nconsole.log(String(stepStoreBuild()));\n`
       );
-      const build = await Bun.build({
-        entrypoints: [source],
-        compile: { outfile: executable },
-        ...(define ? { define } : {}),
-      });
-      expect(build.success).toBe(true);
+      // Compile in a child whose working directory is this root: the compiler
+      // stages a transient `.<hash>.bun-build` in its process's working
+      // directory, which in process would be the checkout (HACK-2727).
+      const build = Bun.spawn(
+        [
+          process.execPath,
+          "build",
+          source,
+          "--compile",
+          ...Object.entries(define ?? {}).flatMap(([key, value]) => [
+            "--define",
+            `${key}=${value}`,
+          ]),
+          "--outfile",
+          executable,
+        ],
+        {
+          cwd: root,
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "pipe",
+          timeout: 60_000,
+        }
+      );
+      const [buildExit, buildErrors] = await Promise.all([
+        build.exited,
+        new Response(build.stderr).text(),
+      ]);
+      expect(buildExit, buildErrors).toBe(0);
       const child = spawnSyncBounded([executable], { timeout: 30_000 });
       expect(child.exitCode).toBe(0);
       return child.stdout.toString().trim();

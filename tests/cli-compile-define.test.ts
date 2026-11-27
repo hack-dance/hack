@@ -22,6 +22,8 @@ const DESCRIPTIONS_ONLY = new Set([
   "tests/cli-spawn-env-isolation.test.ts",
   // Matches compile lines as text; its own compile builds a probe, not the CLI.
   "tests/cli-compile-flags.test.ts",
+  // Its compile samples are scanner inputs (HACK-2727); it compiles nothing.
+  "tests/compile-working-directory.test.ts",
 ]);
 
 /** How far a TypeScript argv may extend before or after its `--compile`. */

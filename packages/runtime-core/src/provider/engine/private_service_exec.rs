@@ -293,9 +293,11 @@ fn read_capture(
                 .map_err(|_| failed(Stage::Output, Reason::Protocol))
         },
     )?;
+    // A stream that ends inside a frame closed early; a malformed frame is a
+    // protocol failure. The two are reported apart (HACK-2759 review).
     capture
         .finish()
-        .map_err(|_| failed(Stage::Output, Reason::Protocol))
+        .map_err(|_| failed(Stage::Output, Reason::Closed))
 }
 /// The raw bytes [`read_output_within`] reads, for the read-loop tests.
 #[cfg(test)]

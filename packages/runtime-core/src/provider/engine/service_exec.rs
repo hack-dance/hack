@@ -33,6 +33,49 @@ fn uncertain() -> CandidateError {
     )
 }
 
+/// Where an exec's completion became uncertain (HACK-2759 review): each step has
+/// its own fixed message, so a report names the step without any value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    Connect,
+    Upgrade,
+    Format,
+    Read,
+    Identity,
+    Running,
+}
+fn uncertain_at(step: Step) -> CandidateError {
+    CandidateError::new(
+        "graph_service_exec_uncertain",
+        match step {
+            Step::Connect => {
+                "Service exec completion is uncertain: its output stream could not be opened. No request was replayed. Inspect the service before retrying."
+            }
+            Step::Upgrade => {
+                "Service exec completion is uncertain: the engine did not open the exec's output stream. No request was replayed. Inspect the service before retrying."
+            }
+            Step::Format => {
+                "Service exec completion is uncertain: its output was not in the engine's stream format. No request was replayed. Inspect the service before retrying."
+            }
+            Step::Read => {
+                "Service exec completion is uncertain: its output stream failed or passed its deadline. No request was replayed. Inspect the service before retrying."
+            }
+            Step::Identity => {
+                "Service exec completion is uncertain: the exec's identity changed. No request was replayed. Inspect the service before retrying."
+            }
+            Step::Running => {
+                "Service exec completion is uncertain; the command may still be running. No request was replayed. Inspect the service before retrying."
+            }
+        },
+    )
+}
+/// Why reading an output stream failed: its framing, or the stream itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::provider) enum ReadFailure {
+    Format,
+    Stream,
+}
+
 /// One multiplexed engine output stream read to its end (HACK-2759). The first
 /// [`OUTPUT_LIMIT`] bytes of stdout and of stderr are kept and the rest is only
 /// counted, so the size of a command's output never fails the read and memory
@@ -123,7 +166,7 @@ pub(in crate::provider) enum Attached {
     Recorded(Vec<u8>),
 }
 impl Attached {
-    fn capture(self) -> Result<Capture, ()> {
+    fn capture(self) -> Result<Capture, ReadFailure> {
         match self {
             Self::Stream {
                 mut stream,
@@ -132,8 +175,8 @@ impl Attached {
             #[cfg(test)]
             Self::Recorded(bytes) => {
                 let mut capture = Capture::default();
-                capture.feed(&bytes)?;
-                capture.finish()
+                capture.feed(&bytes).map_err(|_| ReadFailure::Format)?;
+                capture.finish().map_err(|_| ReadFailure::Format)
             }
         }
     }
@@ -294,13 +337,15 @@ fn upgrade(
 fn read_capture(
     stream: &mut std::os::unix::net::UnixStream,
     deadline: Instant,
-) -> Result<Capture, ()> {
+) -> Result<Capture, ReadFailure> {
     let mut capture = Capture::default();
     let mut buffer = vec![0; 64 * 1024];
     loop {
-        match receive(stream, &mut buffer, deadline)? {
-            0 => return capture.finish(),
-            count => capture.feed(&buffer[..count])?,
+        match receive(stream, &mut buffer, deadline).map_err(|_| ReadFailure::Stream)? {
+            0 => return capture.finish().map_err(|_| ReadFailure::Format),
+            count => capture
+                .feed(&buffer[..count])
+                .map_err(|_| ReadFailure::Format)?,
         }
     }
 }
@@ -363,7 +408,7 @@ impl Engine<'_> {
             .map_err(|_| failure("Cannot attach to the one-off's output."))?;
         std::thread::Builder::new()
             .name("one-off-output".into())
-            .spawn(move || read_capture(&mut stream, deadline))
+            .spawn(move || read_capture(&mut stream, deadline).map_err(|_| ()))
             .map_err(|_| failure("Cannot read the one-off's output."))
     }
 
@@ -374,13 +419,13 @@ impl Engine<'_> {
         path: &str,
         body: Option<&str>,
         deadline: Instant,
-    ) -> Result<std::os::unix::net::UnixStream, ()> {
-        self.guest.verify().map_err(|_| ())?;
-        self.guest.before_effect().map_err(|_| ())?;
-        let socket = self.guest.engine_socket().map_err(|_| ())?;
+    ) -> Result<std::os::unix::net::UnixStream, Step> {
+        self.guest.verify().map_err(|_| Step::Connect)?;
+        self.guest.before_effect().map_err(|_| Step::Connect)?;
+        let socket = self.guest.engine_socket().map_err(|_| Step::Connect)?;
         let mut stream =
-            crate::provider::agent::connect_until(&socket, deadline).map_err(|_| ())?;
-        upgrade(&mut stream, path, body, deadline)?;
+            crate::provider::agent::connect_until(&socket, deadline).map_err(|_| Step::Connect)?;
+        upgrade(&mut stream, path, body, deadline).map_err(|_| Step::Upgrade)?;
         Ok(stream)
     }
 
@@ -419,7 +464,7 @@ impl Engine<'_> {
             |path, body| {
                 let stream = self
                     .upgraded(path, Some(body), deadline)
-                    .map_err(|_| uncertain())?;
+                    .map_err(uncertain_at)?;
                 Ok(Attached::Stream { stream, deadline })
             },
         )
@@ -669,7 +714,12 @@ fn execute(
         r#"{"Detach":false,"Tty":false}"#,
     )?
     .capture()
-    .map_err(|_| uncertain())?;
+    .map_err(|failure| {
+        uncertain_at(match failure {
+            ReadFailure::Format => Step::Format,
+            ReadFailure::Stream => Step::Read,
+        })
+    })?;
     // The engine can report the exec running for a moment after its stream
     // ended; poll for its exit within a short bound before calling it uncertain.
     let settle = Instant::now() + EXIT_SETTLE;
@@ -677,7 +727,7 @@ fn execute(
         let inspected = request(Method::GET, &format!("/v1.53/exec/{id}/json"), None)?;
         let inspected: Value = serde_json::from_slice(&inspected).map_err(|_| uncertain())?;
         if inspected["ID"] != id.as_str() || inspected["ContainerID"] != container {
-            return Err(uncertain());
+            return Err(uncertain_at(Step::Identity));
         }
         if inspected["Running"] == false {
             break inspected["ExitCode"]
@@ -686,7 +736,7 @@ fn execute(
                 .ok_or_else(uncertain)? as i32;
         }
         if inspected["Running"] != true || Instant::now() >= settle {
-            return Err(uncertain());
+            return Err(uncertain_at(Step::Running));
         }
         std::thread::sleep(EXIT_POLL);
     };
@@ -776,6 +826,78 @@ mod tests {
             vec![1, 0, 0, 0, 0, 0, 0, 1],
         ] {
             assert!(decode(&bad).is_err());
+        }
+    }
+    /// The streaming capture agrees with a one-shot reference decode for random
+    /// frame sizes (empty frames included), both streams, and random read splits.
+    #[test]
+    fn the_capture_agrees_with_a_reference_decode_for_any_split() {
+        fn reference(bytes: &[u8]) -> Option<(Vec<u8>, Vec<u8>, u64, u64)> {
+            let (mut out, mut err, mut dout, mut derr) = (Vec::new(), Vec::new(), 0u64, 0u64);
+            let mut rest = bytes;
+            while !rest.is_empty() {
+                if rest.len() < 8 || ![1, 2].contains(&rest[0]) || rest[1..4] != [0, 0, 0] {
+                    return None;
+                }
+                let kind = rest[0];
+                let size = u32::from_be_bytes(rest[4..8].try_into().unwrap()) as usize;
+                rest = &rest[8..];
+                if size > rest.len() {
+                    return None;
+                }
+                let (kept, dropped) = if kind == 1 {
+                    (&mut out, &mut dout)
+                } else {
+                    (&mut err, &mut derr)
+                };
+                let keep = size.min(OUTPUT_LIMIT - kept.len());
+                kept.extend_from_slice(&rest[..keep]);
+                *dropped += (size - keep) as u64;
+                rest = &rest[size..];
+            }
+            Some((out, err, dout, derr))
+        }
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+        for _ in 0..200 {
+            let mut stream = Vec::new();
+            let mut total = 0;
+            while total < 3 * 1024 * 1024 {
+                let size = match next(4) {
+                    0 => 0,
+                    1 => next(8) as usize,
+                    _ => next(70_000) as usize,
+                };
+                let kind = 1 + next(2) as u8;
+                stream.push(kind);
+                stream.extend_from_slice(&[0, 0, 0]);
+                stream.extend_from_slice(&(size as u32).to_be_bytes());
+                stream.extend((0..size).map(|i| (i % 251) as u8));
+                total += size;
+            }
+            let expected = reference(&stream).unwrap();
+            let mut capture = Capture::default();
+            let mut at = 0;
+            while at < stream.len() {
+                let step = (1 + next(70_000) as usize).min(stream.len() - at);
+                capture.feed(&stream[at..at + step]).unwrap();
+                at += step;
+            }
+            let capture = capture.finish().unwrap();
+            assert_eq!(
+                (
+                    capture.stdout,
+                    capture.stderr,
+                    capture.stdout_dropped,
+                    capture.stderr_dropped
+                ),
+                expected
+            );
         }
     }
     /// HACK-2759: at 1.35 MB, past 4 MiB and at 10 MB, fed in arbitrary chunks,
@@ -1337,5 +1459,35 @@ mod tests {
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, output[..OUTPUT_LIMIT]);
         assert_eq!(result.stdout_dropped, (10_000_000 - OUTPUT_LIMIT) as u64);
+    }
+    /// HACK-2759 review: an uncertain exec names its step. A malformed stream and an
+    /// engine that answers the exec start without upgrading it are told apart.
+    #[test]
+    fn an_uncertain_exec_names_the_step_that_failed() {
+        let created = || serde_json::to_vec(&json!({"Id":"b".repeat(64)})).unwrap();
+        let format = execute(
+            &"a".repeat(64),
+            &["tool".into()],
+            None,
+            |_, _, _| Ok(created()),
+            |_, _| Ok(Attached::Recorded(vec![9, 0, 0, 0, 0, 0, 0, 1, b'x'])),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(format.code, "graph_service_exec_uncertain");
+        assert_eq!(format.message, uncertain_at(Step::Format).message);
+
+        // A plain 200 answer to the upgraded start: the stream was never opened.
+        let path = socket_path();
+        let worker = serve(path.clone(), vec![(200, b"{}".to_vec())]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut stream = crate::provider::agent::connect_until(&path, deadline).unwrap();
+        assert!(upgrade(&mut stream, "/v1.53/exec/x/start", Some("{}"), deadline).is_err());
+        worker.join().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_ne!(
+            uncertain_at(Step::Upgrade).message,
+            uncertain_at(Step::Format).message
+        );
     }
 }

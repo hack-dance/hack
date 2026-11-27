@@ -49,8 +49,9 @@ import { nativeStartOutcomeUnknown } from "../lib/native-up-refusals.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
 import {
+  type NativeReadyLossWithheld,
   nativeCrossBootRecoverable,
-  nativeReadyLossRetirable,
+  nativeReadyLossWithheld,
   parseNativeForegroundOwner,
 } from "./native-cross-boot-recovery.ts";
 import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
@@ -5362,12 +5363,22 @@ export async function nativeLostStartRetirable(opts: {
   if (opts.loss.stage === "ready") {
     return selection === undefined
       ? opts.loss
-      : { ...opts.loss, retirable: nativeReadyLossRetirable(selection) };
+      : readyLoss(nativeReadyLossWithheld(selection));
   }
   return {
     ...opts.loss,
     retirable: selection !== undefined && nativeCrossBootRecoverable(selection),
   };
+}
+
+/** A ready-stage loss as its selection showed it, with the reason it is not
+ * retired (HACK-2757). */
+function readyLoss(
+  withheld: NativeReadyLossWithheld | undefined
+): NativeForegroundLossStage {
+  return withheld === undefined
+    ? { stage: "ready", retirable: true }
+    : { stage: "ready", retirable: false, withheld };
 }
 
 /**

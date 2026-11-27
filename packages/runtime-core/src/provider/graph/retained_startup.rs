@@ -982,12 +982,25 @@ pub(in crate::provider::graph) mod tests {
             .unwrap(),
         );
         state::write(&fixture.graph().join("state.json"), &receipt).unwrap();
+        // HACK-2757: a persisted selection the recovery's capture would refuse
+        // (here not even a selection) is no cross-boot stop, so nothing is named.
         state::write(
             &fixture.graph().join("relay-cleanup-bridges.json"),
             &json!({"version":1}),
         )
         .unwrap();
         foreground::transport::fixture_exited_publication(&fixture.candidate, &fixture.run);
+        let refused = preflight(&fixture.candidate, &fixture.run).unwrap_err();
+        assert_eq!(refused.code, "graph_foreground_owner_exited_unadmitted");
+        assert!(!refused.message.contains("hack down --recover"));
+        state::write(
+            &fixture.graph().join("relay-cleanup-bridges.json"),
+            &json!({"version":1,"owner":owner.token,"boot":owner.guest_boot_id,
+                "run":receipt.run,"plan":receipt.plan_id,
+                "capacity":owner.application_bridge.map_or(0, |intent| intent.slots),
+                "serial":0,"selected":{}}),
+        )
+        .unwrap();
         let before = state(&fixture);
         let error = preflight(&fixture.candidate, &fixture.run).unwrap_err();
         assert_eq!(error.code, "graph_foreground_owner_exited");
@@ -995,6 +1008,22 @@ pub(in crate::provider::graph) mod tests {
         assert!(error.message.contains("hack down --recover"));
         assert!(error.message.contains("then hack up"));
         assert_eq!(state(&fixture), before);
+        // #1291 review (HACK-2746 rows 1 and 2): a provider killed with its VM
+        // leaves the record `running` with the dead boot until `runtime recover`
+        // runs. That boot has ended, so `hack up` still names the down.
+        let mut running = owner.clone();
+        running.phase = "running".into();
+        running.save(&fixture.candidate).unwrap();
+        let error = preflight(&fixture.candidate, &fixture.run).unwrap_err();
+        assert_eq!(error.code, "graph_foreground_owner_exited");
+        assert!(error.message.contains("hack down --recover"));
+        // HACK-2757: the owner died while its VM kept running (a live provider):
+        // the cross-boot recovery never selects that boot, so nothing is named.
+        running.process = Some(identity::observe(std::process::id() as i32).unwrap());
+        running.save(&fixture.candidate).unwrap();
+        let error = preflight(&fixture.candidate, &fixture.run).unwrap_err();
+        assert_eq!(error.code, "graph_foreground_owner_exited_unadmitted");
+        assert!(!error.message.contains("hack down --recover"));
     }
 
     #[test]

@@ -1100,7 +1100,15 @@ impl Driver for HostRelayRuntime {
         {
             if wanted == service {
                 let deadline = *deadline;
-                self.output_capture = OutputCapture::Attached(engine.attach_output(id, deadline)?);
+                // Opening the attach is bounded on its own and watches the start
+                // loop's cancellation; `deadline` only bounds the output reader.
+                let (check, requests) = (self.startup_cancelled, self.startup_requests.as_ref());
+                let reader = engine
+                    .attach_output(id, deadline, &|| {
+                        startup_cancelled(check, requests).is_err()
+                    })
+                    .map_err(|error| startup_cancelled(check, requests).err().unwrap_or(error))?;
+                self.output_capture = OutputCapture::Attached(reader);
             }
         }
         Ok(())

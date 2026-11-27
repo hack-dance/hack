@@ -332,11 +332,60 @@ fn send_all(
 
 /// Send one HTTP request that upgrades `stream` to a raw output stream, and
 /// read exactly its response headers, so no stream byte is consumed here.
+#[cfg(test)]
 fn upgrade(
     stream: &mut std::os::unix::net::UnixStream,
     path: &str,
     body: Option<&str>,
     deadline: Instant,
+) -> Result<(), ()> {
+    upgrade_until(stream, path, body, deadline, &|| false)
+}
+
+/// How long opening an upgraded stream (connect, request, response headers) may
+/// take. The engine answers the upgrade before the command produces output, so
+/// this is short and separate from the reader's deadline, which spans the
+/// command (HACK-2759 review: a stalled attach held the owner's loop and its
+/// lease for the 330-second output deadline).
+const ESTABLISH_LIMIT: Duration = if cfg!(test) {
+    Duration::from_millis(300)
+} else {
+    Duration::from_secs(10)
+};
+/// While no response byte arrives, `cancelled` is checked this often.
+const CANCEL_POLL: Duration = Duration::from_millis(100);
+
+/// Wait until `stream` is readable within `deadline`, checking `cancelled`
+/// whenever a [`CANCEL_POLL`] slice passes with nothing to read.
+fn readable(
+    stream: &std::os::unix::net::UnixStream,
+    deadline: Instant,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), ()> {
+    loop {
+        if ready(
+            stream,
+            libc::POLLIN,
+            deadline.min(Instant::now() + CANCEL_POLL),
+        )
+        .is_ok()
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline || cancelled() {
+            return Err(());
+        }
+    }
+}
+
+/// The upgrade request, which also stops when `cancelled` reports true while
+/// it waits for the response.
+fn upgrade_until(
+    stream: &mut std::os::unix::net::UnixStream,
+    path: &str,
+    body: Option<&str>,
+    deadline: Instant,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<(), ()> {
     let body = body.unwrap_or("");
     let request = format!(
@@ -350,6 +399,7 @@ fn upgrade(
             return Err(());
         }
         let mut byte = [0];
+        readable(stream, deadline, cancelled)?;
         if receive(stream, &mut byte, deadline)? != 1 {
             return Err(());
         }
@@ -397,6 +447,20 @@ fn read_capture(
     }
 }
 
+/// When opening an upgraded stream must finish: [`ESTABLISH_LIMIT`] from now,
+/// never past the reader's `deadline`, a mutation's `admission` deadline or the
+/// transport's `observation` deadline, as for an ordinary engine POST.
+fn establish_by(
+    deadline: Instant,
+    admission: Option<Instant>,
+    observation: Option<Instant>,
+) -> Instant {
+    admission
+        .into_iter()
+        .chain(observation)
+        .fold(deadline.min(Instant::now() + ESTABLISH_LIMIT), Instant::min)
+}
+
 /// How long an exec may still be reported running after its output stream
 /// ended: the engine can publish the exit a moment after the stream closes
 /// (HACK-2759). Polled, then the outcome stays uncertain.
@@ -439,18 +503,22 @@ impl Engine<'_> {
 
     /// Attach to a created container's output before it starts, and read it to its
     /// end on a thread of its own (HACK-2759). The thread ends when the container
-    /// exits (or is removed) and its stream closes, or at `deadline`.
+    /// exits (or is removed) and its stream closes, or at `deadline`. Opening the
+    /// attach has its own short bound ([`establish_by`]) and stops early when
+    /// `cancelled` reports true.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(in crate::provider) fn attach_output(
         &self,
         id: &str,
         deadline: Instant,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<std::thread::JoinHandle<Result<Capture, ()>>, CandidateError> {
         let mut stream = self
-            .upgraded(
+            .upgraded_until(
                 &format!("/v1.53/containers/{id}/attach?stream=1&stdout=1&stderr=1"),
                 None,
                 deadline,
+                cancelled,
             )
             .map_err(|_| failure("Cannot attach to the one-off's output."))?;
         std::thread::Builder::new()
@@ -467,12 +535,29 @@ impl Engine<'_> {
         body: Option<&str>,
         deadline: Instant,
     ) -> Result<std::os::unix::net::UnixStream, Step> {
+        self.upgraded_until(path, body, deadline, &|| false)
+    }
+    /// [`Engine::upgraded`], stopping early when `cancelled` reports true.
+    /// `deadline` is the reader's; opening the stream is bounded by
+    /// [`establish_by`] instead.
+    fn upgraded_until(
+        &self,
+        path: &str,
+        body: Option<&str>,
+        deadline: Instant,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<std::os::unix::net::UnixStream, Step> {
         self.guest.verify().map_err(|_| Step::Connect)?;
         self.guest.before_effect().map_err(|_| Step::Connect)?;
+        let establish = establish_by(
+            deadline,
+            self.transport.admission_deadline,
+            self.transport.observation_deadline,
+        );
         let socket = self.guest.engine_socket().map_err(|_| Step::Connect)?;
         let mut stream =
-            crate::provider::agent::connect_until(&socket, deadline).map_err(|_| Step::Connect)?;
-        upgrade(&mut stream, path, body, deadline).map_err(|_| Step::Upgrade)?;
+            crate::provider::agent::connect_until(&socket, establish).map_err(|_| Step::Connect)?;
+        upgrade_until(&mut stream, path, body, establish, cancelled).map_err(|_| Step::Upgrade)?;
         Ok(stream)
     }
 
@@ -529,6 +614,10 @@ pub(in crate::provider) struct OneOffOutput {
     pub stdout_dropped: u64,
     pub stderr_dropped: u64,
     /// The end of the output was lost past the kept range ([`Capture::finish`]).
+    #[cfg_attr(
+        not(all(feature = "native-config-plan", target_os = "macos")),
+        allow(dead_code)
+    )]
     pub tail_lost: bool,
 }
 
@@ -1679,5 +1768,69 @@ mod tests {
             uncertain_at(Step::Upgrade).message,
             uncertain_at(Step::Format).message
         );
+    }
+    /// HACK-2759 review (P2): opening an upgraded stream is bounded on its own.
+    /// The bound is the establishment limit, the reader's deadline, the admission
+    /// deadline or the observation deadline, whichever comes first, never the
+    /// reader's long output deadline.
+    #[test]
+    fn opening_an_upgraded_stream_has_its_own_short_bound() {
+        let now = Instant::now();
+        let output = now + Duration::from_secs(330);
+        let bound = establish_by(output, None, None);
+        assert!(bound <= Instant::now() + ESTABLISH_LIMIT && bound < output);
+        let admission = now + Duration::from_millis(50);
+        assert_eq!(establish_by(output, Some(admission), None), admission);
+        let observation = now + Duration::from_millis(20);
+        assert_eq!(
+            establish_by(output, Some(admission), Some(observation)),
+            observation
+        );
+        let soon = now + Duration::from_millis(5);
+        assert_eq!(establish_by(soon, Some(admission), None), soon);
+    }
+    /// HACK-2759 review (P2): an engine that accepts the attach but never answers
+    /// the upgrade. With the one-off's 330-second output deadline, opening the
+    /// stream still ends at its own bound, and sooner once cancellation is seen.
+    #[test]
+    fn a_stalled_upgrade_ends_at_its_bound_or_at_cancellation() {
+        use std::os::unix::net::UnixListener;
+        let path = socket_path();
+        let listener = UnixListener::bind(&path).unwrap();
+        let held = std::thread::spawn(move || {
+            // Accept twice and hold both connections open without answering.
+            let first = listener.accept().unwrap();
+            let second = listener.accept().unwrap();
+            (first, second)
+        });
+        let output = Instant::now() + Duration::from_secs(330);
+        let attach = "/v1.53/containers/x/attach?stream=1&stdout=1&stderr=1";
+
+        let started = Instant::now();
+        let establish = establish_by(output, None, None);
+        let mut stream = crate::provider::agent::connect_until(&path, establish).unwrap();
+        assert!(upgrade_until(&mut stream, attach, None, establish, &|| false).is_err());
+        let waited = started.elapsed();
+        assert!(
+            waited >= ESTABLISH_LIMIT - Duration::from_millis(50),
+            "{waited:?}"
+        );
+        assert!(
+            waited < ESTABLISH_LIMIT + Duration::from_secs(2),
+            "{waited:?}"
+        );
+
+        let checks = std::cell::Cell::new(0);
+        let started = Instant::now();
+        let mut stream = crate::provider::agent::connect_until(&path, output).unwrap();
+        let cancelled = || {
+            checks.set(checks.get() + 1);
+            checks.get() >= 2
+        };
+        assert!(upgrade_until(&mut stream, attach, None, output, &cancelled).is_err());
+        assert_eq!(checks.get(), 2);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        drop(held.join().unwrap());
+        std::fs::remove_file(&path).unwrap();
     }
 }

@@ -590,7 +590,7 @@ impl CliRunner {
         timeout: Duration,
         input: &[u8],
     ) -> Result<(String, String, Option<i32>), RunError> {
-        self.run_io(args, path, Some(timeout), Some(input))
+        self.run_io(args, path, Some(timeout), Some(input), None)
     }
 
     /// Run with no deadline from the app: wait until the command exits and
@@ -613,13 +613,33 @@ impl CliRunner {
         })
     }
 
+    /// Run a Compose lifecycle command with its structured progress flag.
+    ///
+    /// # Errors
+    /// A transport failure, invalid result, or the CLI's error envelope.
+    pub fn run_lifecycle_progress(
+        &self,
+        args: &[&str],
+        path: &Path,
+        update: impl FnMut(String) + Send + 'static,
+    ) -> Result<crate::models::LifecycleResult, RunError> {
+        let (stdout, stderr, code) =
+            self.run_io(args, Some(path), None, None, Some(Box::new(update)))?;
+        serde_json::from_value(parse_result(&stdout, &stderr, code)?).map_err(|e| {
+            RunError::BadJson {
+                error: e.to_string(),
+                stdout_head: head(&stdout),
+            }
+        })
+    }
+
     fn run_inner(
         &self,
         args: &[&str],
         path: Option<&Path>,
         timeout: Option<Duration>,
     ) -> Result<(String, String, Option<i32>), RunError> {
-        self.run_io(args, path, timeout, None)
+        self.run_io(args, path, timeout, None, None)
     }
 
     fn run_io(
@@ -628,6 +648,7 @@ impl CliRunner {
         path: Option<&Path>,
         timeout: Option<Duration>,
         input: Option<&[u8]>,
+        progress: Option<Box<dyn FnMut(String) + Send>>,
     ) -> Result<(String, String, Option<i32>), RunError> {
         // The timeout counts from before the spawn: starting the program can
         // itself take time (an ETXTBSY retry, or macOS checking a new
@@ -664,7 +685,11 @@ impl CliRunner {
             }
             _ => None,
         };
-        let out = read_all(child.stdout.take(), Keep::Head(MAX_STDOUT));
+        let stdout = child.stdout.take();
+        let out = match (stdout, progress) {
+            (Some(stdout), Some(update)) => read_lifecycle_stdout(stdout, update),
+            (stdout, _) => read_all(stdout, Keep::Head(MAX_STDOUT)),
+        };
         let err = read_all(child.stderr.take(), Keep::Tail(STDERR_KEEP));
         let status = loop {
             match child.try_wait() {
@@ -959,6 +984,71 @@ fn read_bounded_line<R: BufRead>(r: &mut R, max: usize) -> Option<(String, bool)
             return Some((String::from_utf8_lossy(&buf).into_owned(), cut));
         }
     }
+}
+
+/// Progress frames are consumed immediately. Retain only the result envelope,
+/// or the original pretty JSON if the CLI refused before opening the stream.
+fn read_lifecycle_stdout(
+    stdout: impl Read + Send + 'static,
+    mut update: impl FnMut(String) + Send + 'static,
+) -> mpsc::Receiver<Drained> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut result = Drained {
+            text: String::new(),
+            overflow: false,
+            error: None,
+        };
+        let mut streaming = false;
+        while let Some((line, cut)) = read_bounded_line(&mut reader, MAX_STDOUT) {
+            if result.text.is_empty() && !result.overflow && !streaming {
+                let header = serde_json::from_str::<Value>(&line).ok();
+                streaming = header.as_ref().is_some_and(|value| {
+                    value["schema"] == "hack.lifecycle-progress.v1" && value["type"] == "start"
+                });
+                if streaming {
+                    update("Preparing project…".into());
+                    continue;
+                }
+            }
+            if streaming
+                && !cut
+                && result.text.is_empty()
+                && let Ok(value) = serde_json::from_str::<Value>(&line)
+                && value["type"] == "progress"
+            {
+                let phase = match value["phase"].as_str() {
+                    Some("images") => "Preparing images",
+                    Some("starting") => "Starting services",
+                    Some("stopping") => "Stopping services",
+                    Some("waiting") => "Waiting for dependencies",
+                    Some("installing") => "Installing dependencies",
+                    Some("verifying") => "Verifying dependencies",
+                    _ => continue,
+                };
+                let service = value["service"].as_str().filter(|name| {
+                    !name.is_empty()
+                        && name.len() <= 128
+                        && name
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b))
+                });
+                update(
+                    service.map_or_else(|| format!("{phase}…"), |name| format!("{phase} · {name}")),
+                );
+                continue;
+            }
+            if cut || result.text.len().saturating_add(line.len()) >= MAX_STDOUT {
+                result.overflow = true;
+            } else {
+                result.text.push_str(&line);
+                result.text.push('\n');
+            }
+        }
+        let _ = tx.send(result);
+    });
+    rx
 }
 
 /// Shown in place of a record longer than `MAX_RAW_LINE`.
@@ -1492,6 +1582,41 @@ mod tests {
     /// has the program open for writing) counts against the timeout, and
     /// the SIGTERM grace is cut so the call ends by `timeout + grace`.
     #[cfg(target_os = "linux")]
+    #[test]
+    fn lifecycle_stream_preserves_the_final_refusal() {
+        let stdout = concat!(
+            "{\"schema\":\"hack.lifecycle-progress.v1\",\"type\":\"start\"}\n",
+            "{\"type\":\"progress\",\"service\":\"db\",\"phase\":\"waiting\"}\n",
+            "{\"type\":\"progress\",\"service\":\"db\",\"phase\":\"failed\"}\n",
+            "{\"ok\":false,\"error\":{\"code\":\"E_STARTUP_TIMEOUT\",\"message\":\"Retry after checking db.\"}}\n",
+        );
+        let (tx, rx) = mpsc::channel();
+        let drained = read_lifecycle_stdout(stdout.as_bytes(), move |line| tx.send(line).unwrap())
+            .recv()
+            .unwrap();
+        assert_eq!(
+            rx.into_iter().collect::<Vec<_>>(),
+            ["Preparing project…", "Waiting for dependencies · db",]
+        );
+        assert!(!drained.overflow);
+        assert!(
+            matches!(parse_result(&drained.text, "", Some(1)), Err(RunError::Cli(error))
+            if error.code == "E_STARTUP_TIMEOUT" && error.message == "Retry after checking db.")
+        );
+    }
+
+    #[test]
+    fn lifecycle_refusal_can_arrive_before_the_stream_header() {
+        let stdout = b"{\n  \"ok\": false,\n  \"error\": {\n    \"code\": \"E_USAGE\",\n    \"message\": \"--progress is not supported for remote targets.\"\n  }\n}\n";
+        let drained = read_lifecycle_stdout(stdout.as_slice(), |_| panic!("unexpected progress"))
+            .recv()
+            .unwrap();
+        assert!(
+            matches!(parse_result(&drained.text, "", Some(1)), Err(RunError::Cli(error))
+            if error.code == "E_USAGE" && error.message == "--progress is not supported for remote targets.")
+        );
+    }
+
     #[test]
     fn the_timeout_includes_the_time_spent_starting_the_program() {
         let fake = FakeHack::new("trap '' TERM\nwhile :; do sleep 0.05; done");

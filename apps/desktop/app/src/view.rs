@@ -196,6 +196,7 @@ pub struct HackApp {
     /// When each project's running action started, for the slow-action
     /// warning. Display only: the app never terminates a lifecycle command.
     action_started: std::collections::HashMap<InstanceKey, Instant>,
+    action_progress: std::collections::HashMap<InstanceKey, String>,
 }
 
 impl HackApp {
@@ -280,6 +281,7 @@ impl HackApp {
             stats: Default::default(),
             hackd_evidence_seen: String::new(),
             action_started: std::collections::HashMap::new(),
+            action_progress: std::collections::HashMap::new(),
             setup: Default::default(),
             #[cfg(hack_terminal)]
             setup_command_check: None,
@@ -605,6 +607,12 @@ impl HackApp {
     /// Fixtures: mark an action as in flight without running it.
     pub fn simulate_in_flight(&mut self, action: Action) {
         if let Some(key) = self.model.detail().map(|d| d.key) {
+            let message = if action == Action::Start {
+                "Waiting for dependencies · db"
+            } else {
+                "Stopping services…"
+            };
+            self.action_progress.insert(key.clone(), message.into());
             self.model.apply(Event::ActionStarted { key, action });
         }
     }
@@ -714,18 +722,53 @@ impl HackApp {
         // task runs cannot make this action run another CLI.
         let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
         let epoch = self.model.source_epoch();
+        let progress = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let pending = progress.clone();
+        let progress_key = key.clone();
+        let started = self.action_started[&key];
+        if !native && action != Action::Open {
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(200))
+                        .await;
+                    let active = this.update(cx, |this, cx| {
+                        if this.model.source_epoch() != epoch
+                            || this.action_started.get(&progress_key) != Some(&started)
+                        {
+                            return false;
+                        }
+                        if let Some(message) = pending.lock().ok().and_then(|mut slot| slot.take())
+                        {
+                            this.action_progress.insert(progress_key.clone(), message);
+                            cx.notify();
+                        }
+                        true
+                    });
+                    if !matches!(active, Ok(true)) {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn({
                     let branch = key.branch.clone();
                     async move {
-                        source.act_on_copy(
+                        source.act_with_progress(
                             &root,
                             native,
                             branch.as_deref(),
                             compose_project.as_deref(),
                             action,
+                            Box::new(move |message| {
+                                if let Ok(mut slot) = progress.lock() {
+                                    *slot = Some(message);
+                                }
+                            }),
                         )
                     }
                 })
@@ -733,6 +776,10 @@ impl HackApp {
             let _ = this.update(cx, |this, cx| {
                 // Started under a CLI the app no longer runs: its result
                 // belongs to that installation, not to what is shown now.
+                if this.action_started.get(&key) != Some(&started) {
+                    return;
+                }
+                this.action_progress.remove(&key);
                 if this.model.source_epoch() != epoch {
                     this.action_started.remove(&key);
                     cx.notify();
@@ -1200,6 +1247,7 @@ impl HackApp {
             self.configuration.invalidate();
             self.changes = Default::default();
             self.action_started.clear();
+            self.action_progress.clear();
             self.copies = Default::default();
             // A Start or Restart hackd still running belongs to the
             // previous installation: it must not block this one.
@@ -1713,6 +1761,17 @@ impl HackApp {
                             .type_step(text::BODY)
                             .text_color(p.states.degraded.fg)
                             .child(w)
+                    }),
+            )
+            .children(
+                self.action_progress
+                    .get(&d.key)
+                    .filter(|_| d.busy)
+                    .map(|message| {
+                        div()
+                            .type_step(text::BODY)
+                            .text_color(p.text_secondary)
+                            .child(message.clone())
                     }),
             )
             .children(d.note.clone().filter(|_| !compact).map(|n| {

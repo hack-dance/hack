@@ -721,6 +721,19 @@ pub trait Source: Send + Sync {
         .into())
     }
 
+    /// Run a copy action with a progress callback when supported.
+    fn act_with_progress(
+        &self,
+        repo_root: &Path,
+        native: bool,
+        branch: Option<&str>,
+        compose_project: Option<&str>,
+        action: Action,
+        _update: Box<dyn FnMut(String) + Send>,
+    ) -> Result<ActionOutcome, SourceError> {
+        self.act_on_copy(repo_root, native, branch, compose_project, action)
+    }
+
     /// Last log lines for a project or one of its branch instances (no follow).
     ///
     /// # Errors
@@ -2489,6 +2502,45 @@ impl Source for LiveSource {
         }
         let runner = self.runner_for(false);
         Ok(runner.run_json_to_completion(&with_branch(&args, branch), Some(&root))?)
+    }
+
+    fn act_with_progress(
+        &self,
+        repo_root: &Path,
+        native: bool,
+        branch: Option<&str>,
+        compose_project: Option<&str>,
+        action: Action,
+        update: Box<dyn FnMut(String) + Send>,
+    ) -> Result<ActionOutcome, SourceError> {
+        let runner = self.runner_for(native);
+        let supported = !native
+            && action != Action::Open
+            && self.cli_version(&runner).ok().is_some_and(|version| {
+                compare_versions(&version, "5.0.0-next.17").is_some_and(|order| order.is_ge())
+            });
+        if !supported {
+            return self.act_on_copy(repo_root, native, branch, compose_project, action);
+        }
+
+        let branch = branch.map(validate_branch).transpose()?;
+        let root = trusted_root(repo_root)?;
+        let mut args = with_branch(action.cli_args(), branch);
+        let expected = compose_project.map(|name| format!("--expect-compose-project={name}"));
+        if let Some(expected) = &expected {
+            args.extend(["--target", "local", expected]);
+        }
+        args.push("--progress");
+        match runner.run_lifecycle_progress(&args, &root, update) {
+            // The CLI refuses this combination before dispatching remotely.
+            Err(RunError::Cli(error))
+                if error.code == "E_USAGE"
+                    && error.message == "--progress is not supported for remote targets." =>
+            {
+                self.act_on_copy(&root, native, branch, compose_project, action)
+            }
+            result => Ok(ActionOutcome::Lifecycle(result?)),
+        }
     }
 
     fn doctor_runs(&self, projects: &[DoctorTarget]) -> Vec<DoctorRun> {

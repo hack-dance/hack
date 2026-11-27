@@ -35,7 +35,7 @@ in the Stats charts while the app is open.
 | Where | What you see | CLI behind it |
 | --- | --- | --- |
 | Project list | Every registered project and its branch instances, grouped by state. Search with Cmd-K (Ctrl-K on Linux). | `hackd` (`/v1/projects`); `hack ps --json` for native projects |
-| Project header | Start, Stop, Restart and Open, with progress and errors. | `hack up`, `down`, `restart`, `open` |
+| Project header | Start, Stop, Restart and Open, with errors and live phases for local Compose lifecycle actions. | `hack up`, `down`, `restart`, `open`; Compose progress uses `--json --progress` |
 | Services tab | Each service, its state and its routes. For a running Compose project, also CPU and memory per service, and an **emulated** mark on a service whose image runs under CPU emulation. | `hackd`; `hack ps --json`; `hack usage --json --by-service` |
 | Service Stats | Up to 10 minutes of CPU, memory against the configured limit, and network rates for a Compose service. A short Info list shows the service's runtime details. | `hack usage --json --details --no-host`; `hackd` |
 | Logs tab | Live logs with pause, search and a filter for one service. | `hack logs --json` |

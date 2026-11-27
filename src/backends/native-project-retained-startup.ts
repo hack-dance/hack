@@ -6,10 +6,11 @@ import {
   confirmedNativeRetainedGraph,
   lostContainerRemovals,
 } from "./native-project-retained.ts";
-import type {
-  loadNativeProjectRun,
-  NativeProjectRun,
-  NativeProjectRunScope,
+import {
+  type loadNativeProjectRun,
+  type NativeProjectRun,
+  type NativeProjectRunScope,
+  recordNativeLostRemoval,
 } from "./native-project-run.ts";
 import {
   type invokeNativeRuntime,
@@ -183,9 +184,19 @@ export async function reselectNativeRetainedStartup(opts: {
     run: opts.run,
     invoke: opts.invoke,
     runtimePhase: preflight.runtimePhase,
+    onLostRemoval: recordLostRemovalOf(opts.scope, opts.run),
   });
   requireActive(opts.signal);
   return preflight.flags;
+}
+
+/** The `onLostRemoval` of a retained start of `run` in `scope`: it records the
+ * lost-removal marker that `hack down --recover` reads (HACK-2731). */
+export function recordLostRemovalOf(
+  scope: NativeProjectRunScope,
+  run: NativeProjectRun
+): () => Promise<void> {
+  return () => recordNativeLostRemoval({ ...scope, run });
 }
 
 /** On a running pool, the retained run's graph must still be its confirmed
@@ -196,6 +207,8 @@ export async function confirmRunningRetainedGraph(opts: {
   readonly run: NativeProjectRun;
   readonly invoke: typeof invokeNativeRuntime;
   readonly runtimePhase: "running" | "stopped";
+  /** Called, best effort, before the lost-removal refusal (HACK-2731). */
+  readonly onLostRemoval?: () => Promise<void>;
 }): Promise<void> {
   if (opts.runtimePhase !== "running") {
     return;
@@ -208,10 +221,11 @@ export async function confirmRunningRetainedGraph(opts: {
     invoke: opts.invoke,
   });
   if (!confirmedNativeRetainedGraph(observed, opts.run)) {
-    throw unconfirmedRetainedGraph(
+    throw await unconfirmedRetainedGraph(
       observed,
       opts.run,
-      "Native project already has an owned run mapping that is not safely stopped; inspect it before starting another run."
+      "Native project already has an owned run mapping that is not safely stopped; inspect it before starting another run.",
+      opts.onLostRemoval
     );
   }
 }
@@ -255,20 +269,25 @@ export async function verifyNativeResumedRetainedGraph(opts: {
   readonly projectRoot: string;
   readonly run: NativeProjectRun | null | undefined;
   readonly invoke: typeof invokeNativeRuntime;
+  /** Called, best effort, before the lost-removal refusal (HACK-2731). */
+  readonly onLostRemoval?: () => Promise<void>;
 }): Promise<NativeRetainedGraphObservation | undefined> {
   if (!opts.run) {
     return;
   }
   const observed = await inspectNativeProjectGraph({
     startupWait: true,
-    ...opts,
+    runtime: opts.runtime,
+    projectRoot: opts.projectRoot,
+    invoke: opts.invoke,
     run: opts.run.run,
   });
   if (!confirmedNativeRetainedGraph(observed, opts.run)) {
-    throw unconfirmedRetainedGraph(
+    throw await unconfirmedRetainedGraph(
       observed,
       opts.run,
-      "Native resumed retained graph differs; no graph restore was requested."
+      "Native resumed retained graph differs; no graph restore was requested.",
+      opts.onLostRemoval
     );
   }
   return { run: opts.run.run, snapshot: observed };
@@ -286,12 +305,16 @@ export const NATIVE_RETAINED_LOST_REMOVAL =
   "This run is stopped with its data kept, but stopped containers that its last hack down had removed are listed again, most likely because the VM was lost seconds after that down, before the removal reached the guest disk. Nothing was started. Run hack down --recover to remove them again (data kept), then hack up.";
 
 /** A retained graph that is not the confirmed stop: the lost-removal shape of
- * this exact run names its repair, anything else keeps `fallback`. */
-function unconfirmedRetainedGraph(
+ * this exact run names its repair, anything else keeps `fallback`. The
+ * lost-removal shape is first recorded (`onLostRemoval`, best effort) so that
+ * `hack down --recover` starts the pool for the repair even after the pool
+ * this start booted has gone idle and stopped (HACK-2731). */
+async function unconfirmedRetainedGraph(
   observed: unknown,
   run: NativeProjectRun,
-  fallback: string
-): ClosedCliError {
+  fallback: string,
+  onLostRemoval?: () => Promise<void>
+): Promise<ClosedCliError> {
   const receipt =
     isRecord(observed) && isRecord(observed.receipt) ? observed.receipt : {};
   const thisRun =
@@ -299,9 +322,9 @@ function unconfirmedRetainedGraph(
     receipt.owner === run.owner &&
     receipt.namespace === run.namespace &&
     receipt.plan_id === run.planId;
-  return new ClosedCliError(
-    thisRun && lostContainerRemovals(observed)
-      ? NATIVE_RETAINED_LOST_REMOVAL
-      : fallback
-  );
+  if (!(thisRun && lostContainerRemovals(observed))) {
+    return new ClosedCliError(fallback);
+  }
+  await onLostRemoval?.().catch(() => undefined);
+  return new ClosedCliError(NATIVE_RETAINED_LOST_REMOVAL);
 }

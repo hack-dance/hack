@@ -825,7 +825,18 @@ runtime retires (`CrossBootStart`, HACK-2714). That start's receipt (`left`) is
 owner died without it (killed, crashed, or taken down with the CLI); the runtime
 admits both, since a restore's failure path changes only that phase. Both need the dead owner's relay
 proved: by the run's routes, or without a published port by the relay's clean
-exit (`RouteProof = "exit"`, HACK-2711). It refuses brought-back containers it
+exit (`RouteProof = "exit"`, HACK-2711), which needs a settled relay startup
+(`settled`, HACK-2731; a start lost before ready needs it whatever its ports).
+`Unsettled` lets a relay startup be left unsettled when the VM dies after
+services were requested, and `LiveRelayAdvice` makes the message once ready
+check it, as `graph foreground-owner`'s `cross_boot_relay` lets the CLI do.
+Out of scope: once ready, the model's receipt is always the ready one. A VM lost
+during the owner's own stop (a Ctrl-C), with the receipt at `cleanup-intent` or
+`stopped-data-retained`, is not modelled. The CLI withholds the command there
+only for a live receipt whose relay is unprovable (`nativeLiveRelayUnprovable`);
+any other phase keeps the down advice, and the unit tests cover those phases
+(#1279 review).
+It refuses brought-back containers it
 does not remove. `hack up` refuses a pending restart and an unconfirmed
 cleanup; `hack restart` refuses while its lock is held and a stopped run with
 nothing pending.
@@ -836,7 +847,7 @@ nothing pending.
 
 | Control | Result |
 | --- | --- |
-| `positive` | `NoRefusedAdvice`, `NoNeedlessWithholding`, `NoFalseLoss` and `NoMissedLoss` hold across 416 reachable states, with and without a published port, whether a lost start's owner unwound or not, whichever of the watch and the start error ends the start, whether the record still says `running` or is stuck mid-stop when the VM dies, and when an ordinary failure on a live VM ends it. A recorded run lost after its services were requested is told `hack down --recover`, then `hack up`. |
+| `positive` | `NoRefusedAdvice`, `NoNeedlessWithholding`, `NoFalseLoss` and `NoMissedLoss` hold across 596 reachable states, with and without a published port, with a relay startup settled or not when the VM dies, whether a lost start's owner unwound or not, whichever of the watch and the start error ends the start, whether the record still says `running` or is stuck mid-stop when the VM dies, and when an ordinary failure on a live VM ends it. A recorded run lost after its services were requested is told `hack down --recover`, then `hack up`, when its relay startup settled; a run lost once ready is told the same unless it publishes no port and its relay startup had not settled (HACK-2731), where it is told no command. |
 | `negative` | PR #1253 at `cd0ebff10`: the message names `hack restart` while an intent is pending and `hack down --recover` otherwise, at every stage; the lost start leaves the restart lock held; `hack down --recover` keeps the intent and the brought-back containers; a start error keeps its own text. `NoRefusedAdvice` fails. |
 | `keep-intent` | Only `hack down --recover` keeps the cleaned intent: a lost restart is sent to `hack up`, which refuses the pending restart. |
 | `leak-lock` | Only the lock stays held after the watch's exit: `hack down --recover` cannot retire the intent under it, and `hack up` refuses. |
@@ -845,6 +856,7 @@ nothing pending.
 | `generic-error` | PR #1253 at `a8705a39` on a real VM: the start's error wins the race with its own text. Image preparation's "retry `hack up`" is refused by a pending restart or an unconfirmed cleanup. |
 | `keep-leftover` | Real-VM row 8 before HACK-2719: no storage barrier, and `hack down --recover` does not remove the brought-back containers, so it cannot confirm the cleanup, and the named sequence stops there. |
 | `pinned-relay` | HACK-2711 (the runtime before this fix): a run with no published port proves its dead owner's relay only by a published endpoint, which the owner's unwind removed. `hack down --recover` refuses (`relay_owner_refused`) once the run was requested: `NoRefusedAdvice` fails. |
+| `live-relay` | #1273's message (HACK-2731): it checks relay settlement only for a start lost before ready. A run lost once ready with no published port and an unsettled relay startup is told `hack down --recover`, which the runtime refuses (`relay_owner_refused`: its no-route proof needs a settled relay): `NoRefusedAdvice` fails. |
 | `no-cross-boot` | HACK-2714 (the runtime before this fix): no cross-boot retirement of a start lost before ready, so a recorded run lost at `Requested` and told down, then up, is refused (`runtime_not_running`): `NoRefusedAdvice` fails. |
 | `failed-only` | `01ab67fa` (review of #1273): the runtime admits only a `failed-retained` lost start. An owner that died mid-restore without its unwind leaves `restoring`, and the `hack down --recover` the message names is refused: `NoRefusedAdvice` fails. |
 | `withhold-requested` | PR #1253's message on the fixed runtime: a recorded run lost at `Requested` is told no command, though `hack down --recover` and `hack up` now work: `NoNeedlessWithholding` fails. |

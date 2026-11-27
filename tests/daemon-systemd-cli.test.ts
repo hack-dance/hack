@@ -172,7 +172,9 @@ async function compileHack(f: Fixture): Promise<void> {
       outfile,
     ],
     {
-      cwd: REPO_ROOT,
+      // The compiler stages a transient `.<hash>.bun-build` in its working
+      // directory: the fixture root, never the checkout (HACK-2727).
+      cwd: f.root,
       env: privateCliEnv({ root: f.root }),
       stdin: "ignore",
       stdout: "ignore",

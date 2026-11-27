@@ -10,6 +10,7 @@
 use super::*;
 use crate::provider::lifecycle::COMMAND_LEASE_WAIT;
 use crate::provider::{Profile, state};
+use std::cell::Cell;
 use std::fs;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
@@ -348,36 +349,42 @@ fn the_requesting_side_of_exec_waits_as_long_as_a_start_and_the_owner_side_keeps
     assert_eq!(command_lease_deadline(now, near, COMMAND_LEASE_WAIT), near);
 }
 
-/// HACK-2729, scaled (the owner's 15 s is 300 ms): a project stop holds the lease
-/// for 600 ms. At the owner-side bound the wait refuses with the exact
-/// project-stop refusal the CLI reads; the requesting side's longer bound
-/// outlasts the stop and acquires right after it, before any check of its own.
+/// HACK-2729: the owner deadline expires while the project stop still holds
+/// the lease. The requester retries and acquires after the stop releases it.
 #[test]
 fn a_requested_command_waits_out_a_project_stop_that_the_owner_bound_refuses() {
     let (_home, candidate) = running_pool();
-    let hold = Duration::from_millis(600);
-    let (_release, holder) = hold_lease_as_project_stop(&candidate, hold);
+    let root = candidate.state_root.join("run/smolvm");
+    let held_stop = Cell::new(Some({
+        let _stop = state::RecordProjectStop::begin();
+        state::Lock::acquire(&root).unwrap()
+    }));
 
-    let started = Instant::now();
-    let refused =
-        Engine::connect_command(&candidate, started + Duration::from_millis(300), &|| Ok(()))
-            .err()
-            .unwrap();
+    let owner_deadline = Instant::now() + Duration::from_millis(300);
+    let refused = Engine::connect_command(&candidate, owner_deadline, &|| Ok(()))
+        .err()
+        .unwrap();
+    assert!(Instant::now() >= owner_deadline);
     assert_eq!(refused.code, "provider_busy");
     assert_eq!(refused.message, PROJECT_STOP_REFUSAL);
-    assert!(started.elapsed() < hold);
 
-    // The backoff caps at 50 ms and is not scaled with the hold. Allow ten poll
-    // intervals for the holder to run, unlock and be observed on CI (HACK-2741).
+    // The guard runs before each attempt. Keep the stop through the first
+    // attempt and release it on retry, regardless of how long CI was paused.
+    let first_attempt = Cell::new(true);
     let after = Engine::connect_command_request(
         &candidate,
-        started + hold + Duration::from_millis(500),
-        &|| Ok(()),
+        Instant::now() + Duration::from_secs(5),
+        &|| {
+            if !first_attempt.replace(false) {
+                drop(held_stop.take());
+            }
+            Ok(())
+        },
     )
     .err()
     .unwrap();
-    assert_waited_then_acquired(started, hold, &after);
-    holder.join().unwrap();
+    assert_eq!(after.code, PAST_ACQUISITION, "{}", after.message);
+    assert!(held_stop.into_inner().is_none());
 }
 
 /// HACK-2729: a stop that outlasts the requesting side's bound is still refused

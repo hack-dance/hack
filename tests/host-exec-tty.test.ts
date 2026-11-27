@@ -166,14 +166,17 @@ test.skipIf(!Bun.which("python3"))(
         [
           process.execPath,
           "build",
-          "index.ts",
+          resolve(import.meta.dir, "../index.ts"),
           "--compile",
           ...CLI_COMPILE_DEFINE_ARGS,
           "--outfile",
           binary,
         ],
         {
-          cwd: resolve(import.meta.dir, ".."),
+          // `bun build --compile` stages a transient `.<hash>.bun-build` in
+          // its working directory. Keep it in this test's directory, never in
+          // the checkout another file's write guard is reading (HACK-2727).
+          cwd: directory,
           stdin: "ignore",
           stdout: "pipe",
           stderr: "pipe",

@@ -37,7 +37,9 @@ import {
   type NativeProjectRun,
   type NativeProjectRunScope,
   type NativeRestartIntent,
+  nativeLostRemovalRecorded,
   nativeRestartOperationLock,
+  recordNativeLostRemoval,
   removeNativeProjectRun,
   retireCleanedNativeRestart,
   saveNativeProjectRun,
@@ -2809,6 +2811,19 @@ test.each([
     phase: "ready-observed",
     extra: { live_owner_recovery: "a".repeat(64) },
   },
+  // HACK-2731: a live run with no published port and an unsettled relay
+  // startup, whose dead relay owner the runtime cannot prove
+  // (`relay_owner_refused` once the pool is started).
+  {
+    foreground: "exited",
+    phase: "ready-observed",
+    extra: { cross_boot_relay: false },
+  },
+  {
+    foreground: "exited",
+    phase: "started-observed",
+    extra: { cross_boot_relay: false },
+  },
 ] as {
   foreground: string;
   phase: string;
@@ -3862,6 +3877,122 @@ test.each([
   expect(NATIVE_LOST_REMOVAL_UNREPAIRABLE).toContain("data kept");
   expect(NATIVE_LOST_REMOVAL_UNREPAIRABLE).not.toContain("--remove-data");
   expect(NATIVE_LOST_REMOVAL_UNREPAIRABLE).not.toContain("run hack up");
+});
+
+/**
+ * HACK-2731: `hack up` booted the pool, found containers a lost VM brought back
+ * and named `hack down --recover`; the pool then went idle and stopped before
+ * the user ran it. The down starts the pool again for the repair, from the
+ * retained start's marker or the runtime's marker of a repair whose storage
+ * barrier never confirmed. Before, it kept `runtime_not_running`, and the next
+ * `hack up` booted the pool and printed the same message again.
+ */
+async function idleLostRemovalDown(opts: {
+  readonly recover: boolean;
+  /** The retained start recorded the brought-back containers, for this run. */
+  readonly marker?: NativeProjectRun;
+  /** The runtime's marker: an earlier repair's barrier never confirmed. */
+  readonly pending?: boolean;
+}) {
+  const fx = await fixture();
+  if (opts.marker) {
+    await recordNativeLostRemoval({ ...fx.scope, run: opts.marker });
+  }
+  const calls: string[] = [];
+  let pool = false;
+  let cleaned = false;
+  const result = await nativeProjectDown({
+    ...fx,
+    recover: opts.recover,
+    notice: () => undefined,
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "up") {
+        pool = true;
+        return { phase: "running" };
+      }
+      if (command === "foreground-owner") {
+        return {
+          ...ownerSelection("absent", "stopped-data-retained"),
+          lost_removal_pending: opts.pending === true && !cleaned,
+        };
+      }
+      if (!pool) {
+        throw poolStoppedError();
+      }
+      if (command === "cleanup") {
+        cleaned = true;
+        return {};
+      }
+      if (command === "managed-hostname-authority") {
+        return { authority: { present: false } };
+      }
+      expect(command).toBe("inspect");
+      return {
+        ...lostRemovalSnapshot(cleaned || opts.pending ? "absent" : "exited"),
+        ...(opts.pending && !cleaned ? { lost_removal_pending: true } : {}),
+      };
+    },
+  }).then(
+    (value) => value,
+    (error: unknown) => error
+  );
+  return { result, calls, scope: fx.scope };
+}
+
+test.each([
+  { name: "the retained start's marker", marker: run, pending: false },
+  { name: "the runtime's unconfirmed barrier", pending: true },
+] as {
+  name: string;
+  marker?: NativeProjectRun;
+  pending: boolean;
+}[])("down --recover starts a stopped pool for an owed lost-removal repair ($name)", async ({
+  marker,
+  pending,
+}) => {
+  const { result, calls, scope } = await idleLostRemovalDown({
+    recover: true,
+    marker,
+    pending,
+  });
+  expect(result).toMatchObject({
+    status: "stopped",
+    dataPreserved: true,
+    runtimeStarted: true,
+  });
+  expect(calls.slice(0, 3)).toEqual(["inspect", "foreground-owner", "up"]);
+  expect(calls.filter((call) => call === "up")).toHaveLength(1);
+  expect(calls.filter((call) => call === "cleanup")).toHaveLength(1);
+  // The verified stop retires the marker, so a later down starts nothing.
+  expect(await nativeLostRemovalRecorded({ ...scope, run })).toBe(false);
+});
+
+test.each([
+  // A plain down does not repair brought-back containers.
+  { name: "a plain down", recover: false, marker: run },
+  // Nothing owed: no marker, or one for another run.
+  { name: "no marker", recover: true },
+  {
+    name: "another run's marker",
+    recover: true,
+    marker: { ...run, run: "f".repeat(32) },
+  },
+] as {
+  name: string;
+  recover: boolean;
+  marker?: NativeProjectRun;
+}[])("a down of a stopped retained run on a stopped pool starts nothing for $name", async ({
+  recover,
+  marker,
+}) => {
+  const { result, calls } = await idleLostRemovalDown({ recover, marker });
+  expect(result).toBeInstanceOf(NativeRuntimeRequestError);
+  expect((result as NativeRuntimeRequestError).nativeCode).toBe(
+    "runtime_not_running"
+  );
+  expect(calls).not.toContain("up");
 });
 
 test("retiring a cleaned restart is a no-op without one", async () => {

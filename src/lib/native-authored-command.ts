@@ -1276,6 +1276,25 @@ export function nativeAuthoredCommandFailure(input: {
     message: contract.unconfirmed,
   });
 }
+/**
+ * Write one captured stream of an authored exec or one-off run to this
+ * process's stdout or stderr (HACK-2744). `Bun.write` with an empty payload
+ * truncates a regular-file destination to zero bytes, even one opened for
+ * append: with `>> log 2>&1`, a command with no stderr erased the whole file,
+ * its earlier content and the command's stdout included, and with `>> log`
+ * a command with no stdout erased the log. An empty stream therefore writes
+ * nothing; a non-empty one is written at the stream's current position, so
+ * append and truncate redirects behave as they do for any other command.
+ */
+export async function writeNativeCommandStream(
+  destination: typeof Bun.stdout,
+  bytes: Uint8Array
+): Promise<void> {
+  if (bytes.byteLength === 0) {
+    return;
+  }
+  await Bun.write(destination, bytes);
+}
 type CommandCompletion = {
   readonly exitCode: number;
   readonly stdout: Uint8Array;
@@ -1331,11 +1350,11 @@ async function runAuthoredCommand(input: {
     if (controller.signal.aborted) {
       return 130;
     }
-    await Bun.write(Bun.stdout, result.stdout);
+    await writeNativeCommandStream(Bun.stdout, result.stdout);
     if (controller.signal.aborted) {
       return 130;
     }
-    await Bun.write(Bun.stderr, result.stderr);
+    await writeNativeCommandStream(Bun.stderr, result.stderr);
     if (controller.signal.aborted) {
       return 130;
     }

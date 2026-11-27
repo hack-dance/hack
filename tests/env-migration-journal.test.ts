@@ -1,4 +1,10 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  expect,
+  setDefaultTimeout,
+  test,
+} from "bun:test";
 import {
   chmod,
   lstat,
@@ -45,6 +51,24 @@ import { fixtureEnvSnapshots } from "./helpers/env-migration-fixture.ts";
 import { fixtureChildren } from "./helpers/fixture-children.ts";
 import { runFixtureGit } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
+
+/**
+ * Bun timeout for every case and hook here that sets none of its own. The
+ * cases wait on no timer: each drives the migration in process through a
+ * fixed chain of preview, apply, run proof, cleanup and rollback steps, and
+ * every step re-probes git (`ls-files`, `rev-parse`, `check-ignore`) for each
+ * env file. One case makes about 60 sequential `git` spawns plus private-file
+ * reads and atomic writes, so its wall time is process-spawn and file-system
+ * latency, which grows with host load. On a 16-CPU Mac the slowest case takes
+ * 1.7 s alone; with 12 test files running at once cases took 4.4 s and others
+ * crossed Bun's 5 s default while their assertions held (HACK-2727). A case
+ * that times out keeps running after `afterEach` removes its root, so its
+ * stranded migration then throws refusals into the next case. This is a hang
+ * guard, not a speed assertion, and `setDefaultTimeout` is scoped to this
+ * file, so it changes no other file's budget.
+ */
+const MIGRATION_CASE_BUDGET_MS = 60_000;
+setDefaultTimeout(MIGRATION_CASE_BUDGET_MS);
 
 const SENTINEL = "synthetic-upgrade-journal-value";
 const QA = "synthetic-upgrade-qa-value";
@@ -1755,6 +1779,13 @@ test("rollback retains a new shared key used by another checkout", async () => {
   ).toBe(QA);
 });
 
+// Budget (300 s, below): for every journal and publication boundary of three
+// scenarios this case copies a fresh project, starts a cold Bun child, kills
+// it at the boundary and resumes in process. It waits on no timer, so its wall
+// time is that many process starts and migrations under the host's load: 33 s
+// alone on a 16-CPU Mac, up to 106 s with 12 test files running at once
+// (within 14 s of its old 120 s budget) and 123 s with more load beside it
+// (HACK-2727). A hang guard, not a speed assertion.
 test("SIGKILL at every journal/publication boundary resumes without losing an overlay value", async () => {
   const composePath = join(project.projectDir, "docker-compose.yml");
   const originalCompose = await readFile(composePath, "utf8");
@@ -1921,4 +1952,4 @@ test("SIGKILL at every journal/publication boundary resumes without losing an ov
       }
     }
   }
-}, 120_000);
+}, 300_000);

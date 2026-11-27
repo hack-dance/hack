@@ -5442,7 +5442,9 @@ are allowed.
 With the same explicit native binary/home selection used for `up`, run
 `hack exec --path /absolute/project SERVICE -- /bin/echo hello`. The command targets
 the current owned project/branch mapping, preserves binary stdout/stderr and the
-command exit code, and never falls back to Compose. With piped input/output or
+command exit code, and never falls back to Compose. Output redirected to a file
+(`> out.txt`, `>> log`, `2>&1`) is written like any other command's output, and a
+stream with no output leaves its file untouched. With piped input/output or
 `HACK_NO_INTERACTIVE=1`, it uses finite exec with a 30-second observation budget;
 a timeout may leave the command running and is not
 retried. A ready foreground owner holds the provider lease briefly and often, and

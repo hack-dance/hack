@@ -1239,6 +1239,91 @@ pub(super) fn write_extension(
     }
     write_bounded(stream, request, budget, APPEND_REQUEST_LIMIT)
 }
+/// [`write`] for a reply frame of up to `limit` bytes. A native authored command
+/// reply carries two output streams of up to 1 MiB each in base64, beyond the
+/// request bound (HACK-2742 review).
+#[cfg(feature = "native-config-plan")]
+pub(in crate::provider::graph) fn write_limited<T: Serialize>(
+    stream: &mut UnixStream,
+    value: &T,
+    budget: Duration,
+    limit: usize,
+) -> Result<(), CandidateError> {
+    write_bounded(stream, value, budget, limit)?;
+    stream.shutdown(Shutdown::Write).map_err(|_| refused())
+}
+
+/// Send one marker byte ahead of any frame. An error means the byte was not
+/// queued for the peer; a success means the peer will read it before anything
+/// sent after it, even if this side then closes.
+#[cfg(feature = "native-config-plan")]
+pub(in crate::provider::graph) fn send_marker(
+    stream: &UnixStream,
+    marker: u8,
+    budget: Duration,
+) -> Result<(), CandidateError> {
+    let deadline = Instant::now() + budget;
+    loop {
+        wait_io(stream.as_raw_fd(), libc::POLLOUT, deadline)?;
+        // SAFETY: one readable byte, and the stream owns the FD. Nonblocking send
+        // keeps the deadline; NOSIGNAL keeps a disconnect local.
+        let n = unsafe {
+            libc::send(
+                stream.as_raw_fd(),
+                (&marker as *const u8).cast(),
+                1,
+                libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+            )
+        };
+        if n == 1 {
+            return Ok(());
+        }
+        if n < 0
+            && matches!(
+                std::io::Error::last_os_error().kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            )
+        {
+            continue;
+        }
+        return Err(refused());
+    }
+}
+
+/// The peer's first byte, consumed, or `None` when the peer closed the stream
+/// without sending one (an end of file, or a reset or disconnect with nothing
+/// queued: queued bytes are always read before such an error is reported). A
+/// timeout or any other failure is an error and proves nothing.
+#[cfg(feature = "native-config-plan")]
+pub(in crate::provider::graph) fn receive_marker(
+    stream: &UnixStream,
+    deadline: Instant,
+) -> Result<Option<u8>, CandidateError> {
+    loop {
+        wait_io(stream.as_raw_fd(), libc::POLLIN, deadline)?;
+        let mut byte = 0_u8;
+        // SAFETY: one writable byte, and the stream owns the FD. MSG_DONTWAIT
+        // keeps a readiness race within the deadline.
+        let count = unsafe {
+            libc::recv(
+                stream.as_raw_fd(),
+                (&mut byte as *mut u8).cast(),
+                1,
+                libc::MSG_DONTWAIT,
+            )
+        };
+        match count {
+            1 => return Ok(Some(byte)),
+            0 => return Ok(None),
+            _ => match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::ECONNRESET | libc::ENOTCONN | libc::EPIPE) => return Ok(None),
+                Some(libc::EAGAIN | libc::EINTR) => continue,
+                _ => return Err(refused()),
+            },
+        }
+    }
+}
+
 pub(super) fn write_job<T: Serialize>(
     stream: &mut UnixStream,
     value: &T,

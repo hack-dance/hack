@@ -6,8 +6,11 @@ import {
   isNativeOwnerAuthoredExecLeaseRefusal,
   isNativeOwnerRefreshLeaseRefusal,
   NATIVE_COMMAND_LEASE_WAIT_SECONDS,
+  NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED,
   NATIVE_OWNER_AUTHORED_EXEC_LEASE_BUSY,
+  NATIVE_OWNER_AUTHORED_RUN_LEASE_BUSY,
   NATIVE_OWNER_REFRESH_LEASE_BUSY,
+  nativeAuthoredCommandNotRunRefusal,
   nativeCommandLeaseRefusal,
   nativeCommandLeaseWaitLine,
   nativeCommandLeaseWaitReporter,
@@ -177,6 +180,66 @@ test("HACK-2739: an authored exec's lease refusal says nothing ran, and only the
       })
     )
   ).toBe(false);
+});
+
+test("HACK-2742: only the authored owner's exact pre-effect causes are not-run refusals", () => {
+  for (const [cause, command, first] of [
+    [
+      NATIVE_OWNER_AUTHORED_RUN_LEASE_BUSY,
+      "hack run",
+      "hack run could not acquire the native runtime lock (provider_busy); nothing ran.",
+    ],
+    [
+      NATIVE_OWNER_AUTHORED_EXEC_LEASE_BUSY,
+      "hack exec",
+      "hack exec could not acquire the native runtime lock (provider_busy); nothing ran.",
+    ],
+    [
+      NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED,
+      "hack run",
+      "hack run did not start: the project's owner stopped or changed before the command was sent or started (graph_authored_command_not_started); nothing ran.",
+    ],
+  ] as const) {
+    const refusal = nativeAuthoredCommandNotRunRefusal(
+      new NativeRuntimeRequestError({
+        message: "x",
+        nativeCode: "native_graph_foreground",
+        nativeCauseCode: cause,
+      }),
+      command
+    );
+    expect(isNativeCommandNotRun(refusal)).toBe(true);
+    expect(refusal?.message.split("\n")[0]).toBe(first);
+    expect(refusal?.nativeCode).toBe("native_graph_foreground");
+    expect(refusal?.nativeCauseCode).toBe(cause);
+  }
+  const raw = nativeAuthoredCommandNotRunRefusal(
+    new NativeRuntimeRequestError({
+      message: "busy",
+      nativeCode: "provider_busy",
+      nativeMessage: PROJECT_STOP,
+    }),
+    "hack run"
+  );
+  expect(raw?.message.split("\n")[1]).toBe("Holder: project stop.");
+  for (const [nativeCode, nativeCauseCode] of [
+    ["native_graph_foreground", "provider_busy"],
+    ["native_graph_foreground", "native_graph_foreground"],
+    ["native_graph_foreground", undefined],
+    ["graph_owner_recovery", NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED],
+    [NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED, undefined],
+  ] as const) {
+    expect(
+      nativeAuthoredCommandNotRunRefusal(
+        new NativeRuntimeRequestError({
+          message: "x",
+          nativeCode,
+          nativeCauseCode,
+        }),
+        "hack exec"
+      )
+    ).toBeUndefined();
+  }
 });
 
 test("HACK-2739: the authored exec request outlasts the requester's wait and the owner's fixed read", () => {

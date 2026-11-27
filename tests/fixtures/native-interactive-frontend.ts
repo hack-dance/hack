@@ -24,6 +24,7 @@ process.exitCode = await nativeInteractiveExec({
   namespace: "d".repeat(64),
   service: "web",
   command: [mode],
-  native: false,
+  // HACK-2742: `native-*` modes are an authored project's interactive exec.
+  native: mode.startsWith("native-"),
   payload: new TextEncoder().encode("synthetic-private-envelope-canary"),
 });

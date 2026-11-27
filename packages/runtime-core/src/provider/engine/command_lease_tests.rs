@@ -496,6 +496,80 @@ fn the_authored_exec_request_wait_is_one_attempt_when_free_and_inert_without_a_p
     assert!(!empty.state_root.join("run/smolvm/operation.lock").exists());
 }
 
+/// HACK-2742: the interactive requester passes its frontend leash. A refusal from
+/// that check ends the wait within one backoff step and is returned as is, not
+/// swallowed into "go on to the owner".
+#[test]
+fn a_refused_requester_check_ends_the_wait_with_its_own_error() {
+    use crate::provider::lifecycle::await_free_command_lease_checked;
+    let (_home, candidate) = running_pool();
+    let (release, holder) = hold_lease_as_project_stop(&candidate, Duration::from_secs(30));
+    let started = Instant::now();
+    let check = refuses_after(Duration::from_millis(200), "interactive_frontend_gone");
+    let ended =
+        await_free_command_lease_checked(&candidate, started + Duration::from_secs(30), &check)
+            .err()
+            .unwrap();
+    assert_eq!(ended.code, "interactive_frontend_gone");
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    assert!(started.elapsed() < Duration::from_secs(2));
+    // A check that passes leaves the bounded wait and its holder-named refusal.
+    let deadline = Instant::now() + Duration::from_millis(300);
+    let busy = await_free_command_lease_checked(&candidate, deadline, &|| Ok(()))
+        .err()
+        .unwrap();
+    // The exact refusal is asserted only once the deadline has passed (HACK-2741).
+    assert!(Instant::now() >= deadline);
+    assert_eq!(busy.message, PROJECT_STOP_REFUSAL);
+    // The interactive refusal report names that holder as its closed token.
+    assert_eq!(
+        crate::provider::graph::interactive_exec::lease_refusal_holder(&busy),
+        Some("project-stop")
+    );
+    assert_eq!(
+        crate::provider::graph::interactive_exec::lease_refusal_holder(&ended),
+        None
+    );
+    release.send(()).unwrap();
+    holder.join().unwrap();
+}
+
+/// HACK-2742, the call site: `native::foreground::one_off`, the requesting side of
+/// an authored one-off `hack run`, waits out the stop before it contacts the
+/// owner, as the finite exec does.
+#[cfg(feature = "native-config-plan")]
+#[test]
+fn the_authored_run_requester_waits_before_it_contacts_the_owner() {
+    let (_home, candidate) = running_pool();
+    let hold = Duration::from_millis(600);
+    let (_release, holder) = hold_lease_as_project_stop(&candidate, hold);
+    let started = Instant::now();
+    let after = crate::provider::graph::native::foreground::one_off(
+        &candidate,
+        &"a".repeat(32),
+        "web",
+        &["true".to_owned()],
+        None,
+    )
+    .err()
+    .unwrap();
+    assert!(
+        started.elapsed() >= hold - Duration::from_millis(50),
+        "contacted the owner before the stop released: {:?} ({})",
+        started.elapsed(),
+        after.code
+    );
+    assert_ne!(after.code, "provider_busy", "{}", after.message);
+    // HACK-2742 review: no owner pin, so nothing was sent; the CLI reads this pair
+    // as "did not start, nothing ran".
+    assert_eq!(after.code, "native_graph_foreground", "{}", after.message);
+    assert_eq!(
+        after.cause_code.as_deref(),
+        Some("graph_authored_command_not_started")
+    );
+    holder.join().unwrap();
+}
+
 /// HACK-2739, the call site: `native::foreground::exec`, the requesting side of an
 /// authored `hack exec`, waits out the stop before it loads the owner's pin. This
 /// fixture has no owner, so it then refuses with something other than
@@ -523,5 +597,12 @@ fn the_authored_exec_requester_waits_before_it_contacts_the_owner() {
         after.code
     );
     assert_ne!(after.code, "provider_busy", "{}", after.message);
+    // HACK-2742 review: no owner pin, so nothing was sent; the CLI reads this pair
+    // as "did not start, nothing ran".
+    assert_eq!(after.code, "native_graph_foreground", "{}", after.message);
+    assert_eq!(
+        after.cause_code.as_deref(),
+        Some("graph_authored_command_not_started")
+    );
     holder.join().unwrap();
 }

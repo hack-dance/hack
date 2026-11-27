@@ -22,6 +22,7 @@ type ModelContract = {
       | "PreReady"
       | "RetainedGuard"
       | "ExecStopWait"
+      | "CommandAccept"
       | "ServingExit";
     readonly negative: boolean;
     readonly states?: number;
@@ -2381,6 +2382,93 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NeverRanAfterStop",
         fields: ['report = "ran"', "sent = TRUE", "held = 31"],
+      },
+      {
+        // HACK-2742: the owner's check (a pending signal, its own
+        // `hack down`) may end its wait. That refusal sent nothing and is
+        // reported as not run; "unconfirmed" still only follows a send. The
+        // same shape covers authored `hack run` and interactive `hack exec`.
+        name: "authored-cancel",
+        module: "ExecStopWait",
+        negative: false,
+        states: 335,
+      },
+      {
+        // The report before the fix: the owner's plain refusal read as
+        // "unconfirmed" although nothing was sent.
+        name: "authored-cancel-old",
+        module: "ExecStopWait",
+        negative: true,
+        invariant: "UnconfirmedOnlyAfterSend",
+        fields: [
+          "cancelled = TRUE",
+          'phase = "refused"',
+          'report = "unconfirmed"',
+          "sent = FALSE",
+        ],
+      },
+      {
+        // The owner's check ending its wait is reachable, as not run.
+        name: "authored-cancel-reach",
+        module: "ExecStopWait",
+        negative: true,
+        invariant: "NeverCancelled",
+        fields: ["cancelled = TRUE", 'report = "not-run"', "sent = FALSE"],
+      },
+      {
+        // HACK-2742 review (Codex P1): the owner accepts each authored command
+        // with one byte before any effect. "not started" only without that
+        // byte, the command never began, and after it every failure is
+        // "unconfirmed".
+        name: "accept-positive",
+        module: "CommandAccept",
+        negative: false,
+        states: 68,
+      },
+      {
+        // The rule before the fix, "closed with no byte of answer, then the
+        // owner's own cleanup": a command whose reply was lost after it ran,
+        // followed by the owner's `hack down`, is reported as not started.
+        name: "accept-old-retirement",
+        module: "CommandAccept",
+        negative: true,
+        invariant: "NothingRanWhenNotStarted",
+        fields: [
+          'report = "not-started"',
+          "started = TRUE",
+          'owner = "cleanup"',
+        ],
+      },
+      {
+        // Without the interactive leash check, this side's own shutdown hides
+        // a queued accept byte and reads as the owner's close.
+        name: "accept-no-leash-check",
+        module: "CommandAccept",
+        negative: true,
+        invariant: "NotStartedOnlyWithoutAccept",
+        fields: ['report = "not-started"', "accepted = TRUE", "local = TRUE"],
+      },
+      {
+        // VM row 4 stays reachable: a backlog request the owner never took,
+        // then its cleanup, is reported as not started.
+        name: "accept-backlog-reach",
+        module: "CommandAccept",
+        negative: true,
+        invariant: "NeverBacklogNotStarted",
+        fields: ['report = "not-started"', "took = FALSE", 'owner = "cleanup"'],
+      },
+      {
+        // Codex's case is reachable and reported as unconfirmed.
+        name: "accept-lost-reply-reach",
+        module: "CommandAccept",
+        negative: true,
+        invariant: "NeverLostReplyUnconfirmed",
+        fields: [
+          'report = "unconfirmed"',
+          "started = TRUE",
+          "replied = FALSE",
+          'owner = "cleanup"',
+        ],
       },
     ],
   },

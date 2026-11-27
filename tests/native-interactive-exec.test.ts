@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   interactiveRefusalMessage,
+  parseInteractiveLeaseWaitEvent,
   parseInteractiveReport,
 } from "../src/backends/native-interactive-exec.ts";
 import { nativeFailureMessage } from "../src/backends/native-runtime-client.ts";
@@ -37,6 +38,99 @@ test("an env change since up names the restart, not an uncertain outcome (HACK-2
   expect(interactiveRefusalMessage("session_cleanup_uncertain")).toContain(
     "could not confirm admission or completion"
   );
+});
+test("HACK-2742: an authored interactive exec refused before dispatch says nothing ran", () => {
+  const lease = parseInteractiveReport({
+    version: 1,
+    outcome: "refused",
+    code: "provider_busy",
+    session: null,
+    holder: "project-stop",
+  });
+  expect(lease).toEqual({
+    code: 1,
+    retained: false,
+    failure: "provider_busy",
+    holder: "project-stop",
+  });
+  expect(
+    interactiveRefusalMessage("provider_busy", {
+      native: true,
+      holder: lease.holder,
+      retained: lease.retained,
+    }).split("\n")
+  ).toEqual([
+    "hack exec could not acquire the native runtime lock (provider_busy); nothing ran.",
+    "Holder: project stop.",
+    "Retry hack exec once that project stop finishes.",
+  ]);
+  expect(
+    interactiveRefusalMessage("graph_authored_exec_lease_busy", {
+      native: true,
+    }).split("\n")
+  ).toEqual([
+    "hack exec could not acquire the native runtime lock (provider_busy); nothing ran.",
+    "Holder: unavailable.",
+    "Retry hack exec once the holder finishes.",
+  ]);
+  expect(
+    interactiveRefusalMessage("graph_authored_command_not_started", {
+      native: true,
+    })
+  ).toContain("(graph_authored_command_not_started); nothing ran.");
+  // A Compose exec, or a refusal after its session existed, keeps the old line.
+  for (const context of [{ native: false }, { native: true, retained: true }]) {
+    expect(interactiveRefusalMessage("provider_busy", context)).toContain(
+      "could not confirm admission or completion"
+    );
+  }
+  // The holder field is closed: only with provider_busy, only a token.
+  for (const bad of [
+    { code: "graph_authored_exec_lease_busy", holder: "project-stop" },
+    { code: "provider_busy", holder: "Project Stop" },
+    { code: "provider_busy", holder: 7 },
+  ]) {
+    expect(() =>
+      parseInteractiveReport({
+        version: 1,
+        outcome: "refused",
+        session: null,
+        ...bad,
+      })
+    ).toThrow();
+  }
+});
+test("HACK-2742: only the closed lease-wait event line is an event", () => {
+  expect(
+    parseInteractiveLeaseWaitEvent(
+      JSON.stringify({
+        version: 1,
+        event: "lease-wait",
+        holder: "project-stop",
+      })
+    )
+  ).toBe("project-stop");
+  for (const line of [
+    "",
+    "not json",
+    JSON.stringify({ version: 2, event: "lease-wait", holder: "start" }),
+    JSON.stringify({ version: 1, event: "other", holder: "start" }),
+    JSON.stringify({ version: 1, event: "lease-wait", holder: "x y" }),
+    JSON.stringify({
+      version: 1,
+      event: "lease-wait",
+      holder: "start",
+      extra: 1,
+    }),
+    JSON.stringify({
+      version: 1,
+      outcome: "refused",
+      code: "x",
+      session: null,
+    }),
+  ]) {
+    expect(parseInteractiveLeaseWaitEvent(line)).toBeUndefined();
+  }
 });
 test("interactive report is closed, value-free and preserves command status", () => {
   expect(
@@ -171,7 +265,7 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
         ]);
         expect(code, err + out).toBe(0);
         expect(out).toBe(
-          "Frontend PTY: nine lifetime and five selection cases passed\n"
+          "Frontend PTY: eleven lifetime and five selection cases passed\n"
         );
       }
     } finally {

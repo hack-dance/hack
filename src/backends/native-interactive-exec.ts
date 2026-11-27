@@ -6,13 +6,21 @@ import { keys } from "../lib/native-compose-private-state.ts";
 import { openTerminalControl } from "../lib/tty-process-group.ts";
 import { withPinnedRuntimeBinary } from "./native-authored-runtime-binary.ts";
 import {
+  nativeCommandLeaseRefusalMessage,
+  nativeCommandLeaseWaitReporter,
+  nativeOwnerPreEffectMessage,
+} from "./native-command-lease.ts";
+import {
   invokeNativeRuntime,
   NATIVE_EXEC_ENVIRONMENT_CHANGED_MESSAGE,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
+import { nativeLeaseHolderWords } from "./native-start-lease.ts";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
+/** The runtime's closed lease-holder token (`project-stop`, …). */
+const HOLDER = /^[a-z][a-z-]{0,31}$/;
 function refused(): never {
   throw new ClosedCliError(
     "Native interactive exec could not confirm its terminal or session; no request was replayed."
@@ -44,6 +52,8 @@ type Report = {
   session?: string;
   retained: boolean;
   failure?: string;
+  /** The holder token an expired lease wait names (HACK-2742). */
+  holder?: string;
 };
 export function parseInteractiveReport(value: unknown): Report {
   if (!isRecord(value) || value.version !== 1) {
@@ -70,7 +80,12 @@ export function parseInteractiveReport(value: unknown): Report {
   }
   if (
     value.outcome === "refused" &&
-    keys(value, "code,outcome,session,version") &&
+    (keys(value, "code,outcome,session,version") ||
+      // HACK-2742: an expired lease wait also names its holder's closed token.
+      (keys(value, "code,holder,outcome,session,version") &&
+        value.code === "provider_busy" &&
+        typeof value.holder === "string" &&
+        HOLDER.test(value.holder))) &&
     typeof value.code === "string" &&
     CODE.test(value.code) &&
     (value.session === null ||
@@ -81,9 +96,36 @@ export function parseInteractiveReport(value: unknown): Report {
       retained: value.session !== null,
       ...(typeof value.session === "string" ? { session: value.session } : {}),
       failure: value.code,
+      ...(typeof value.holder === "string" ? { holder: value.holder } : {}),
     };
   }
   return refused();
+}
+
+/**
+ * The control channel's lease-wait event, which the runtime writes ahead of
+ * its final report while it waits for the lock (HACK-2742): the holder's closed
+ * token, or undefined when `line` is not that event.
+ */
+export function parseInteractiveLeaseWaitEvent(
+  line: string
+): string | undefined {
+  try {
+    const value: unknown = JSON.parse(line);
+    if (
+      isRecord(value) &&
+      keys(value, "event,holder,version") &&
+      value.version === 1 &&
+      value.event === "lease-wait" &&
+      typeof value.holder === "string" &&
+      HOLDER.test(value.holder)
+    ) {
+      return value.holder;
+    }
+  } catch {
+    // Not an event; the final report is parsed on its own.
+  }
+  return;
 }
 function quote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
@@ -108,6 +150,11 @@ type InteractiveOptions = {
   readonly expectedContainer?: string;
   readonly expectedGeneration?: string;
   readonly signal?: AbortSignal;
+  /**
+   * The lease-wait progress line of an authored (`native`) exec, printed once
+   * (HACK-2742). A Compose exec's own 15 s wait prints none.
+   */
+  readonly onLeaseWait?: (holder: string) => void;
 };
 
 export async function nativeInteractiveExec(
@@ -231,7 +278,25 @@ async function runInteractiveChild(
     await new Promise<void>((resolve) => child.once("close", () => resolve()));
     return refused();
   }
-  const chunks: Buffer[] = [];
+  // The final report is one line. Lease-wait event lines may come first
+  // (HACK-2742); they are consumed as they arrive and never parsed as a report.
+  let pending = "";
+  let reportText = "";
+  const onLeaseWait = opts.native
+    ? nativeCommandLeaseWaitReporter({ given: opts.onLeaseWait })
+    : undefined;
+  const takeLines = (final: boolean) => {
+    const lines = pending.split("\n");
+    pending = final ? "" : (lines.pop() ?? "");
+    for (const line of lines) {
+      const holder = parseInteractiveLeaseWaitEvent(line);
+      if (holder !== undefined) {
+        onLeaseWait?.(holder);
+      } else if (line.length > 0) {
+        reportText += `${line}\n`;
+      }
+    }
+  };
   let size = 0;
   let invalid = false;
   let killTimer: ReturnType<typeof setTimeout> | undefined;
@@ -255,7 +320,8 @@ async function runInteractiveChild(
       invalid = true;
       cancel();
     } else {
-      chunks.push(chunk);
+      pending += chunk.toString("utf8");
+      takeLines(false);
     }
   });
   control.on("error", () => {
@@ -281,11 +347,10 @@ async function runInteractiveChild(
       cancel();
     }
     exit = await ended;
+    takeLines(true);
     if (!invalid) {
       try {
-        report = parseInteractiveReport(
-          JSON.parse(Buffer.concat(chunks).toString("utf8"))
-        );
+        report = parseInteractiveReport(JSON.parse(reportText));
       } catch {
         /* A lost child leaves durable evidence for the query below. */
       }
@@ -395,13 +460,45 @@ async function finishInteractiveReport({
     await reportRetainedSessions(opts, check, remedy, session);
   }
   if (report.failure) {
-    process.stderr.write(`${interactiveRefusalMessage(report.failure)}\n`);
+    process.stderr.write(
+      `${interactiveRefusalMessage(report.failure, {
+        native: opts.native,
+        holder: report.holder,
+        retained: report.retained,
+      })}\n`
+    );
   }
   return restorationFailed && report.code === 0 ? 1 : report.code;
 }
 
-/** The terminal line for a refused interactive exec; the report carries only its code. */
-export function interactiveRefusalMessage(code: string): string {
+/**
+ * The terminal line for a refused interactive exec; the report carries only its
+ * code (and, for an expired lease wait, the holder's token). For an authored
+ * (`native`) exec refused before its session existed (`retained` false), the
+ * requester's expired lease wait and the owner's pre-effect wait codes mean
+ * nothing ran (HACK-2742).
+ */
+export function interactiveRefusalMessage(
+  code: string,
+  context: {
+    readonly native?: boolean;
+    readonly holder?: string;
+    readonly retained?: boolean;
+  } = {}
+): string {
+  if (context.native && !context.retained) {
+    if (code === "provider_busy") {
+      return nativeCommandLeaseRefusalMessage({
+        command: "hack exec",
+        stage: "authored",
+        holder: nativeLeaseHolderWords(context.holder),
+      });
+    }
+    const owner = nativeOwnerPreEffectMessage(code, "hack exec");
+    if (owner) {
+      return owner;
+    }
+  }
   if (code === "graph_service_exec_environment_changed") {
     // HACK-2740: fresh values for a service that started without them. No
     // command ran, so this is not an uncertain outcome.

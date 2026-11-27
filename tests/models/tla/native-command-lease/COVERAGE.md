@@ -31,7 +31,9 @@ nothing would hold Ctrl-C, `hack down` and the restart tick for up to 15 s
 | `service_exec` (`graph exec`, finite exec) | requesting CLI | `Engine::connect_command_request` (35 s, HACK-2729) | expiry of fresh per-command values (`managed.deadline()`), if any | exec timeout starts after acquisition; frontend 95 s |
 | `service_exec::interactive` (compose) | CLI | `Engine::connect_command_until` | the frontend's `live` check | counts against the interactive deadline |
 | `native::foreground::exec` (authored finite exec, `graph native exec`) | requesting CLI | `lifecycle::await_free_command_lease` (35 s, HACK-2739): waits for a free lease and releases it, no engine connection | none (Ctrl-C ends the process) | before the send; then the fixed 40 s read; frontend 85 s |
-| `native::runtime::exec::execute`, `exec::interactive`, `run::execute` (authored) | owner loop | `Engine::connect_command_until` | the owner's guard: signals, publication, pin (and client disconnect for interactive) | counts against the fixed 30 s budget; `execute` maps its expiry to `graph_authored_exec_lease_busy` (HACK-2739) |
+| `native::foreground::one_off` (authored `hack run`) | requesting CLI | `await_free_command_lease` (35 s, HACK-2742) | none | before the send; then the fixed 40 s read; frontend 85 s |
+| `native::foreground::interactive` (authored interactive exec) | interactive child | `await_free_command_lease_checked` (35 s, HACK-2742) | the frontend leash | before the send |
+| `native::runtime::exec::execute`, `exec::interactive`, `run::execute` (authored) | owner loop | `Engine::connect_command_until` | the owner's guard: signals, publication, pin (and client disconnect for interactive) | counts against the fixed 30 s budget; `owner_command_engine` maps its expiry to `graph_authored_exec_lease_busy` or `graph_authored_run_lease_busy` (HACK-2739, HACK-2742) and a refused guard to `graph_authored_command_not_started` (HACK-2742) |
 
 The authored paths keep the wait inside their 30 s budget on purpose: the
 native requester (`request_selected`) reads the owner's answer for a fixed
@@ -232,8 +234,108 @@ Tests:
   unconfirmed with the slot held. `tests/native-runtime-client.test.ts`: the
   owner's code survives the client's closed cause filter.
 
-Not changed: authored one-off `run` and interactive exec keep only the
-owner's 15 s wait, and still report an expiry as unconfirmed.
+## Authored `hack run`, interactive exec and the owner's own check (HACK-2742)
+
+HACK-2739 left two authored commands with only the owner's 15 s wait:
+one-off `hack run` (`native::foreground::one_off`, owner side
+`native/runtime/run.rs`) and interactive `hack exec`
+(`native::foreground::interactive`, owner side `exec.rs` `interactive`). Both
+reported an expired wait as unconfirmed. A third case covered all three: the
+owner's guard (a pending signal, its own `hack down`, a changed publication or
+pin) runs before every lease attempt, so it can end the owner's wait. It
+returned the plain `refused()`, which the CLI also reported as unconfirmed,
+although nothing had been read, touched or started.
+
+- Both requesters now call `await_free_command_lease` before they send. The
+  interactive one passes its frontend leash as the check
+  (`await_free_command_lease_checked`), so a frontend that is gone ends the
+  wait. A refused check is returned as is.
+- All three owner paths go through `exec::owner_command_engine`. It runs the
+  guard, then `connect_command_until`, and relabels only those failures:
+  `graph_authored_exec_lease_busy` or `graph_authored_run_lease_busy` when the
+  lease stayed busy, and `graph_authored_command_not_started` when the guard
+  refused. Later failures keep their codes.
+- `hack run` now has the same 85 s frontend bound as the finite exec (it was
+  45 s), its progress line, its not-run refusals and its released admission
+  slot.
+- The interactive child's stderr is the user's terminal, so its lease-wait
+  report goes to its control channel (fd 3) as one closed event line ahead of
+  the final report. The CLI prints the usual progress line for an authored
+  exec. The final refusal report also carries the holder's closed token for
+  an expired requester wait. The requester forwards the owner's pre-effect
+  codes as the report code, which carries only one code.
+
+`ExecStopWait.tla` gains `Cancellable` (the owner's check may end the owner
+wait) and `CancelUnconfirmed` (the report before the fix). Every earlier
+config sets both to `FALSE`; their state counts are unchanged.
+
+| Config | Constants | Result | Shows |
+| --- | --- | --- | --- |
+| `authored-cancel` | `SecondBound = 15`, `Holders = 2`, `Cancellable = TRUE` | 335 distinct states, no error; `NoSendWhileHeld`, `UnconfirmedOnlyAfterSend`, `NotRunMeansNotSent` and `Settles` hold | A cancelled owner wait sent nothing and is reported as not run |
+| `authored-cancel-old` | `CancelUnconfirmed = TRUE` | `UnconfirmedOnlyAfterSend` violated: `cancelled = TRUE`, `report = "unconfirmed"`, `sent = FALSE` | The report before the fix |
+| `authored-cancel-reach` | `Cancellable = TRUE` | `NeverCancelled` violated: `cancelled = TRUE`, `report = "not-run"` | The cancel is reachable, so the positive control is not vacuous |
+
+The model's two waits stand for each command's requester and owner waits; the
+run and interactive paths have the same shape as the finite exec.
+
+Tests: `command_lease_tests.rs` (the `one_off` call site waits out the stop;
+a refused requester check ends the wait with its own error; the refusal's
+holder token), `exec_tests.rs` (`owner_wait_refusal` codes; the owner's lease
+wait per command; a guard that refuses during or before the wait ends it as
+not started within 2 s; a later failure keeps its code),
+`tests/native-authored-project-oneoff.test.ts`, `native-command-lease`,
+`native-authored-project-exec` (the not-started message),
+`native-interactive-exec` (the event line, the report's holder field, the
+messages, and a PTY case each for a lease refusal and a not-started refusal),
+`native-runtime-client` (the new causes pass the closed filter).
+
+## The owner's acceptance of a command (HACK-2742 review)
+
+Codex found that "not started" after the request was sent rested on the
+owner's retirement: a connection closed with no byte of answer, then the
+owner's own cleanup. A command that ran but whose reply was lost (a reply
+past the request bound failed to serialize with nothing sent), followed by the
+owner's `hack down`, matched it. The owner now accepts each command (request
+version 3) with one byte after it read and validated the request and before
+any effect, and drops a command whose byte it cannot queue. The requester
+says not started (`graph_authored_command_not_started`) only when the
+connection closed with no byte at all. The interactive requester also needs
+its frontend leash to hold, because its own watcher's shutdown can hide a
+queued byte. The owner advertises acceptance in its publication (owner record
+version 5); a requester sends version 3 only to such an owner, and an owner
+started by an earlier prerelease gets version 2 as before, without the proof.
+
+`CommandAccept.tla` models one command on one connection: the owner takes,
+drops, accepts, starts, replies or loses the reply, fails, or ends between
+requests through its cleanup or a failure (a backlog connection then closes
+unread); the requester may shut down (the leash watcher) and decides once the
+connection ended. `AcceptRule = FALSE` is the retirement rule before the fix;
+`LeashCheck = FALSE` drops the leash check.
+
+| Config | Constants | Result | Shows |
+| --- | --- | --- | --- |
+| `accept-positive` | `AcceptRule = TRUE`, `LeashCheck = TRUE` | 68 distinct states, no error; `StartOnlyAfterAccept`, `NotStartedOnlyWithoutAccept`, `NothingRanWhenNotStarted` and `UnconfirmedAfterAccept` hold | "not started" only without the byte and true; after it every failure is unconfirmed |
+| `accept-old-retirement` | `AcceptRule = FALSE` | `NothingRanWhenNotStarted` violated: `report = "not-started"`, `started = TRUE`, `owner = "cleanup"` | Codex's case under the old rule |
+| `accept-no-leash-check` | `LeashCheck = FALSE` | `NotStartedOnlyWithoutAccept` violated: `report = "not-started"`, `accepted = TRUE`, `local = TRUE` | A local shutdown read as the owner's close |
+| `accept-backlog-reach` | positive constants | `NeverBacklogNotStarted` violated: `report = "not-started"`, `took = FALSE`, `owner = "cleanup"` | VM row 4 is reachable and reported as not started |
+| `accept-lost-reply-reach` | positive constants | `NeverLostReplyUnconfirmed` violated: `report = "unconfirmed"`, `started = TRUE`, `replied = FALSE`, `owner = "cleanup"` | Codex's case is reachable and unconfirmed |
+
+The model covers an owner that advertises acceptance. The version choice is
+not modelled: against an owner of record version 4 the requester sends
+version 2 and keeps the behaviour from before the fix, where every failure
+after the send is unconfirmed.
+
+Tests: `native/foreground/tests.rs` (a capped reply is refused by the request
+bound and delivered whole by the reply writer; a command taken but not
+accepted is not started while the owner is published; an accepted command
+closed before its reply stays unconfirmed, also after the owner's cleanup; a
+backlog request is not started whatever retired the publication; interactive
+requests are not started only without acceptance, and a leash shutdown stays
+uncertain; an owner from before the upgrade, publishing record version 4,
+still runs exec and run on version 2 and gets no not-started proof; and the
+real per-request step of the owner's loop sends the byte while another
+project's stop still holds the lease, with the journal and one-off records
+unchanged, before its pending signal ends the wait as not started).
 
 ## Code and tests
 

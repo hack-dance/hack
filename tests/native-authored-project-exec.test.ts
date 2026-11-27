@@ -384,6 +384,37 @@ test("HACK-2739: an authored exec that waits for the lock prints exactly one pro
     ]);
   }));
 
+test("HACK-2742: an owner check that ended the exec's wait (a pending signal or hack down) says nothing ran", async () =>
+  owned("authored exec owner not started", async () => {
+    const f = await fixture();
+    const refused = await nativeAuthoredProjectExec({
+      ...f,
+      service: "web",
+      command,
+      invoke: async () => {
+        throw new NativeRuntimeRequestError({
+          message: "refused",
+          nativeCode: "native_graph_foreground",
+          nativeCauseCode: "graph_authored_command_not_started",
+        });
+      },
+    }).catch((value: unknown) => value);
+    expect(isNativeCommandNotRun(refused)).toBe(true);
+    const failure = nativeAuthoredCommandFailure({
+      error: refused,
+      operation: "exec",
+    });
+    expect(failure.message.split("\n")).toEqual([
+      "hack exec did not start: the project's owner stopped or changed before the command was sent or started (graph_authored_command_not_started); nothing ran.",
+      "Check hack ps, then retry hack exec once the project is up.",
+    ]);
+    expect(failure.detail).toEqual({
+      status: "not_run",
+      nativeCode: "native_graph_foreground",
+      nativeCauseCode: "graph_authored_command_not_started",
+    });
+  }));
+
 test.each([
   {
     name: "the requester's own expired wait",

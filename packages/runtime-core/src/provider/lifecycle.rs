@@ -423,8 +423,9 @@ pub(super) const COMMAND_LEASE_WAIT: Duration = Duration::from_secs(15);
 /// still costs only its own hold, and an uncontended acquisition returns at once.
 pub(super) const COMMAND_REQUEST_LEASE_WAIT: Duration = START_LEASE_WAIT;
 
-/// The requesting process of an authored `hack exec` waits here, before it sends
-/// anything to its owner, until the provider lease is free (HACK-2739). The owner
+/// The requesting process of an authored `hack exec` (HACK-2739), one-off
+/// `hack run` and interactive `hack exec` (HACK-2742) waits here, before it sends
+/// anything to its owner, until the provider lease is free. The owner
 /// answers on its only loop thread, where its own wait keeps `COMMAND_LEASE_WAIT`
 /// inside a fixed 30 s budget that the requester reads for a fixed 40 s, so the
 /// wait for another project's stop belongs on this side, as the Compose
@@ -452,18 +453,34 @@ pub(super) const COMMAND_REQUEST_LEASE_WAIT: Duration = START_LEASE_WAIT;
 ///
 /// The lease can be taken again between this wait and the owner's acquisition.
 /// The owner then waits its own 15 s, and on expiry answers with a pre-effect
-/// code of its own (`graph_authored_exec_lease_busy`).
+/// code of its own (`graph_authored_exec_lease_busy` or
+/// `graph_authored_run_lease_busy`); if its own check ends that wait (a pending
+/// signal, its `hack down`), it answers `graph_authored_command_not_started`.
 #[cfg(all(target_os = "macos", any(test, feature = "native-config-plan")))]
 pub(in crate::provider) fn await_free_command_lease(
     candidate: &Candidate,
     deadline: Instant,
 ) -> Result<(), CandidateError> {
+    await_free_command_lease_checked(candidate, deadline, &|| Ok(()))
+}
+
+/// [`await_free_command_lease`] with the caller's `check`, which runs before every
+/// lock attempt (HACK-2742): an interactive exec passes its frontend leash, so a
+/// frontend that is gone ends the wait within one backoff step. A refusal from
+/// `check` is returned as is; nothing was sent.
+#[cfg(all(target_os = "macos", any(test, feature = "native-config-plan")))]
+pub(in crate::provider) fn await_free_command_lease_checked(
+    candidate: &Candidate,
+    deadline: Instant,
+    check: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
     let lease =
         super::engine::command_lease_deadline(Instant::now(), deadline, COMMAND_REQUEST_LEASE_WAIT);
     let root = root(candidate);
+    let check_refused = std::cell::Cell::new(false);
     match state::wait_for_acquisition(
         lease,
-        || Ok(()),
+        || check().inspect_err(|_| check_refused.set(true)),
         || state::Lock::acquire_existing(&root),
         state::acquisition_expired,
     ) {
@@ -471,7 +488,7 @@ pub(in crate::provider) fn await_free_command_lease(
             drop(lock);
             Ok(())
         }
-        Err(error) if error.code == "provider_busy" => Err(error),
+        Err(error) if error.code == "provider_busy" || check_refused.get() => Err(error),
         Err(_) => Ok(()),
     }
 }

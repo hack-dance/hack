@@ -30,6 +30,85 @@ fn command_not_sent(_error: CandidateError) -> CandidateError {
     refused().with_cause_code(runtime::OWNER_COMMAND_NOT_STARTED.to_owned())
 }
 
+/// Whether the owner closed `stream` before it sent a single byte of its answer
+/// (HACK-2742 review). Waits until `deadline` for the first byte or the close,
+/// and consumes nothing: a peeked byte is left for the reply reader. A timeout
+/// or any other error is not a proof and answers false.
+fn closed_unanswered(stream: &std::os::unix::net::UnixStream, deadline: Instant) -> bool {
+    use std::os::fd::AsRawFd;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let mut descriptor = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let timeout = i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX);
+        // SAFETY: one valid pollfd for a descriptor the stream owns.
+        let ready = unsafe { libc::poll(&mut descriptor, 1, timeout) };
+        if ready < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return false;
+        }
+        if ready == 0 {
+            return false;
+        }
+        let mut byte = [0_u8; 1];
+        // SAFETY: one writable byte; MSG_PEEK leaves it queued for the reader.
+        let count = unsafe {
+            libc::recv(
+                stream.as_raw_fd(),
+                byte.as_mut_ptr().cast(),
+                1,
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            )
+        };
+        if count == 0 {
+            return true;
+        }
+        if count > 0 {
+            return false;
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::ECONNRESET | libc::ENOTCONN | libc::EPIPE) => return true,
+            Some(libc::EAGAIN | libc::EINTR) => continue,
+            _ => return false,
+        }
+    }
+}
+
+/// Whether the owner ended through its normal cleanup and so never processed a
+/// request it left unanswered (HACK-2742 review). The owner serves one request
+/// at a time on its only loop and writes each answer before it accepts the
+/// next. It returns from that loop only after a cleanup, which saves the run as
+/// removed and then retires its publication. A connection it closed without a
+/// byte of answer, followed by that retirement, was therefore never processed:
+/// it was still in the listen backlog, or its request never fully arrived. An
+/// owner that failed instead keeps its publication, so this answers false. The
+/// retirement is awaited briefly, because the connection can close as the
+/// process exits a moment after its files are removed.
+fn owner_ended_unanswered(
+    candidate: &Candidate,
+    pin: &owner::Pin,
+    review: &native_input::Review,
+) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if pin.verify_retired().is_ok()
+            && journal::read_control(candidate, review)
+                .is_ok_and(|receipt| receipt.phase == Phase::Removed)
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// [`command_not_sent`] for an interactive exec, whose value-free report
 /// carries one code, so the owner's not-started code is that code.
 fn interactive_not_sent(_error: CandidateError) -> CandidateError {
@@ -767,12 +846,29 @@ pub(in crate::provider) fn interactive(
     // the owner stopped before its durable intent. Correlate only this attempt;
     // a validated pre-intent refusal below remains unscoped.
     let uncertain = |error: CandidateError| error.with_session(options.session);
-    transport::write(&mut stream, &input, Duration::from_secs(5)).map_err(uncertain)?;
+    // HACK-2742 review (VM row 4): an owner that never accepted this connection
+    // and then ended through its cleanup closes it unanswered. Only then, with
+    // the owner's own retirement and removed run as evidence, is the attempt
+    // proven unprocessed and reported with no session.
+    let unanswered = |error: CandidateError| {
+        if owner_ended_unanswered(candidate, &pin, review) {
+            interactive_not_sent(error)
+        } else {
+            uncertain(error)
+        }
+    };
+    transport::write(&mut stream, &input, Duration::from_secs(5)).map_err(unanswered)?;
     let descriptor = crate::provider::interactive_handoff::receive(
         &stream,
         std::time::Instant::now() + Duration::from_secs(40),
     )
-    .map_err(uncertain)?;
+    .map_err(|error| {
+        if error.code == crate::provider::interactive_handoff::CLOSED_UNANSWERED {
+            unanswered(error)
+        } else {
+            uncertain(error)
+        }
+    })?;
     let reply: Reply =
         transport::read(&mut stream, Duration::from_secs(5), LIMIT).map_err(uncertain)?;
     reply
@@ -836,15 +932,32 @@ fn request_selected(
         exec: exec_selected.clone(),
         one_off: one_off_selected.clone(),
     };
-    transport::write(&mut stream, &input, Duration::from_secs(5))?;
-    let command = matches!(action, Action::Exec | Action::Run);
+    // HACK-2742 review (VM row 4, later rounds): the owner may have taken this
+    // connection into its listen backlog and then exited through its cleanup
+    // without ever accepting it. The write, or the first read, then fails with
+    // nothing answered. For a command that is proven unprocessed only when the
+    // owner closed the connection without a single byte of answer and then
+    // retired its publication with its run removed (`owner_ended_unanswered`).
+    let unanswered = |error: CandidateError| {
+        if command && owner_ended_unanswered(candidate, &pin, review) {
+            command_not_sent(error)
+        } else {
+            error
+        }
+    };
+    transport::write(&mut stream, &input, Duration::from_secs(5)).map_err(unanswered)?;
+    let budget = if command {
+        Duration::from_secs(40)
+    } else {
+        Duration::from_secs(30)
+    };
+    let started = Instant::now();
+    if command && closed_unanswered(&stream, started + budget) {
+        return Err(unanswered(refused()));
+    }
     let reply: Reply = transport::read(
         &mut stream,
-        if command {
-            Duration::from_secs(40)
-        } else {
-            Duration::from_secs(30)
-        },
+        budget.saturating_sub(started.elapsed()),
         if command {
             4 * 1024 * 1024
         } else if action == Action::Logs {

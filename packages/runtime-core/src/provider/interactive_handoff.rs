@@ -164,6 +164,16 @@ fn copied_rights(bytes: &[u8], copied: usize) -> (Vec<i32>, bool) {
     (descriptors, invalid)
 }
 
+/// The code of a handoff whose peer closed before it sent a single byte.
+pub(super) const CLOSED_UNANSWERED: &str = "interactive_handoff_closed";
+
+fn closed_unanswered() -> CandidateError {
+    CandidateError::new(
+        CLOSED_UNANSWERED,
+        "The interactive owner closed the connection before it answered.",
+    )
+}
+
 /// Received descriptors are owned immediately, including on truncated/invalid
 /// messages. No descriptor is exposed until its count, type and CLOEXEC are valid.
 /// Darwin may install additional rights that it does not copy out on truncation.
@@ -203,7 +213,23 @@ pub(super) fn receive(
             continue;
         }
         if count < 0 {
-            return Err(refused());
+            // HACK-2742 review: a reset before anything was received is told
+            // apart, so the caller can prove (with the owner's own evidence)
+            // that nothing was processed.
+            return Err(
+                if matches!(
+                    io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ECONNRESET | libc::ENOTCONN)
+                ) {
+                    closed_unanswered()
+                } else {
+                    refused()
+                },
+            );
+        }
+        if count == 0 && message.msg_controllen == 0 {
+            // The peer closed before it sent a byte, with no descriptor.
+            return Err(closed_unanswered());
         }
         // SAFETY: ancillary is initialized storage of this exact byte size;
         // the parser borrows it and never reads beyond the returned length.

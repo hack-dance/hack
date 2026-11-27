@@ -41,8 +41,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install GPUI build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          # The GPUI build dependencies come from the Ubuntu archive.
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- update
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- install -y --no-install-recommends \
             clang libfontconfig-dev libwayland-dev libxkbcommon-x11-dev \
             libx11-xcb-dev libssl-dev libzstd-dev libvulkan-dev pkg-config
       - uses: dtolnay/rust-toolchain@1.98.1
@@ -150,8 +151,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install GPUI build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- update
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- install -y --no-install-recommends \
             clang libfontconfig-dev libwayland-dev libxkbcommon-x11-dev \
             libx11-xcb-dev libssl-dev libzstd-dev libvulkan-dev pkg-config xz-utils \
             mesa-vulkan-drivers

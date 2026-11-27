@@ -761,8 +761,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - name: Prepare Compose fixtures
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes tmux
+          # tmux only needs the Ubuntu archive on these 24.04 runners.
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- update
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- install --yes tmux
           docker pull alpine:3.20
       - run: bun install --frozen-lockfile
       - run: bun run build
@@ -820,7 +821,9 @@ jobs:
         with:
           bun-version: "1.4.4"
       - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install --yes tmux
+        run: |
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- update
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- install --yes tmux
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Create isolated Hack network

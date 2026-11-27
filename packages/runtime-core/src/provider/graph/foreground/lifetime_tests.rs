@@ -122,11 +122,14 @@ fn lifetime_probe() {
     events.watch_frontend().unwrap();
     let mut publisher = NativePublisher::new(root.join("pub"));
     events.watch_child(&publisher.child).unwrap();
+    // Published whole, like `stopped.json`: the cleanup guard parses it to stop
+    // the fixture publisher.
     fs::write(
-        root.join("ready.json"),
+        root.join("ready.json.partial"),
         serde_json::to_vec(publisher.identity()).unwrap(),
     )
     .unwrap();
+    fs::rename(root.join("ready.json.partial"), root.join("ready.json")).unwrap();
     let crashed = std::env::var("HACK_OWNER_LIFETIME_CAUSE").as_deref() == Ok("publisher");
     if crashed {
         publisher.child.kill().unwrap();
@@ -147,5 +150,13 @@ fn lifetime_probe() {
             signals::Wake::Signal | signals::Wake::FrontendExit
         ));
     }
-    fs::write(root.join("stopped.json"), b"{\"publisher_absent\":true}").unwrap();
+    // Publish the result whole: the frontend polls for the name and reads it at
+    // once, so a file created before its bytes were written could be read empty
+    // on a loaded host (seen with the large-output tests beside it, HACK-2759).
+    fs::write(
+        root.join("stopped.json.partial"),
+        b"{\"publisher_absent\":true}",
+    )
+    .unwrap();
+    fs::rename(root.join("stopped.json.partial"), root.join("stopped.json")).unwrap();
 }

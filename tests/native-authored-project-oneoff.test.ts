@@ -23,9 +23,23 @@ import {
   withNativeAuthoredProjectStatus,
 } from "../src/backends/native-authored-project-run.ts";
 import { NativeAuthoredProjectNotStartedError } from "../src/backends/native-authored-runtime-binary.ts";
+import {
+  isNativeCommandNotRun,
+  NATIVE_AUTHORED_COMMAND_REQUEST_TIMEOUT_MS,
+  NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED,
+  NATIVE_OWNER_AUTHORED_RUN_LEASE_BUSY,
+  nativeCommandLeaseWaitReporter,
+} from "../src/backends/native-command-lease.ts";
 import { NATIVE_RUN_EMPTY_SELECTION_REFUSAL } from "../src/backends/native-project-one-off.ts";
-import { invokeNativeRuntime } from "../src/backends/native-runtime-client.ts";
-import { tryNativeAuthoredCommand } from "../src/lib/native-authored-command.ts";
+import {
+  invokeNativeRuntime,
+  NativeRuntimeRequestError,
+} from "../src/backends/native-runtime-client.ts";
+import { NATIVE_EXIT_CONFIRMED_ENV } from "../src/lib/background-command/native-exit.ts";
+import {
+  nativeAuthoredCommandFailure,
+  tryNativeAuthoredCommand,
+} from "../src/lib/native-authored-command.ts";
 import type { NativeComposeCommandOptions } from "../src/lib/native-compose-command.ts";
 import { captureCompletedJobFixtureCommand } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
 
@@ -257,7 +271,13 @@ test("finite authored run preserves literal argv, binary streams and nonzero exi
         expect(input.privateInput).toBeUndefined();
         expect(input.boundNativeAuthoredOneOffDrain).toBe(true);
         expect(input.boundNativeAuthoredExecDrain).toBeUndefined();
-        expect(input.timeoutMs).toBe(45_000);
+        // HACK-2742: the requester's 35 s lease wait, 5 s send, 40 s read, margin;
+        // the same bound as the authored finite exec.
+        expect(input.timeoutMs).toBe(
+          NATIVE_AUTHORED_COMMAND_REQUEST_TIMEOUT_MS
+        );
+        expect(input.timeoutMs).toBe(85_000);
+        expect(input.onLeaseWait).toBeFunction();
         return f.reply;
       },
     });
@@ -277,6 +297,163 @@ test("finite authored run preserves literal argv, binary streams and nonzero exi
         workdir: "/app",
       })
     ).toEqual(result);
+  }));
+
+const PROJECT_STOP =
+  "Provider lease acquisition refused; recorded holder: project stop; no operation was admitted.";
+
+test("HACK-2742: an authored run that waits for the lock prints exactly one progress line", async () =>
+  owned(async () => {
+    const f = await fixture();
+    const lines: string[] = [];
+    const result = await nativeAuthoredProjectRun({
+      ...f,
+      service: "web",
+      command,
+      workdir: "/app",
+      onLeaseWait: nativeCommandLeaseWaitReporter({
+        write: (line) => lines.push(line),
+      }),
+      invoke: async (input) => {
+        input.onLeaseWait?.("project-stop");
+        input.onLeaseWait?.("project-stop");
+        return f.reply;
+      },
+    });
+    expect(result.exitCode).toBe(3);
+    expect(lines).toEqual([
+      "Waiting for the native runtime lock, held by a project stop. This command continues once it is released (up to 35 s).",
+    ]);
+  }));
+
+test.each([
+  {
+    name: "the requester's own expired wait",
+    error: () =>
+      new NativeRuntimeRequestError({
+        message: "busy",
+        nativeCode: "provider_busy",
+        nativeMessage: PROJECT_STOP,
+      }),
+    lines: [
+      "hack run could not acquire the native runtime lock (provider_busy); nothing ran.",
+      "Holder: project stop.",
+      "Retry hack run once that project stop finishes.",
+    ],
+    detail: { status: "not_run", nativeCode: "provider_busy" },
+  },
+  {
+    name: "the owner's own expired wait",
+    error: () =>
+      new NativeRuntimeRequestError({
+        message: "refused",
+        nativeCode: "native_graph_foreground",
+        nativeCauseCode: NATIVE_OWNER_AUTHORED_RUN_LEASE_BUSY,
+      }),
+    lines: [
+      "hack run could not acquire the native runtime lock (provider_busy); nothing ran.",
+      "Holder: unavailable.",
+      "Retry hack run once the holder finishes.",
+    ],
+    detail: {
+      status: "not_run",
+      nativeCode: "native_graph_foreground",
+      nativeCauseCode: NATIVE_OWNER_AUTHORED_RUN_LEASE_BUSY,
+    },
+  },
+  {
+    name: "the owner's check ending its wait (a pending signal or hack down)",
+    error: () =>
+      new NativeRuntimeRequestError({
+        message: "refused",
+        nativeCode: "native_graph_foreground",
+        nativeCauseCode: NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED,
+      }),
+    lines: [
+      "hack run did not start: the project's owner stopped or changed before the command was sent or started (graph_authored_command_not_started); nothing ran.",
+      "Check hack ps, then retry hack run once the project is up.",
+    ],
+    detail: {
+      status: "not_run",
+      nativeCode: "native_graph_foreground",
+      nativeCauseCode: NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED,
+    },
+  },
+])("HACK-2742: $name is an honest run refusal that nothing ran, and releases the slot", async ({
+  error,
+  lines,
+  detail,
+}) =>
+  owned(async () => {
+    const f = await fixture();
+    const confirmed = join(f.scope.projectRoot, "exit-confirmed");
+    const previous = process.env[NATIVE_EXIT_CONFIRMED_ENV];
+    process.env[NATIVE_EXIT_CONFIRMED_ENV] = confirmed;
+    try {
+      const refused = await nativeAuthoredProjectRun({
+        ...f,
+        service: "web",
+        command,
+        invoke: async () => {
+          throw error();
+        },
+      }).catch((value: unknown) => value);
+      expect(isNativeCommandNotRun(refused)).toBe(true);
+      const failure = nativeAuthoredCommandFailure({
+        error: refused,
+        operation: "run",
+      });
+      expect(failure.code).toBe("E_LIFECYCLE_FAILED");
+      expect(failure.message).toBe(lines.join("\n"));
+      expect(failure.message).not.toContain("unconfirmed");
+      expect(failure.detail).toEqual(detail);
+      expect(await Bun.file(confirmed).exists()).toBe(true);
+    } finally {
+      if (previous === undefined) {
+        delete process.env[NATIVE_EXIT_CONFIRMED_ENV];
+      } else {
+        process.env[NATIVE_EXIT_CONFIRMED_ENV] = previous;
+      }
+    }
+  }));
+
+test.each([
+  ["native_graph_foreground", "provider_busy"],
+  ["native_graph_foreground", "native_graph_foreground"],
+  ["native_graph_foreground", undefined],
+  ["engine_protocol", undefined],
+] as const)("HACK-2742: any other run failure (%s caused by %s) stays unconfirmed and holds the slot", async (nativeCode, nativeCauseCode) =>
+  owned(async () => {
+    const f = await fixture();
+    const confirmed = join(f.scope.projectRoot, "exit-confirmed");
+    const previous = process.env[NATIVE_EXIT_CONFIRMED_ENV];
+    process.env[NATIVE_EXIT_CONFIRMED_ENV] = confirmed;
+    try {
+      const refused = await nativeAuthoredProjectRun({
+        ...f,
+        service: "web",
+        command,
+        invoke: async () => {
+          throw new NativeRuntimeRequestError({
+            message: "x",
+            nativeCode,
+            nativeCauseCode,
+          });
+        },
+      }).catch((value: unknown) => value);
+      expect(isNativeCommandNotRun(refused)).toBe(false);
+      expect(
+        nativeAuthoredCommandFailure({ error: refused, operation: "run" })
+          .message
+      ).toContain("completion is unconfirmed");
+      expect(await Bun.file(confirmed).exists()).toBe(false);
+    } finally {
+      if (previous === undefined) {
+        delete process.env[NATIVE_EXIT_CONFIRMED_ENV];
+      } else {
+        process.env[NATIVE_EXIT_CONFIRMED_ENV] = previous;
+      }
+    }
   }));
 
 test.each([

@@ -172,6 +172,9 @@ fn real_compiler_review_crosses_authenticated_native_socket_without_compose_fiel
         };
         let input: Request = transport::read(&mut stream, Duration::from_secs(1), 4096).unwrap();
         input.validate(&receipt.review).unwrap();
+        if input.version == ACCEPTING_VERSION {
+            transport::send_marker(&stream, ACCEPTED, Duration::from_secs(1)).unwrap();
+        }
         assert!(matches!(input.action, Action::Status));
         transport::write(
             &mut stream,
@@ -375,14 +378,15 @@ fn owner_codec_refuses_legacy_kind_unknown_fields_and_wrong_process_incarnation(
 }
 
 #[test]
-fn publication_four_binds_session_and_preserves_closed_legacy_live_codecs() {
+fn publication_five_binds_session_and_preserves_closed_legacy_live_codecs() {
     let fixture = Fixture::new();
     let review = fixture.receipt().review;
     let publication = owner::Publication::bind(&fixture.candidate, &review).unwrap();
     let file = fixture.owner_root().join("owner.json");
     let bytes = fs::read(&file).unwrap();
     let qualified: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(qualified["version"], 4);
+    // Version 5: the session-qualified record of an owner that accepts commands.
+    assert_eq!(qualified["version"], 5);
     assert!(
         qualified["host_boot_uuid"] == serde_json::to_value(host_boot::read().unwrap()).unwrap(),
         "Publication must retain the observed boot qualifier"
@@ -485,7 +489,7 @@ fn session_codec_refuses_missing_mixed_downgraded_and_unknown_qualifiers() {
             "micros" => bad["host_boot_micros"] = json!(1),
             "v3" => bad["version"] = json!(3),
             "v2" => bad["version"] = json!(2),
-            "future" => bad["version"] = json!(5),
+            "future" => bad["version"] = json!(6),
             _ => unreachable!(),
         }
         fs::write(&file, serde_json::to_vec(&bad).unwrap()).unwrap();
@@ -749,10 +753,24 @@ fn changed(mut receipt: Receipt, field: &str) -> Receipt {
     receipt.validate(RUN, &receipt.owner).unwrap();
     receipt
 }
+/// The owner side of one request, as the serve loop does it: take the
+/// connection, read and validate the request and, for a command, accept it.
 fn accepted(
     publication: &owner::Publication,
     review: &native_input::Review,
 ) -> std::os::unix::net::UnixStream {
+    let (stream, input) = taken(publication, review);
+    if input.version == ACCEPTING_VERSION {
+        transport::send_marker(&stream, ACCEPTED, Duration::from_secs(1)).unwrap();
+    }
+    stream
+}
+
+/// Take and validate one request without accepting it.
+fn taken(
+    publication: &owner::Publication,
+    review: &native_input::Review,
+) -> (std::os::unix::net::UnixStream, Request) {
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut stream = loop {
         if let Some(stream) = publication.accept().unwrap() {
@@ -763,7 +781,7 @@ fn accepted(
     };
     let input: Request = transport::read(&mut stream, Duration::from_secs(1), 4096).unwrap();
     input.validate(review).unwrap();
-    stream
+    (stream, input)
 }
 
 #[test]
@@ -1010,6 +1028,9 @@ fn finite_logs_wire_authenticates_the_live_native_owner_and_exact_member() {
         };
         let input: Request = transport::read(&mut stream, Duration::from_secs(2), 4096).unwrap();
         input.validate(&receipt.review).unwrap();
+        if input.version == ACCEPTING_VERSION {
+            transport::send_marker(&stream, ACCEPTED, Duration::from_secs(1)).unwrap();
+        }
         assert!(input.action == Action::Logs);
         assert_eq!(input.logs.as_ref().unwrap().service, "web");
         assert_eq!(input.logs.as_ref().unwrap().tail, 17);
@@ -1190,6 +1211,9 @@ fn interactive_handoff_failures_keep_only_the_attempted_session() {
             let request: Request =
                 transport::read(&mut stream, Duration::from_secs(1), LIMIT).unwrap();
             request.validate(&receipt.review).unwrap();
+            if request.version == ACCEPTING_VERSION {
+                transport::send_marker(&stream, ACCEPTED, Duration::from_secs(1)).unwrap();
+            }
             assert_eq!(request.session.as_deref(), Some(SESSION));
             if case != "disconnect-before-descriptor" {
                 let (attached, _engine) = UnixStream::pair().unwrap();
@@ -1295,6 +1319,9 @@ fn finite_exec_wire_authenticates_owner_member_and_binary_nonzero_completion() {
         };
         let input: Request = transport::read(&mut stream, Duration::from_secs(2), 4096).unwrap();
         input.validate(&receipt.review).unwrap();
+        if input.version == ACCEPTING_VERSION {
+            transport::send_marker(&stream, ACCEPTED, Duration::from_secs(1)).unwrap();
+        }
         assert!(input.action == Action::Exec);
         assert!(input.logs.is_none());
         let selected = input.exec.as_ref().unwrap();
@@ -1382,6 +1409,9 @@ fn finite_one_off_wire_authenticates_owner_member_fresh_container_and_binary_non
         };
         let input: Request = transport::read(&mut stream, Duration::from_secs(2), 4096).unwrap();
         input.validate(&receipt.review).unwrap();
+        if input.version == ACCEPTING_VERSION {
+            transport::send_marker(&stream, ACCEPTED, Duration::from_secs(1)).unwrap();
+        }
         assert!(input.action == Action::Run);
         assert!(input.logs.is_none());
         assert!(input.exec.is_none());
@@ -1613,4 +1643,675 @@ fn presentation_observation_never_satisfies_readiness_status() {
             .validate(&receipt, Action::Status, None, None, None)
             .is_err()
     );
+}
+
+/// HACK-2742 review (L4): the interactive requester forwards the owner's
+/// pre-effect wait codes as their own code, because the interactive report
+/// carries only one code; every other owner refusal is wrapped as before.
+#[test]
+fn the_interactive_requester_forwards_only_the_owners_pre_effect_codes() {
+    for code in [
+        "graph_authored_exec_lease_busy",
+        "graph_authored_run_lease_busy",
+        "graph_authored_command_not_started",
+    ] {
+        let forwarded = interactive_owner_refusal(code.to_owned());
+        assert_eq!(forwarded.code, code);
+        assert!(forwarded.cause_code.is_none());
+        assert!(forwarded.session().is_none());
+    }
+    for code in [
+        "provider_busy",
+        "engine_protocol",
+        "native_graph_foreground",
+    ] {
+        let wrapped = interactive_owner_refusal(code.to_owned());
+        assert_eq!(wrapped.code, "native_graph_foreground");
+        assert_eq!(wrapped.cause_code.as_deref(), Some(code));
+    }
+}
+
+/// HACK-2742 review (VM row 4): the owner exited while the requester waited for
+/// the lease (its own `hack down`), so its pin is gone. Every requester failure
+/// before the request is written answers the not-started code: for finite exec
+/// and run as the cause of this module's refusal, for interactive exec as the
+/// report code with no session. Nothing was sent. Status and logs keep theirs.
+#[test]
+fn a_requester_whose_owner_is_gone_before_the_write_answers_not_started() {
+    use crate::provider::{graph::interactive_exec::Options, interactive_terminal::Leash};
+    use std::os::unix::net::UnixStream;
+
+    let fixture = Fixture::new();
+    let receipt = fixture.receipt();
+    // No publication: the owner's pin does not exist.
+    for result in [
+        exec(&fixture.candidate, RUN, "web", &["true".into()], None),
+        one_off(&fixture.candidate, RUN, "web", &["true".into()], None),
+    ] {
+        let error = result.err().unwrap();
+        assert_eq!(error.code, "native_graph_foreground", "{}", error.message);
+        assert_eq!(
+            error.cause_code.as_deref(),
+            Some("graph_authored_command_not_started")
+        );
+    }
+    let status = request(
+        &fixture.candidate,
+        RequestOptions {
+            run: RUN,
+            action: Action::Status,
+        },
+    )
+    .err()
+    .unwrap();
+    assert!(status.cause_code.is_none(), "{}", status.code);
+
+    let (input, mut frontend) = UnixStream::pair().unwrap();
+    frontend.write_all(&[0; 4]).unwrap();
+    let (leash, _) = Leash::receive(input.into()).unwrap();
+    let argv = vec!["tool".into()];
+    let options = Options {
+        session: "12345678-abcd-abcd-abcd-123456789abc",
+        run: RUN,
+        service: "web",
+        owner: &receipt.owner,
+        plan: receipt.review.review_id(),
+        namespace: receipt.review.scope().namespace,
+        native: true,
+        argv: &argv,
+        workdir: None,
+        expected_container: None,
+        expected_generation: None,
+    };
+    let error = interactive(&fixture.candidate, &options, [43, 91], &leash)
+        .err()
+        .unwrap();
+    assert_eq!(error.code, "graph_authored_command_not_started");
+    assert!(error.session().is_none());
+}
+
+/// Wait until the owner's listener holds a connection it has not accepted.
+fn pending_connection(publication: &owner::Publication) {
+    use std::os::fd::AsRawFd;
+    let mut descriptor = libc::pollfd {
+        fd: publication.descriptor().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one valid pollfd for the listener the publication owns.
+    let ready = unsafe { libc::poll(&mut descriptor, 1, 5000) };
+    assert_eq!(ready, 1, "the requester never connected");
+}
+
+/// The owner's normal end: its run saved as removed, then its publication
+/// retired and its listener closed, with any backlog connection unaccepted.
+fn end_through_cleanup(publication: owner::Publication, root: &std::path::Path, receipt: &Receipt) {
+    let mut publication = publication;
+    journal::save(root, &removed(receipt.clone())).unwrap();
+    publication.finish().unwrap();
+    drop(publication);
+}
+
+/// HACK-2742 review, VM row 4 reproduced: the requester connected while the
+/// owner was busy in its own `hack down` cleanup and wrote its request into the
+/// listen backlog; the owner then saved its run removed, retired and closed the
+/// listener without accepting it. Nothing was processed, so finite exec and run
+/// answer not-started instead of an unconfirmed completion.
+#[test]
+fn a_command_left_in_the_backlog_of_an_owner_that_ended_through_cleanup_is_not_started() {
+    for action in [Action::Exec, Action::Run] {
+        let fixture = Fixture::new();
+        let receipt = admitted(fixture.receipt());
+        let publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+        let root = journal::reserve(&fixture.candidate, &receipt).unwrap();
+        std::thread::scope(|scope| {
+            let caller = scope.spawn(|| match action {
+                Action::Exec => exec(&fixture.candidate, RUN, "web", &["true".into()], None),
+                _ => one_off(&fixture.candidate, RUN, "web", &["true".into()], None),
+            });
+            pending_connection(&publication);
+            end_through_cleanup(publication, &root, &receipt);
+            let error = caller.join().unwrap().err().unwrap();
+            assert_eq!(error.code, "native_graph_foreground", "{}", error.message);
+            assert_eq!(
+                error.cause_code.as_deref(),
+                Some("graph_authored_command_not_started")
+            );
+        });
+    }
+}
+
+/// HACK-2742 review: a stale pin whose socket is gone refuses the connect before
+/// anything is sent, so it answers not-started too.
+#[test]
+fn a_stale_pin_with_a_dead_socket_is_not_started() {
+    let fixture = Fixture::new();
+    let receipt = admitted(fixture.receipt());
+    let _publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+    fs::remove_file(fixture.owner_root().join("control.sock")).unwrap();
+    let error = exec(&fixture.candidate, RUN, "web", &["true".into()], None)
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.cause_code.as_deref(),
+        Some("graph_authored_command_not_started")
+    );
+}
+
+/// HACK-2742 review, VM row 4b reproduced: the interactive request left in the
+/// backlog of an owner that ended through cleanup answers not-started with no
+/// session; while that owner is still published, the same unanswered close
+/// stays session-correlated (uncertain).
+#[test]
+fn an_interactive_request_left_in_the_backlog_of_an_ended_owner_is_not_started() {
+    use crate::provider::{graph::interactive_exec::Options, interactive_terminal::Leash};
+    use std::os::unix::net::UnixStream;
+    const SESSION: &str = "12345678-abcd-abcd-abcd-123456789abc";
+    for ended in [true, false] {
+        let fixture = Fixture::new();
+        let receipt = admitted(fixture.receipt());
+        let publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+        let root = journal::reserve(&fixture.candidate, &receipt).unwrap();
+        let (input, mut frontend) = UnixStream::pair().unwrap();
+        frontend.write_all(&[0; 4]).unwrap();
+        let (leash, _) = Leash::receive(input.into()).unwrap();
+        let argv = vec!["tool".into()];
+        let options = Options {
+            session: SESSION,
+            run: RUN,
+            service: "web",
+            owner: &receipt.owner,
+            plan: receipt.review.review_id(),
+            namespace: receipt.review.scope().namespace,
+            native: true,
+            argv: &argv,
+            workdir: None,
+            expected_container: None,
+            expected_generation: None,
+        };
+        std::thread::scope(|scope| {
+            let caller =
+                scope.spawn(|| interactive(&fixture.candidate, &options, [43, 91], &leash));
+            if ended {
+                pending_connection(&publication);
+                end_through_cleanup(publication, &root, &receipt);
+                let error = caller.join().unwrap().err().unwrap();
+                assert_eq!(error.code, "graph_authored_command_not_started");
+                assert!(error.session().is_none());
+            } else {
+                let stream = accepted(&publication, &receipt.review);
+                drop(stream);
+                let error = caller.join().unwrap().err().unwrap();
+                assert_eq!(error.session(), Some(SESSION));
+                let mut publication = publication;
+                publication.finish().unwrap();
+            }
+        });
+    }
+}
+
+/// HACK-2742 review (P1): the not-started proof is the owner's own acceptance of
+/// this request, not its retirement. An owner that took and read the request but
+/// closed without accepting it never started it, even while it stays published.
+#[test]
+fn a_command_the_owner_took_but_never_accepted_is_not_started() {
+    for action in [Action::Exec, Action::Run] {
+        let fixture = Fixture::new();
+        let receipt = admitted(fixture.receipt());
+        let mut publication =
+            owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+        journal::reserve(&fixture.candidate, &receipt).unwrap();
+        std::thread::scope(|scope| {
+            let caller = scope.spawn(|| match action {
+                Action::Exec => exec(&fixture.candidate, RUN, "web", &["true".into()], None),
+                _ => one_off(&fixture.candidate, RUN, "web", &["true".into()], None),
+            });
+            let (stream, input) = taken(&publication, &receipt.review);
+            assert_eq!(input.version, ACCEPTING_VERSION);
+            drop(stream);
+            let error = caller.join().unwrap().err().unwrap();
+            assert_eq!(error.code, "native_graph_foreground");
+            assert_eq!(
+                error.cause_code.as_deref(),
+                Some("graph_authored_command_not_started")
+            );
+        });
+        publication.finish().unwrap();
+    }
+}
+
+/// HACK-2742 review (P1): once the owner accepted a command, a missing or partial
+/// answer stays unconfirmed, even when the owner then ends through its normal
+/// cleanup within moments (the lost-large-reply case Codex found).
+#[test]
+fn an_accepted_command_without_its_reply_stays_unconfirmed() {
+    for case in ["closed-then-cleanup", "partial"] {
+        let fixture = Fixture::new();
+        let receipt = admitted(fixture.receipt());
+        let publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+        let root = journal::reserve(&fixture.candidate, &receipt).unwrap();
+        std::thread::scope(|scope| {
+            let caller =
+                scope.spawn(|| exec(&fixture.candidate, RUN, "web", &["true".into()], None));
+            let mut stream = accepted(&publication, &receipt.review);
+            if case == "partial" {
+                stream.write_all(&[0, 0, 0]).unwrap();
+            }
+            drop(stream);
+            if case == "closed-then-cleanup" {
+                end_through_cleanup(publication, &root, &receipt);
+                let error = caller.join().unwrap().err().unwrap();
+                assert!(error.cause_code.is_none(), "{case}: {}", error.code);
+            } else {
+                let error = caller.join().unwrap().err().unwrap();
+                assert!(error.cause_code.is_none(), "{case}: {}", error.code);
+                let mut publication = publication;
+                publication.finish().unwrap();
+            }
+        });
+    }
+}
+
+/// HACK-2742 review: a backlog request was never accepted, so it is not started
+/// however the publication was then retired, including a dead-owner recovery
+/// that archives the publication files instead of deleting them.
+#[test]
+fn a_backlog_request_is_not_started_whatever_retired_the_publication() {
+    for archive in [
+        "control-feedface.retired.sock",
+        "owner-feedface.retired.json",
+    ] {
+        let fixture = Fixture::new();
+        let receipt = admitted(fixture.receipt());
+        let publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+        let root = journal::reserve(&fixture.candidate, &receipt).unwrap();
+        fs::write(fixture.owner_root().join(archive), b"").unwrap();
+        std::thread::scope(|scope| {
+            let caller =
+                scope.spawn(|| exec(&fixture.candidate, RUN, "web", &["true".into()], None));
+            pending_connection(&publication);
+            end_through_cleanup(publication, &root, &receipt);
+            let error = caller.join().unwrap().err().unwrap();
+            assert_eq!(error.code, "native_graph_foreground", "{archive}");
+            assert_eq!(
+                error.cause_code.as_deref(),
+                Some("graph_authored_command_not_started"),
+                "{archive}"
+            );
+        });
+    }
+}
+
+/// HACK-2742 review: the interactive request the owner accepted and then left
+/// unanswered stays session-correlated (uncertain); the one it took without
+/// accepting is not started, with no session, while the owner is still published.
+/// A close of this side's own stream by the leash watcher, once the frontend is
+/// gone, is never read as the owner's close.
+#[test]
+fn an_interactive_request_is_not_started_only_without_the_owners_acceptance() {
+    use crate::provider::{graph::interactive_exec::Options, interactive_terminal::Leash};
+    use std::os::unix::net::UnixStream;
+    const SESSION: &str = "12345678-abcd-abcd-abcd-123456789abc";
+    for case in ["accepted", "not-accepted", "frontend-gone"] {
+        let fixture = Fixture::new();
+        let receipt = admitted(fixture.receipt());
+        let mut publication =
+            owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+        journal::reserve(&fixture.candidate, &receipt).unwrap();
+        let (input, mut frontend) = UnixStream::pair().unwrap();
+        frontend.write_all(&[0; 4]).unwrap();
+        let (leash, _) = Leash::receive(input.into()).unwrap();
+        let argv = vec!["tool".into()];
+        let options = Options {
+            session: SESSION,
+            run: RUN,
+            service: "web",
+            owner: &receipt.owner,
+            plan: receipt.review.review_id(),
+            namespace: receipt.review.scope().namespace,
+            native: true,
+            argv: &argv,
+            workdir: None,
+            expected_container: None,
+            expected_generation: None,
+        };
+        std::thread::scope(|scope| {
+            let caller =
+                scope.spawn(|| interactive(&fixture.candidate, &options, [43, 91], &leash));
+            let error = match case {
+                "accepted" => {
+                    drop(accepted(&publication, &receipt.review));
+                    caller.join().unwrap().err().unwrap()
+                }
+                "not-accepted" => {
+                    drop(taken(&publication, &receipt.review));
+                    caller.join().unwrap().err().unwrap()
+                }
+                _ => {
+                    // The owner holds the request unanswered while the frontend
+                    // goes away; the watcher then shuts this side down.
+                    let (stream, _) = taken(&publication, &receipt.review);
+                    drop(frontend);
+                    let error = caller.join().unwrap().err().unwrap();
+                    drop(stream);
+                    error
+                }
+            };
+            if case == "not-accepted" {
+                assert_eq!(error.code, "graph_authored_command_not_started");
+                assert!(error.session().is_none());
+            } else {
+                assert_ne!(error.code, "graph_authored_command_not_started", "{case}");
+                assert_eq!(error.session(), Some(SESSION), "{case}");
+            }
+        });
+        publication.finish().unwrap();
+    }
+}
+
+/// HACK-2742 review (P1): a command reply at the output cap, 1 MiB on each
+/// stream (1,398,104 bytes of base64 each), is beyond the request bound and was
+/// lost before any byte was sent. The owner's reply writer now delivers it, and
+/// the requester reads it whole.
+#[test]
+fn a_command_reply_at_the_output_cap_is_delivered() {
+    use base64::Engine as _;
+    let fixture = Fixture::new();
+    let mut receipt = fixture.receipt();
+    receipt.phase = Phase::ReadyObserved;
+    for (index, resource) in receipt.resources.values_mut().enumerate() {
+        resource.id = Some(format!("{:064x}", index + 1));
+        resource.phase = if resource.kind == Kind::Container {
+            "started"
+        } else {
+            "created"
+        }
+        .into();
+    }
+    let stream_at_cap = base64::engine::general_purpose::STANDARD.encode(vec![0xA5; 1024 * 1024]);
+    assert_eq!(stream_at_cap.len(), 1_398_104);
+    let reply = Reply {
+        version: 2,
+        kind: ReplyKind::NativeGraphControlReply,
+        run: RUN.into(),
+        review: receipt.review.review_id().into(),
+        result: Outcome::Exec {
+            exec: runtime::ServiceExec {
+                receipt: receipt.clone(),
+                service: "web".into(),
+                container: receipt.resources["container:web"].id.clone().unwrap(),
+                exit_code: 0,
+                stdout_base64: stream_at_cap.clone(),
+                stderr_base64: stream_at_cap.clone(),
+                truncated: true,
+            },
+        },
+    };
+    // The request bound cannot carry it: this was the lost reply.
+    let (mut small, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    assert!(transport::write(&mut small, &reply, Duration::from_secs(1)).is_err());
+
+    let mut publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+    journal::reserve(&fixture.candidate, &receipt).unwrap();
+    std::thread::scope(|scope| {
+        let caller = scope.spawn(|| exec(&fixture.candidate, RUN, "web", &["true".into()], None));
+        let mut stream = accepted(&publication, &receipt.review);
+        let selected = runtime::ExecSelection {
+            service: "web".into(),
+            argv: vec!["true".into()],
+            workdir: None,
+        };
+        reply
+            .validate(&receipt, Action::Exec, None, Some(&selected), None)
+            .unwrap();
+        deliver_reply(&mut stream, &reply, Action::Exec).unwrap();
+        let value = caller.join().unwrap().unwrap();
+        assert_eq!(
+            value["result"]["exec"]["stdout_base64"],
+            stream_at_cap.as_str()
+        );
+        assert_eq!(
+            value["result"]["exec"]["stderr_base64"],
+            stream_at_cap.as_str()
+        );
+    });
+    publication.finish().unwrap();
+}
+
+/// A ready receipt whose containers have engine ids, as the finite wire tests use.
+fn ready_receipt(fixture: &Fixture) -> Receipt {
+    let mut receipt = fixture.receipt();
+    receipt.phase = Phase::ReadyObserved;
+    for (index, resource) in receipt.resources.values_mut().enumerate() {
+        resource.id = Some(format!("{:064x}", index + 1));
+        resource.phase = if resource.kind == Kind::Container {
+            "started"
+        } else {
+            "created"
+        }
+        .into();
+    }
+    receipt
+}
+
+/// HACK-2742 review (M1): an owner started by an earlier prerelease publishes
+/// record version 4 and serves only version-2 commands. The requester sends it
+/// version 2 with no acceptance byte expected, so exec and run work as before.
+#[test]
+fn an_owner_from_before_the_upgrade_still_runs_exec_and_run() {
+    for action in [Action::Exec, Action::Run] {
+        let fixture = Fixture::new();
+        let receipt = ready_receipt(&fixture);
+        let mut publication =
+            owner::Publication::bind_legacy(&fixture.candidate, &receipt.review).unwrap();
+        journal::reserve(&fixture.candidate, &receipt).unwrap();
+        assert!(
+            !owner::Pin::load(&fixture.candidate, RUN)
+                .unwrap()
+                .accepts_commands()
+        );
+        std::thread::scope(|scope| {
+            let caller = scope.spawn(|| match action {
+                Action::Exec => exec(&fixture.candidate, RUN, "web", &["true".into()], None),
+                _ => one_off(&fixture.candidate, RUN, "web", &["true".into()], None),
+            });
+            let (mut stream, input) = taken(&publication, &receipt.review);
+            // The version an old owner validates: it would close on any other.
+            assert_eq!(input.version, 2);
+            let container = receipt.resources["container:web"].id.clone().unwrap();
+            let result = match action {
+                Action::Exec => Outcome::Exec {
+                    exec: runtime::ServiceExec {
+                        receipt: receipt.clone(),
+                        service: "web".into(),
+                        container,
+                        exit_code: 17,
+                        stdout_base64: "AP9B".into(),
+                        stderr_base64: String::new(),
+                        truncated: false,
+                    },
+                },
+                _ => Outcome::OneOff {
+                    one_off: runtime::ServiceRun {
+                        receipt: receipt.clone(),
+                        service: "web".into(),
+                        member: container,
+                        container: "f".repeat(64),
+                        name: format!("hkn-{RUN}-oneoff-{}", "a".repeat(32)),
+                        exit_code: 17,
+                        stdout_base64: "AP9B".into(),
+                        stderr_base64: String::new(),
+                        truncated: false,
+                    },
+                },
+            };
+            let reply = Reply {
+                version: 2,
+                kind: ReplyKind::NativeGraphControlReply,
+                run: RUN.into(),
+                review: receipt.review.review_id().into(),
+                result,
+            };
+            // An old owner wrote replies with the request bound.
+            transport::write(&mut stream, &reply, Duration::from_secs(2)).unwrap();
+            let value = caller.join().unwrap().unwrap();
+            let key = if action == Action::Exec {
+                "exec"
+            } else {
+                "one_off"
+            };
+            assert_eq!(value["result"][key]["exit_code"], 17, "{key}");
+        });
+        publication.finish().unwrap();
+    }
+}
+
+/// HACK-2742 review (M1): against an owner from before the upgrade, a close
+/// after the write proves nothing, so it stays unconfirmed (it was not started
+/// before the fix either way; only the new proof is missing).
+#[test]
+fn an_owner_from_before_the_upgrade_gets_no_not_started_proof() {
+    let fixture = Fixture::new();
+    let receipt = admitted(fixture.receipt());
+    let mut publication =
+        owner::Publication::bind_legacy(&fixture.candidate, &receipt.review).unwrap();
+    journal::reserve(&fixture.candidate, &receipt).unwrap();
+    std::thread::scope(|scope| {
+        let caller = scope.spawn(|| exec(&fixture.candidate, RUN, "web", &["true".into()], None));
+        drop(taken(&publication, &receipt.review));
+        let error = caller.join().unwrap().err().unwrap();
+        assert!(error.cause_code.is_none(), "{}", error.code);
+    });
+    publication.finish().unwrap();
+}
+
+/// HACK-2742 review (L2): the real per-request step of the owner's loop sends the
+/// acceptance byte before any effect. While another project's stop holds the
+/// provider lease, the requester receives the byte; at that moment the owner has
+/// not taken the lease, not touched the journal and written no one-off record,
+/// and it is still waiting. Its pending signal then ends the wait, and it
+/// answers not started.
+#[test]
+fn the_owner_loop_accepts_a_command_before_any_effect() {
+    use crate::provider::engine::command_lease_tests::hold_lease_as_project_stop;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for action in [Action::Exec, Action::Run] {
+        let fixture = Fixture::new();
+        let receipt = ready_receipt(&fixture);
+        let publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+        let root = journal::reserve(&fixture.candidate, &receipt).unwrap();
+        journal::save(&root, &receipt).unwrap();
+        // The journal root (its `state.json` and any `one-off` record directory).
+        let snapshot = || {
+            let mut names: Vec<String> = fs::read_dir(&root)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            (names, fs::read(root.join("state.json")).unwrap())
+        };
+        let journal_before = snapshot();
+        let prepared = fixture.prepared();
+        let read_pin = prepared.read_pin();
+        // A running pool, so the owner's engine reaches its lease wait (without
+        // one it refuses `runtime_not_running` first).
+        let mut pool = state::Owner::create(
+            &fixture.candidate,
+            crate::provider::Profile::Development,
+            None,
+            Default::default(),
+        )
+        .unwrap();
+        let pool_alias = pool.short_home.clone();
+        pool.phase = "running".into();
+        pool.guest_boot_id = Some("a1234567-1234-4123-8123-a12345678901".into());
+        pool.save(&fixture.candidate).unwrap();
+        let (release, holder) =
+            hold_lease_as_project_stop(&fixture.candidate, Duration::from_secs(30));
+        let signalled = AtomicBool::new(false);
+        let pending = || signalled.load(Ordering::Acquire);
+        let clean = || Err(refused());
+        let review = receipt.review.clone();
+        std::thread::scope(|scope| {
+            let owner = scope.spawn(|| {
+                let served = Loop {
+                    candidate: &fixture.candidate,
+                    review: &review,
+                    run: RUN,
+                    receipt: &receipt,
+                    publication: &publication,
+                    read_pin: &read_pin,
+                    pending: &pending,
+                    clean: &clean,
+                };
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let stream = loop {
+                    if let Some(stream) = publication.accept().unwrap() {
+                        break stream;
+                    }
+                    assert!(Instant::now() < deadline);
+                    std::thread::sleep(Duration::from_millis(5));
+                };
+                matches!(served.answer(stream), Ok(Answered::Next))
+            });
+            let pin = owner::Pin::load(&fixture.candidate, RUN).unwrap();
+            assert!(pin.accepts_commands());
+            let mut stream = pin.connect().unwrap();
+            let selected = runtime::ExecSelection {
+                service: "web".into(),
+                argv: vec!["true".into()],
+                workdir: None,
+            };
+            let request = Request {
+                version: ACCEPTING_VERSION,
+                kind: RequestKind::NativeGraphControl,
+                run: RUN.into(),
+                review: review.review_id().into(),
+                action,
+                console_size: None,
+                session: None,
+                logs: None,
+                exec: (action == Action::Exec).then(|| selected.clone()),
+                one_off: (action == Action::Run).then(|| runtime::RunSelection {
+                    service: "web".into(),
+                    argv: vec!["true".into()],
+                    workdir: None,
+                }),
+            };
+            transport::write(&mut stream, &request, Duration::from_secs(2)).unwrap();
+            let marker =
+                transport::receive_marker(&stream, Instant::now() + Duration::from_secs(5))
+                    .unwrap();
+            assert_eq!(marker, Some(ACCEPTED));
+            // Nothing effectful yet: the lease is still the stop's (the holder has
+            // not been released), the journal is unchanged, there is no one-off
+            // record, and the owner has not answered.
+            assert!(!holder.is_finished());
+            assert_eq!(snapshot(), journal_before);
+            assert!(!root.join("one-off").exists());
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(
+                !owner.is_finished(),
+                "the owner answered before its lease wait"
+            );
+            // Its pending signal ends the wait before acquisition: not started.
+            signalled.store(true, Ordering::Release);
+            let reply: Reply =
+                transport::read(&mut stream, Duration::from_secs(5), COMMAND_REPLY_LIMIT).unwrap();
+            assert!(owner.join().unwrap());
+            match reply.result {
+                Outcome::Refused { code, .. } => {
+                    assert_eq!(code, "graph_authored_command_not_started", "{code}")
+                }
+                _ => panic!("expected the owner's not-started refusal"),
+            }
+        });
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        let mut publication = publication;
+        publication.finish().unwrap();
+        if fs::read_link(&pool_alias).is_ok_and(|target| target.starts_with(&fixture.root)) {
+            fs::remove_file(&pool_alias).unwrap();
+        }
+    }
 }

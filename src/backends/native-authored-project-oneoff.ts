@@ -17,7 +17,13 @@ import {
   withPinnedRuntimeBinary,
 } from "./native-authored-runtime-binary.ts";
 import {
+  NATIVE_AUTHORED_COMMAND_REQUEST_TIMEOUT_MS,
+  nativeAuthoredCommandNotRun,
+  nativeCommandLeaseWaitReporter,
+} from "./native-command-lease.ts";
+import {
   invokeNativeRuntime,
+  NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
@@ -133,6 +139,8 @@ export async function nativeAuthoredProjectRun(input: {
   readonly invoke?: typeof invokeNativeRuntime;
   /** Control seam; production uses the held saved-read owner. */
   readonly withStatus?: typeof withNativeAuthoredProjectStatus;
+  /** The lease-wait progress line; the CLI prints it once (HACK-2742). */
+  readonly onLeaseWait?: (holder: string) => void;
 }): Promise<NativeAuthoredOneOff> {
   const runtime = { ...input.runtime },
     scope = { ...input.scope },
@@ -141,6 +149,7 @@ export async function nativeAuthoredProjectRun(input: {
     workdir = input.workdir,
     signal = input.signal,
     invoke = input.invoke ?? invokeNativeRuntime,
+    onLeaseWait = nativeCommandLeaseWaitReporter({ given: input.onLeaseWait }),
     withStatus = input.withStatus ?? withNativeAuthoredProjectStatus;
   const active = () => {
     if (signal?.aborted) {
@@ -175,26 +184,41 @@ export async function nativeAuthoredProjectRun(input: {
         await check();
         // No await separates this final path/descriptor admission from real spawn.
         pin.checkSync();
-        const value = await invoke({
-          runtime,
-          cwd: scope.projectRoot,
-          args: [
-            "graph",
-            "native",
-            "one-off",
-            "--run-id",
-            receipt.review.provenance.run,
-            "--service",
-            service,
-            ...(workdir === undefined ? [] : ["--workdir", workdir]),
-            "--json",
-            "--",
-            ...command,
-          ],
-          timeoutMs: 45_000,
-          signal,
-          boundNativeAuthoredOneOffDrain: true,
-        });
+        let value: unknown;
+        try {
+          value = await invoke({
+            runtime,
+            cwd: scope.projectRoot,
+            args: [
+              "graph",
+              "native",
+              "one-off",
+              "--run-id",
+              receipt.review.provenance.run,
+              "--service",
+              service,
+              ...(workdir === undefined ? [] : ["--workdir", workdir]),
+              "--json",
+              "--",
+              ...command,
+            ],
+            // The requesting process first waits up to 35 s for a free provider
+            // lease, which another project's stop holds for its whole stop
+            // (HACK-2742), then sends and reads the owner's answer for 40 s.
+            timeoutMs: NATIVE_AUTHORED_COMMAND_REQUEST_TIMEOUT_MS,
+            signal,
+            onLeaseWait,
+            boundNativeAuthoredOneOffDrain: true,
+          });
+        } catch (error) {
+          // Returned, not thrown: the held saved-status owner reports any
+          // failure thrown inside it as an unconfirmed artifact failure.
+          const notRun = await nativeAuthoredCommandNotRun(error, "hack run");
+          if (notRun) {
+            return notRun;
+          }
+          throw error;
+        }
         await check();
         const result = parseNativeAuthoredOneOff(value, receipt, service);
         await check();
@@ -203,7 +227,11 @@ export async function nativeAuthoredProjectRun(input: {
     );
   });
   active();
-  if (result instanceof NativeAuthoredProjectNotStartedError) {
+  if (
+    result instanceof NativeAuthoredProjectNotStartedError ||
+    // Only a refusal that nothing ran is returned as this type (HACK-2742).
+    result instanceof NativeRuntimeRequestError
+  ) {
     throw result;
   }
   return result;

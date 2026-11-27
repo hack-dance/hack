@@ -17,6 +17,7 @@
  * the lease is taken again before the owner acquires it, the owner's own short
  * wait ends in a pre-effect code that also reads as "nothing ran".
  */
+import { noteNativeExitConfirmed } from "../lib/background-command/native-exit.ts";
 import { NativeRuntimeRequestError } from "./native-runtime-client.ts";
 import {
   NATIVE_START_LEASE_WAIT_SECONDS,
@@ -27,6 +28,14 @@ import {
 /** The runtime's `COMMAND_REQUEST_LEASE_WAIT`, which is its `START_LEASE_WAIT`. */
 export const NATIVE_COMMAND_LEASE_WAIT_SECONDS =
   NATIVE_START_LEASE_WAIT_SECONDS;
+
+/**
+ * The bound of an authored `graph native exec` or `graph native one-off`
+ * request: the requesting process's lease wait (35 s, HACK-2739, HACK-2742),
+ * 5 s to send, the fixed 40 s read of the owner's answer, and a 5 s margin.
+ */
+export const NATIVE_AUTHORED_COMMAND_REQUEST_TIMEOUT_MS =
+  (NATIVE_COMMAND_LEASE_WAIT_SECONDS + 5 + 40 + 5) * 1000;
 
 /** The commands whose requesting process waits this bound, as the user ran them. */
 export type NativeLeaseCommand = "hack exec" | "hack run";
@@ -165,21 +174,149 @@ export function nativeCommandLeaseRefusal(opts: {
   readonly nativeCode?: string;
   readonly nativeCauseCode?: string;
 }): NativeRuntimeRequestError {
-  const holder = nativeStartLeaseHolder(opts.nativeMessage);
-  const outcome =
-    opts.stage === "exec" ? "the command did not run" : "nothing ran";
   const error = new NativeRuntimeRequestError({
     nativeCode: opts.nativeCode ?? "provider_busy",
     nativeCauseCode: opts.nativeCauseCode,
     nativeMessage: opts.nativeMessage,
-    message: [
-      `${opts.command} could not acquire the native runtime lock (provider_busy); ${outcome}.`,
-      `Holder: ${holder ?? "unavailable"}.`,
-      holder
-        ? `Retry ${opts.command} once that ${holder} finishes.`
-        : `Retry ${opts.command} once the holder finishes.`,
-    ].join("\n"),
+    message: nativeCommandLeaseRefusalMessage({
+      command: opts.command,
+      stage: opts.stage,
+      holder: nativeStartLeaseHolder(opts.nativeMessage),
+    }),
   });
   notRunRefusals.add(error);
   return error;
+}
+
+/**
+ * The three lines of a lease refusal; `holder` is the recorded holder's words
+ * (`project stop`), or undefined when no holder is known.
+ */
+export function nativeCommandLeaseRefusalMessage(opts: {
+  readonly command: NativeLeaseCommand;
+  readonly stage: NativeLeaseStage;
+  readonly holder: string | undefined;
+}): string {
+  const outcome =
+    opts.stage === "exec" ? "the command did not run" : "nothing ran";
+  return [
+    `${opts.command} could not acquire the native runtime lock (provider_busy); ${outcome}.`,
+    `Holder: ${opts.holder ?? "unavailable"}.`,
+    opts.holder
+      ? `Retry ${opts.command} once that ${opts.holder} finishes.`
+      : `Retry ${opts.command} once the holder finishes.`,
+  ].join("\n");
+}
+
+/**
+ * The authored owner's answer when its own lease wait for a one-off `hack run`
+ * expired (`OWNER_RUN_LEASE_BUSY` in `native/runtime/exec.rs`, HACK-2742).
+ */
+export const NATIVE_OWNER_AUTHORED_RUN_LEASE_BUSY =
+  "graph_authored_run_lease_busy";
+
+/**
+ * The authored owner's answer when its own check (a pending signal, its
+ * `hack down`, a changed publication or pin) ended an exec or run before it
+ * took the lease (`OWNER_COMMAND_NOT_STARTED`, HACK-2742). The requester gives
+ * the same code when it failed before it wrote its request, for example because
+ * the owner exited during the requester's lease wait (VM row 4). Nothing ran.
+ */
+export const NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED =
+  "graph_authored_command_not_started";
+
+const OWNER_LEASE_CODES: readonly string[] = [
+  NATIVE_OWNER_AUTHORED_EXEC_LEASE_BUSY,
+  NATIVE_OWNER_AUTHORED_RUN_LEASE_BUSY,
+];
+
+/** The two lines of an authored command its owner ended before it started. */
+export function nativeCommandNotStartedMessage(
+  command: NativeLeaseCommand
+): string {
+  return [
+    `${command} did not start: the project's owner stopped or changed before the command was sent or started (${NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED}); nothing ran.`,
+    `Check hack ps, then retry ${command} once the project is up.`,
+  ].join("\n");
+}
+
+/**
+ * The CLI message for an authored owner's pre-effect code, as an interactive
+ * exec's report or a finite request's cause carries it, or undefined for any
+ * other code (HACK-2742).
+ */
+export function nativeOwnerPreEffectMessage(
+  code: string,
+  command: NativeLeaseCommand
+): string | undefined {
+  if (code === NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED) {
+    return nativeCommandNotStartedMessage(command);
+  }
+  if (OWNER_LEASE_CODES.includes(code)) {
+    return nativeCommandLeaseRefusalMessage({
+      command,
+      stage: "authored",
+      holder: undefined,
+    });
+  }
+  return;
+}
+
+/**
+ * The plain refusal for an authored exec or one-off run that never started
+ * (HACK-2739, HACK-2742), or undefined. Three refusals are pre-effect: the
+ * requesting process's own lease wait, which ends before anything is sent (a
+ * raw `provider_busy` that names the holder), the owner's own lease wait, and
+ * the owner's own check ending that wait (each an owner code, forwarded as the
+ * cause of `native_graph_foreground`, naming no holder). Every other failure
+ * keeps the unconfirmed report. The refusal keeps the wire code and cause as
+ * they arrived, and is marked as not run.
+ */
+export function nativeAuthoredCommandNotRunRefusal(
+  error: unknown,
+  command: NativeLeaseCommand
+): NativeRuntimeRequestError | undefined {
+  if (isNativeCommandLeaseRefusal(error)) {
+    return nativeCommandLeaseRefusal({
+      nativeMessage: error.nativeMessage,
+      command,
+      stage: "authored",
+    });
+  }
+  if (
+    !(
+      error instanceof NativeRuntimeRequestError &&
+      error.nativeCode === "native_graph_foreground" &&
+      error.nativeCauseCode !== undefined
+    )
+  ) {
+    return;
+  }
+  const message = nativeOwnerPreEffectMessage(error.nativeCauseCode, command);
+  if (!message) {
+    return;
+  }
+  const refusal = new NativeRuntimeRequestError({
+    nativeCode: error.nativeCode,
+    nativeCauseCode: error.nativeCauseCode,
+    message,
+  });
+  notRunRefusals.add(refusal);
+  return refusal;
+}
+
+/**
+ * {@link nativeAuthoredCommandNotRunRefusal}, and for a refusal also release a
+ * native background command's admission slot: no guest process exists for a
+ * command that never ran, as for the Compose exec.
+ */
+export async function nativeAuthoredCommandNotRun(
+  error: unknown,
+  command: NativeLeaseCommand
+): Promise<NativeRuntimeRequestError | undefined> {
+  const refusal = nativeAuthoredCommandNotRunRefusal(error, command);
+  if (refusal) {
+    await noteNativeExitConfirmed();
+  }
+  return refusal;
 }

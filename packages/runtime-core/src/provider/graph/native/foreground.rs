@@ -22,6 +22,105 @@ fn refused() -> CandidateError {
         "Native foreground ownership is changed, unavailable or uncertain; its exact evidence was preserved. Use tagged native control for a live owner; no recovery or replay was attempted.",
     )
 }
+/// A finite command's requester failed before it wrote its request (HACK-2742
+/// review): nothing was sent, so nothing ran. It reaches the CLI as the owner's
+/// not-started code under this module's refusal, as the owner's own refusal
+/// does. Failures after the write keep their codes ("unconfirmed").
+fn command_not_sent(_error: CandidateError) -> CandidateError {
+    refused().with_cause_code(runtime::OWNER_COMMAND_NOT_STARTED.to_owned())
+}
+
+/// The request version of a command (exec, interactive exec, one-off run) that
+/// the owner accepts before it starts (HACK-2742 review). Status, observe, logs
+/// and cleanup keep version 2, as does any request from an older requester. An
+/// older owner would refuse this version by closing, so a requester sends it
+/// only to an owner whose publication advertises acceptance
+/// (`owner::ACCEPTING_RECORD_VERSION`); any other owner gets version 2, as before.
+const ACCEPTING_VERSION: u32 = 3;
+
+/// The byte an owner sends for an [`ACCEPTING_VERSION`] command after it read
+/// and validated the request and before any effect: no lease wait, journal
+/// read, container contact or session admission comes first, and an owner that
+/// cannot queue the byte drops the request unstarted. So a requester that sees
+/// the connection close with no byte at all has proof, for this request alone,
+/// that nothing ran: the owner never took it from its listen backlog, refused
+/// it, or ended before accepting it. Retirement or receipts are not needed for
+/// that proof; any close after this byte stays unconfirmed.
+const ACCEPTED: u8 = 0xAC;
+
+/// A command reply: two streams of up to 1 MiB in base64 (1,398,104 bytes each,
+/// `runtime::exec::valid_stream`) with one receipt (at most
+/// `state::MAX_RECEIPT_BYTES`) and a small envelope. The request bound used by
+/// [`transport::write`] is smaller, and an oversized reply would fail to
+/// serialize with nothing sent (HACK-2742 review).
+const COMMAND_REPLY_LIMIT: usize = 4 * 1024 * 1024;
+const _: () = assert!(
+    2 * 1_398_104 + crate::provider::state::MAX_RECEIPT_BYTES as usize + 64 * 1024
+        < COMMAND_REPLY_LIMIT
+);
+
+/// Write the owner's reply. A command reply has its own bound. A failed write
+/// leaves the requester with an accepted request and no answer, which it reports
+/// as unconfirmed; the failure is also reported value-free on the owner's
+/// standard error, so it is not silent.
+fn deliver_reply(
+    stream: &mut std::os::unix::net::UnixStream,
+    reply: &Reply,
+    action: Action,
+) -> Result<(), CandidateError> {
+    let written = if action.command() {
+        transport::write_limited(stream, reply, Duration::from_secs(5), COMMAND_REPLY_LIMIT)
+    } else {
+        transport::write(stream, reply, Duration::from_secs(5))
+    };
+    if let Err(error) = &written {
+        eprintln!(
+            "Native graph owner could not deliver its {} reply ({}); the requester reports the outcome unconfirmed.",
+            action.word(),
+            error.code
+        );
+    }
+    written
+}
+
+/// For an [`ACCEPTING_VERSION`] command, wait for the owner's [`ACCEPTED`] byte.
+/// `Ok(false)` is the proof that the owner closed with no byte, so nothing ran;
+/// `Ok(true)` means it accepted and the reply follows. Any other byte, a timeout
+/// or another error is unconfirmed.
+fn owner_accepted(
+    stream: &std::os::unix::net::UnixStream,
+    deadline: Instant,
+) -> Result<bool, CandidateError> {
+    match transport::receive_marker(stream, deadline)? {
+        None => Ok(false),
+        Some(ACCEPTED) => Ok(true),
+        Some(_) => Err(refused()),
+    }
+}
+
+/// [`command_not_sent`] for an interactive exec, whose value-free report
+/// carries one code, so the owner's not-started code is that code.
+fn interactive_not_sent(_error: CandidateError) -> CandidateError {
+    CandidateError::new(
+        runtime::OWNER_COMMAND_NOT_STARTED,
+        "The interactive exec was not sent to its owner; nothing ran.",
+    )
+}
+
+/// The requester's answer for an owner's pre-intent `Refused { code }` of an
+/// interactive exec. The owner's pre-effect wait codes keep their own code,
+/// because the interactive report carries only one code and the CLI reads it
+/// as "nothing ran" (HACK-2742). Every other code is wrapped as before.
+fn interactive_owner_refusal(code: String) -> CandidateError {
+    match runtime::owner_pre_effect_code(&code) {
+        Some(known) => CandidateError::new(
+            known,
+            "The owner refused the interactive exec before it started; nothing ran.",
+        ),
+        None => refused().with_cause_code(code),
+    }
+}
+
 /// Whether the run's foreground owner process is still running (see `owner::holds_lock`).
 pub(in crate::provider) fn owner_running(candidate: &Candidate, run: &str) -> Option<bool> {
     owner::holds_lock(candidate, run)
@@ -43,6 +142,23 @@ pub enum Action {
     Exec,
     InteractiveExec,
     Run,
+}
+impl Action {
+    /// A command the owner runs: these carry [`ACCEPTING_VERSION`].
+    fn command(self) -> bool {
+        matches!(self, Self::Exec | Self::InteractiveExec | Self::Run)
+    }
+    fn word(self) -> &'static str {
+        match self {
+            Self::Status => "status",
+            Self::Observe => "observe",
+            Self::Cleanup => "cleanup",
+            Self::Logs => "logs",
+            Self::Exec => "exec",
+            Self::InteractiveExec => "interactive exec",
+            Self::Run => "run",
+        }
+    }
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -87,7 +203,7 @@ struct Request {
 }
 impl Request {
     fn validate(&self, review: &native_input::Review) -> Result<(), CandidateError> {
-        if self.version != 2
+        if !(self.version == 2 || self.version == ACCEPTING_VERSION && self.action.command())
             || self.run != review.scope().run
             || self.review != review.review_id()
             || match self.session.as_deref() {
@@ -458,18 +574,84 @@ pub fn serve_with_storage_tool(
             }
             _ => {}
         }
-        let Some(mut stream) = publication.accept()? else {
+        let Some(stream) = publication.accept()? else {
             continue;
         };
+        let served = Loop {
+            candidate,
+            review: &review,
+            run: &run,
+            receipt: &receipt,
+            publication: &publication,
+            read_pin: &read_pin,
+            pending: &|| signals.pending(),
+            clean: &clean,
+        };
+        if let Answered::Cleaned { mut stream, reply } = served.answer(stream)? {
+            // Retire before writing on the retained authenticated stream. Clients
+            // verify both absent publication paths and the exact durable Removed journal.
+            publication.finish()?;
+            let _ = deliver_reply(&mut stream, &reply, Action::Cleanup);
+            let Outcome::Cleaned { receipt } = reply.result else {
+                return Err(refused());
+            };
+            return Ok(receipt);
+        }
+    }
+}
+
+/// What the owner's loop answers one request with (HACK-2742 review): its
+/// context is borrowed from the loop, so one real request can be driven
+/// through it in a test.
+struct Loop<'a> {
+    candidate: &'a Candidate,
+    review: &'a native_input::Review,
+    run: &'a str,
+    receipt: &'a Receipt,
+    publication: &'a owner::Publication,
+    read_pin: &'a selection::ReadPin,
+    /// A pending signal of the owner (its Ctrl-C or `hack down`).
+    pending: &'a dyn Fn() -> bool,
+    clean: &'a dyn Fn() -> Result<Receipt, CandidateError>,
+}
+enum Answered {
+    /// The request was answered or dropped; serve the next one.
+    Next,
+    /// A cleanup completed: the loop retires the publication, then replies.
+    Cleaned {
+        stream: std::os::unix::net::UnixStream,
+        reply: Box<Reply>,
+    },
+}
+impl Loop<'_> {
+    fn answer(
+        &self,
+        mut stream: std::os::unix::net::UnixStream,
+    ) -> Result<Answered, CandidateError> {
+        let (candidate, receipt, run, publication, read_pin, pending) = (
+            self.candidate,
+            self.receipt,
+            self.run,
+            self.publication,
+            self.read_pin,
+            self.pending,
+        );
         let request: Request =
             match transport::read(&mut stream, Duration::from_secs(5), 512 * 1024) {
                 Ok(request) => request,
-                Err(_) => continue,
+                Err(_) => return Ok(Answered::Next),
             };
-        if request.validate(&review).is_err() {
-            continue;
+        if request.validate(self.review).is_err() {
+            return Ok(Answered::Next);
         }
         publication.verify()?;
+        // HACK-2742 review: accept the command before any effect. If the byte
+        // cannot be queued (the requester is gone), drop the request unstarted.
+        if request.version == ACCEPTING_VERSION
+            && transport::send_marker(&stream, ACCEPTED, Duration::from_secs(5)).is_err()
+        {
+            return Ok(Answered::Next);
+        }
         let mut attached = None;
         let result = match request.action {
             Action::InteractiveExec => {
@@ -477,14 +659,14 @@ pub fn serve_with_storage_tool(
                 let client = transport::ClientWatch::half_closed(&stream)?;
                 let check = || {
                     publication.verify()?;
-                    if signals.pending() || client.disconnected() {
+                    if pending() || client.disconnected() {
                         return Err(refused());
                     }
                     read_pin.verify(candidate)
                 };
                 match runtime::interactive_exec(
                     candidate,
-                    &receipt,
+                    receipt,
                     selected,
                     request.console_size.ok_or_else(refused)?,
                     request.session.as_deref().ok_or_else(refused)?,
@@ -503,33 +685,33 @@ pub fn serve_with_storage_tool(
                     Err(error) => Err(error),
                 }
             }
-            Action::Status => inspect(candidate, &run).map(|snapshot| Outcome::Status { snapshot }),
+            Action::Status => inspect(candidate, run).map(|snapshot| Outcome::Status { snapshot }),
             Action::Observe => {
-                runtime::status(candidate, &run).map(|snapshot| Outcome::Observed { snapshot })
+                runtime::status(candidate, run).map(|snapshot| Outcome::Observed { snapshot })
             }
-            Action::Cleanup => clean().map(|receipt| Outcome::Cleaned { receipt }),
+            Action::Cleanup => (self.clean)().map(|receipt| Outcome::Cleaned { receipt }),
             Action::Exec => {
                 let selected = request.exec.as_ref().ok_or_else(refused)?;
                 let check = || {
                     publication.verify()?;
-                    if signals.pending() {
+                    if pending() {
                         return Err(refused());
                     }
                     read_pin.verify(candidate)
                 };
-                runtime::service_exec(candidate, &receipt, selected, &check)
+                runtime::service_exec(candidate, receipt, selected, &check)
                     .map(|exec| Outcome::Exec { exec })
             }
             Action::Run => {
                 let selected = request.one_off.as_ref().ok_or_else(refused)?;
                 let check = || {
                     publication.verify()?;
-                    if signals.pending() {
+                    if pending() {
                         return Err(refused());
                     }
                     read_pin.verify(candidate)
                 };
-                runtime::service_run(candidate, &receipt, selected, &check)
+                runtime::service_run(candidate, receipt, selected, &check)
                     .map(|one_off| Outcome::OneOff { one_off })
             }
             Action::Logs => {
@@ -538,7 +720,7 @@ pub fn serve_with_storage_tool(
                     publication.verify()?;
                     read_pin.verify(candidate)
                 };
-                runtime::logs(candidate, &receipt, &logs.service, logs.tail, &check)
+                runtime::logs(candidate, receipt, &logs.service, logs.tail, &check)
                     .map(|logs| Outcome::Logs { logs })
             }
         };
@@ -550,26 +732,22 @@ pub fn serve_with_storage_tool(
         let reply = Reply {
             version: 2,
             kind: ReplyKind::NativeGraphControlReply,
-            run: run.clone(),
-            review: review.review_id().into(),
+            run: run.to_owned(),
+            review: self.review.review_id().into(),
             result,
         };
         reply.validate(
-            &receipt,
+            receipt,
             request.action,
             request.logs.as_ref(),
             request.exec.as_ref(),
             request.one_off.as_ref(),
         )?;
         if cleaned {
-            // Retire before writing on the retained authenticated stream. Clients
-            // verify both absent publication paths and the exact durable Removed journal.
-            publication.finish()?;
-            let _ = transport::write(&mut stream, &reply, Duration::from_secs(5));
-            let Outcome::Cleaned { receipt } = reply.result else {
-                return Err(refused());
-            };
-            return Ok(receipt);
+            return Ok(Answered::Cleaned {
+                stream,
+                reply: Box::new(reply),
+            });
         }
         if request.action == Action::InteractiveExec {
             // The connected stream is handed over before the bound reply; its
@@ -581,11 +759,22 @@ pub fn serve_with_storage_tool(
                 std::time::Instant::now() + Duration::from_secs(5),
             )
             .is_err()
+                // HACK-2742 review: the session may already have started. Send an
+                // empty handoff and then the bound reply, which the requester
+                // answers as a retained session (no descriptor) or the owner's own
+                // pre-effect refusal, rather than an unexplained close.
+                && crate::provider::interactive_handoff::send(
+                    &stream,
+                    None,
+                    std::time::Instant::now() + Duration::from_secs(5),
+                )
+                .is_err()
             {
-                continue;
+                return Ok(Answered::Next);
             }
         }
-        let _ = transport::write(&mut stream, &reply, Duration::from_secs(5));
+        let _ = deliver_reply(&mut stream, &reply, request.action);
+        Ok(Answered::Next)
     }
 }
 
@@ -666,6 +855,13 @@ pub fn one_off(
     if !selected.valid() {
         return Err(refused());
     }
+    // HACK-2742: as for exec (HACK-2739), wait out another project's stop here,
+    // before anything is sent; the owner's own wait stays short.
+    #[cfg(target_os = "macos")]
+    crate::provider::lifecycle::await_free_command_lease(
+        candidate,
+        Instant::now() + crate::provider::lifecycle::COMMAND_REQUEST_LEASE_WAIT,
+    )?;
     request_selected(candidate, run, Action::Run, None, None, Some(selected))
 }
 /// The live owner creates and starts under its normal guards, then returns the
@@ -687,21 +883,35 @@ pub(in crate::provider) fn interactive(
     if !selected.valid() {
         return Err(refused());
     }
-    let pin = owner::Pin::load(candidate, run)?;
+    // Everything before the request is written is pre-send: a pin or owner that
+    // is gone or changed answers the owner's not-started code (HACK-2742 review).
+    let pin = owner::Pin::load(candidate, run).map_err(interactive_not_sent)?;
     let review = pin.review();
-    let expected = journal::read_control(candidate, review)?;
+    let expected = journal::read_control(candidate, review).map_err(interactive_not_sent)?;
     if (
         expected.owner.as_str(),
         review.review_id(),
         review.scope().namespace,
     ) != pins
     {
-        return Err(refused());
+        return Err(interactive_not_sent(refused()));
     }
-    let mut stream = pin.connect()?;
-    let _lifetime = leash.watch_control(&stream)?;
+    // HACK-2742: wait out another project's stop before anything is sent, as a
+    // finite exec does (HACK-2739). The frontend's leash ends the wait. A
+    // refusal here comes before dispatch, so it carries no session.
+    #[cfg(target_os = "macos")]
+    crate::provider::lifecycle::await_free_command_lease_checked(
+        candidate,
+        Instant::now() + crate::provider::lifecycle::COMMAND_REQUEST_LEASE_WAIT,
+        &|| leash.check(),
+    )?;
+    // The owner may have exited during that wait (its own `hack down`): its pin
+    // no longer connects, and nothing was sent.
+    let mut stream = pin.connect().map_err(interactive_not_sent)?;
+    let _lifetime = leash.watch_control(&stream).map_err(interactive_not_sent)?;
+    let accepting = pin.accepts_commands();
     let input = Request {
-        version: 2,
+        version: if accepting { ACCEPTING_VERSION } else { 2 },
         kind: RequestKind::NativeGraphControl,
         run: run.into(),
         review: review.review_id().into(),
@@ -716,12 +926,30 @@ pub(in crate::provider) fn interactive(
     // the owner stopped before its durable intent. Correlate only this attempt;
     // a validated pre-intent refusal below remains unscoped.
     let uncertain = |error: CandidateError| error.with_session(options.session);
-    transport::write(&mut stream, &input, Duration::from_secs(5)).map_err(uncertain)?;
-    let descriptor = crate::provider::interactive_handoff::receive(
-        &stream,
-        std::time::Instant::now() + Duration::from_secs(40),
-    )
-    .map_err(uncertain)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(40);
+    let written = transport::write(&mut stream, &input, Duration::from_secs(5));
+    // HACK-2742 review: the owner accepts before it admits the session. A close
+    // with no byte proves it never did, so nothing ran and no session exists,
+    // provided this side did not close the stream itself: the leash watcher
+    // shuts it down only once the frontend is gone, and that loss is permanent,
+    // so a leash that still holds after the close proves the close was the
+    // owner's. A write failure alone proves nothing until that answer arrives.
+    // An owner that does not advertise acceptance (started before the upgrade)
+    // gets version 2 as before, and a failure after the write stays uncertain.
+    if accepting {
+        match owner_accepted(&stream, deadline) {
+            Ok(true) => {}
+            Ok(false) if leash.check().is_ok() => {
+                return Err(interactive_not_sent(written.err().unwrap_or_else(refused)));
+            }
+            Ok(false) => return Err(uncertain(written.err().unwrap_or_else(refused))),
+            Err(error) => return Err(uncertain(written.err().unwrap_or(error))),
+        }
+    } else {
+        written.map_err(uncertain)?;
+    }
+    let descriptor =
+        crate::provider::interactive_handoff::receive(&stream, deadline).map_err(uncertain)?;
     let reply: Reply =
         transport::read(&mut stream, Duration::from_secs(5), LIMIT).map_err(uncertain)?;
     reply
@@ -744,7 +972,7 @@ pub(in crate::provider) fn interactive(
             result.map_err(|_: CandidateError| CandidateError::new("session_cleanup_uncertain", "Interactive session handoff changed; the session was retained and no start was replayed.").with_session(&session.session))
         }
         Outcome::InteractiveRefused { session } if session == options.session => Err(CandidateError::new("session_cleanup_uncertain", "Interactive admission ended after its durable intent; the session was retained and no start was replayed.").with_session(&session)),
-        Outcome::Refused { code, .. } if descriptor.is_none() => Err(refused().with_cause_code(code)),
+        Outcome::Refused { code, .. } if descriptor.is_none() => Err(interactive_owner_refusal(code)),
         _ => Err(uncertain(refused())),
     }
 }
@@ -756,12 +984,28 @@ fn request_selected(
     exec_selected: Option<runtime::ExecSelection>,
     one_off_selected: Option<runtime::RunSelection>,
 ) -> Result<Value, CandidateError> {
-    let pin = owner::Pin::load(candidate, run)?;
+    // For a command (exec, one-off run), every failure before the request is
+    // written is pre-send. The owner may have exited while the requester waited
+    // for the lease (its own `hack down`, HACK-2742 review): its pin is gone or no
+    // longer connects. Those answer the owner's not-started code so the CLI says
+    // nothing ran. Status, observe, logs and cleanup keep their own refusals.
+    let command = matches!(action, Action::Exec | Action::Run);
+    let not_sent = |error: CandidateError| {
+        if command {
+            command_not_sent(error)
+        } else {
+            error
+        }
+    };
+    let pin = owner::Pin::load(candidate, run).map_err(not_sent)?;
     let review = pin.review();
-    let expected = journal::read_control(candidate, review)?;
-    let mut stream = pin.connect()?;
+    let expected = journal::read_control(candidate, review).map_err(not_sent)?;
+    let mut stream = pin.connect().map_err(not_sent)?;
+    // Only an owner that advertises acceptance gets the version-3 command and
+    // its not-started proof; an older owner serves version 2 as before.
+    let accepting = command && pin.accepts_commands();
     let input = Request {
-        version: 2,
+        version: if accepting { ACCEPTING_VERSION } else { 2 },
         kind: RequestKind::NativeGraphControl,
         run: run.into(),
         review: review.review_id().into(),
@@ -772,17 +1016,33 @@ fn request_selected(
         exec: exec_selected.clone(),
         one_off: one_off_selected.clone(),
     };
-    transport::write(&mut stream, &input, Duration::from_secs(5))?;
-    let command = matches!(action, Action::Exec | Action::Run);
+    let written = transport::write(&mut stream, &input, Duration::from_secs(5));
+    let budget = if command {
+        Duration::from_secs(40)
+    } else {
+        Duration::from_secs(30)
+    };
+    let started = Instant::now();
+    if accepting {
+        // HACK-2742 review (VM row 4): the owner may have left this connection in
+        // its listen backlog and ended, or refused the request, without taking
+        // it. It accepts a command before any effect, so a close with no byte at
+        // all proves that nothing ran (`ACCEPTED`). A write failure alone proves
+        // nothing until that answer arrives; everything after acceptance stays
+        // unconfirmed.
+        match owner_accepted(&stream, started + budget) {
+            Ok(true) => {}
+            Ok(false) => return Err(command_not_sent(written.err().unwrap_or_else(refused))),
+            Err(error) => return Err(written.err().unwrap_or(error)),
+        }
+    } else {
+        written?;
+    }
     let reply: Reply = transport::read(
         &mut stream,
+        budget.saturating_sub(started.elapsed()),
         if command {
-            Duration::from_secs(40)
-        } else {
-            Duration::from_secs(30)
-        },
-        if command {
-            4 * 1024 * 1024
+            COMMAND_REPLY_LIMIT
         } else if action == Action::Logs {
             128 * 1024
         } else {

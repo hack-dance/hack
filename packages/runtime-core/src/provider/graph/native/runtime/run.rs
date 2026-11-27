@@ -283,6 +283,16 @@ fn one_off_config(
     Ok(config)
 }
 
+/// The owner's guard and lease wait for a one-off, with the run's own lease code.
+#[cfg(target_os = "macos")]
+pub(super) fn owner_engine<'a>(
+    candidate: &'a Candidate,
+    deadline: Instant,
+    guard: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<Engine<'a>, CandidateError> {
+    exec::owner_command_engine(candidate, deadline, guard, exec::OwnerCommand::Run)
+}
+
 #[cfg(target_os = "macos")]
 pub(in crate::provider::graph::native) fn execute(
     candidate: &Candidate,
@@ -293,11 +303,12 @@ pub(in crate::provider::graph::native) fn execute(
     if !selected.valid() {
         return Err(refused());
     }
-    guard()?;
     let deadline = Instant::now() + Duration::from_secs(30);
     // The owner loop's guard (signals, publication, pin) runs before every lease
-    // attempt, and the wait counts against this 30 s budget (HACK-2669).
-    let engine = Engine::connect_command_until(candidate, deadline, guard)?;
+    // attempt, and the wait counts against this 30 s budget (HACK-2669). The
+    // requester waited out a longer holder before it sent this, and the wait's
+    // failures carry pre-effect codes (HACK-2742): no record or container exists yet.
+    let engine = owner_engine(candidate, deadline, guard)?;
     let (receipt, root) = journal::load(
         candidate,
         expected.review.scope().run,

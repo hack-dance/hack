@@ -78,6 +78,19 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<i32, CandidateErr
     let frontend = File::from(unsafe { OwnedFd::from_raw_fd(3) });
     hack_runtime_core::provider::private_input::validate_duplex(&frontend)?;
     let mut report = frontend.try_clone().map_err(|_| invalid())?;
+    // HACK-2742: stderr is the user's terminal, so a lease wait that lasts about
+    // 3 s is reported on the control channel as one value-free event line, ahead
+    // of the final report; the CLI prints its own progress line for it.
+    let events = std::sync::Mutex::new(frontend.try_clone().map_err(|_| invalid())?);
+    interactive_exec::report_lease_waits_to(Box::new(move |line| {
+        if let Some(holder) = line.strip_prefix("hack.lease-wait:begin ") {
+            let event = serde_json::json!({"version":1,"event":"lease-wait","holder":holder});
+            if let (Ok(mut file), Ok(mut bytes)) = (events.lock(), serde_json::to_vec(&event)) {
+                bytes.push(b'\n');
+                let _ = file.write_all(&bytes);
+            }
+        }
+    }));
     let result = interactive_exec::execute(candidate, &options, frontend.into());
     let (code, value) = match result {
         Ok(completion) => (
@@ -86,7 +99,15 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<i32, CandidateErr
         ),
         Err(error) => (
             1,
-            serde_json::json!({"version":1,"outcome":"refused","code":error.code,"session":error.session()}),
+            match interactive_exec::lease_refusal_holder(&error) {
+                // An expired lease wait names its holder as a closed token.
+                Some(holder) => {
+                    serde_json::json!({"version":1,"outcome":"refused","code":error.code,"session":error.session(),"holder":holder})
+                }
+                None => {
+                    serde_json::json!({"version":1,"outcome":"refused","code":error.code,"session":error.session()})
+                }
+            },
         ),
     };
     let bytes = serde_json::to_vec(&value).map_err(|_| invalid())?;

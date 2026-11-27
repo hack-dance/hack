@@ -89,6 +89,16 @@ export function nativeStartLeaseWaitLine(token: string | undefined): string {
 }
 
 /**
+ * The holder's words (`project stop`) for the runtime's closed holder token, as
+ * a refusal names it; undefined for an unknown token (HACK-2742).
+ */
+export function nativeLeaseHolderWords(
+  token: string | undefined
+): string | undefined {
+  return token === undefined ? undefined : HOLDER_WORDS[token];
+}
+
+/**
  * The holder a progress line names, with its article, for the runtime's closed
  * holder token. An unknown token names no holder.
  */

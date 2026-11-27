@@ -14,9 +14,15 @@ pub(in crate::provider) struct ExecOutput {
     pub truncated: bool,
     /// Bytes of each stream past [`OUTPUT_LIMIT`], read and dropped. Only the
     /// authored reply carries them; a Compose exec reports `truncated` alone.
-    #[cfg_attr(not(feature = "native-config-plan"), allow(dead_code))]
+    #[cfg_attr(
+        not(all(feature = "native-config-plan", target_os = "macos")),
+        allow(dead_code)
+    )]
     pub stdout_dropped: u64,
-    #[cfg_attr(not(feature = "native-config-plan"), allow(dead_code))]
+    #[cfg_attr(
+        not(all(feature = "native-config-plan", target_os = "macos")),
+        allow(dead_code)
+    )]
     pub stderr_dropped: u64,
 }
 
@@ -89,13 +95,16 @@ impl Capture {
     }
 }
 
-/// [`Capture`] of a complete multiplexed body.
+/// [`Capture`] of a complete multiplexed body. Its readers (job logs, private
+/// exec) are macOS only.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn capture(bytes: &[u8]) -> Result<Capture, CandidateError> {
     let mut capture = Capture::default();
     capture.feed(bytes).map_err(|_| uncertain())?;
     capture.finish().map_err(|_| uncertain())
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn decode(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>, bool), CandidateError> {
     let capture = capture(bytes)?;
     let truncated = capture.truncated();

@@ -1504,6 +1504,9 @@ impl Driver for Session<'_, '_> {
             startup.verify(&self.engine, &mut self.receipt, &self.root)?;
         }
         self.check_cancelled()?;
+        if let Some(startup) = self.startup.as_mut() {
+            startup.before_start(&self.engine, service, &id)?;
+        }
         crate::timings::measure(crate::timings::Step::ContainerStart, None, |_| {
             self.engine
                 .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)

@@ -990,12 +990,12 @@ macTest.each([
 /**
  * HACK-2759, through the real CLI and a runtime that prints its reply: an
  * output past the 1 MiB cap writes the kept beginning, names the dropped bytes
- * on stderr and exits 1 although the command exited 0; and a failure is
+ * on stderr and keeps the command's exit status 0; and a failure is
  * reported on stderr, never on the stdout that carries the command's output.
  * `HACK_LOGGER` is left unset, so the default logger is in play.
  */
 macTest.each([
-  { case: "truncated", code: 1 },
+  { case: "truncated", code: 0 },
   { case: "unconfirmed", code: 1 },
 ])(
   "source CLI exec $case keeps stdout for the command's output",
@@ -1063,7 +1063,7 @@ macTest.each([
         if (outcome === "truncated") {
           expect(result.stdout).toBe("kept beginning\n");
           expect(result.stderr).toBe(
-            "hack exec output was truncated: the first 1 MiB of each stream was written and 302304 bytes of stdout and 17 bytes of stderr were dropped. The command succeeded, but hack exits with status 1 because its output is incomplete.\n"
+            "hack exec output is incomplete: only the first 1 MiB of each stream was written and 302304 bytes of stdout and 17 bytes of stderr were dropped.\n"
           );
         } else {
           expect(result.stdout).toBe("");

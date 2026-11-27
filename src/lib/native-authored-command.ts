@@ -67,10 +67,7 @@ import { logger } from "../ui/logger.ts";
 import { psServiceState, renderPs } from "../ui/ps-output.ts";
 import { emitCliResult, HackCliError, okResult } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
-import {
-  nativeCommandExitCode,
-  nativeCommandTruncatedMessage,
-} from "./native-command-output.ts";
+import { nativeCommandTruncatedMessage } from "./native-command-output.ts";
 import type { NativeComposeCommandOptions } from "./native-compose-command.ts";
 import type { NativeComposeSelection } from "./native-compose-selection.ts";
 import { nativeDetachedUpReady } from "./native-detached-up.ts";
@@ -1365,12 +1362,11 @@ async function runAuthoredCommand(input: {
       process.stderr.write(
         nativeCommandTruncatedMessage({
           operation: input.operation,
-          exitCode: result.exitCode,
           dropped: result.dropped,
         })
       );
     }
-    return controller.signal.aborted ? 130 : nativeCommandExitCode(result);
+    return controller.signal.aborted ? 130 : result.exitCode;
   } catch (error: unknown) {
     if (controller.signal.aborted) {
       return 130;

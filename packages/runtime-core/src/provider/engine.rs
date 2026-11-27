@@ -29,6 +29,7 @@ mod private_service_exec;
 #[cfg(any(target_os = "macos", test))]
 pub(super) mod relay_exec;
 mod service_exec;
+pub(in crate::provider) use service_exec::Capture;
 mod stop;
 pub(in crate::provider) use stop::StopBatchFailure;
 #[cfg(test)]

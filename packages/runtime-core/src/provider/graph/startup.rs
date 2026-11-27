@@ -207,6 +207,16 @@ pub(super) trait Driver {
         &self,
         inputs: &project::inputs::ExecutionInputs,
     ) -> Result<(), CandidateError>;
+    /// Called with a created container's identity right before its start request:
+    /// the last point where nothing it writes can have been missed (HACK-2759).
+    fn before_start(
+        &mut self,
+        _engine: &Engine<'_>,
+        _service: &str,
+        _id: &str,
+    ) -> Result<(), CandidateError> {
+        Ok(())
+    }
     fn verify(
         &mut self,
         engine: &Engine<'_>,

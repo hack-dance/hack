@@ -1972,9 +1972,9 @@ bytes, an exit code, and a truncation flag. The CLI also exits with the command'
 code. Retained exec output is limited to 1 MiB per stream: the beginning of each
 stream is kept, and the rest is read to its end and dropped, so a large output never
 makes the outcome unconfirmed. When anything was dropped, `hack exec` and `hack run`
-write the kept output, say on stderr that it was truncated and how many bytes of each
-stream were dropped, and exit 1 if the command itself exited 0, because the output is
-incomplete. Errors of `hack exec` and `hack run` go to stderr, so stdout carries only
+write the kept output and say on stderr that the output is incomplete and how many
+bytes of each stream were dropped. The exit status stays the command's own, so a
+passing command with a large output still passes. Errors of `hack exec` and `hack run` go to stderr, so stdout carries only
 the command's output.
 
 Exec is noninteractive: stdin is closed, no TTY is allocated, and arguments are passed

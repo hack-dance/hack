@@ -482,10 +482,7 @@ import {
 } from "../lib/logs.ts";
 import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import { nativeAppendRollbackMessage } from "../lib/native-append-cancellation.ts";
-import {
-  nativeCommandExitCode,
-  nativeCommandTruncatedMessage,
-} from "../lib/native-command-output.ts";
+import { nativeCommandTruncatedMessage } from "../lib/native-command-output.ts";
 import { withNativeCommandTimings } from "../lib/native-command-timings.ts";
 import {
   readNativeComposeDocument,
@@ -14718,11 +14715,10 @@ async function handleRun({
       process.stderr.write(
         nativeCommandTruncatedMessage({
           operation: "run",
-          exitCode: result.exitCode,
         })
       );
     }
-    return nativeCommandExitCode(result);
+    return result.exitCode;
   }
   await recordBranchUsageIfNeeded({ project, branch });
   const service = (args.positionals.service ?? "").trim();

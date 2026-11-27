@@ -47,7 +47,7 @@ pub(in crate::provider) struct Capture {
     frame: Option<(u8, usize)>,
 }
 impl Capture {
-    fn feed(&mut self, mut bytes: &[u8]) -> Result<(), ()> {
+    pub(super) fn feed(&mut self, mut bytes: &[u8]) -> Result<(), ()> {
         while !bytes.is_empty() {
             match self.frame {
                 None => {
@@ -83,7 +83,7 @@ impl Capture {
         Ok(())
     }
     /// The stream ended: a partial frame is a protocol failure.
-    fn finish(self) -> Result<Self, ()> {
+    pub(super) fn finish(self) -> Result<Self, ()> {
         if self.header.is_empty() && self.frame.is_none() {
             Ok(self)
         } else {
@@ -343,6 +343,27 @@ impl Engine<'_> {
         crate::timings::measure(crate::timings::Step::ContainerExec, None, |_| {
             self.service_exec_observed(container, argv, workdir, deadline, fresh)
         })
+    }
+
+    /// Attach to a created container's output before it starts, and read it to its
+    /// end on a thread of its own (HACK-2759). The thread ends when the container
+    /// exits (or is removed) and its stream closes, or at `deadline`.
+    pub(in crate::provider) fn attach_output(
+        &self,
+        id: &str,
+        deadline: Instant,
+    ) -> Result<std::thread::JoinHandle<Result<Capture, ()>>, CandidateError> {
+        let mut stream = self
+            .upgraded(
+                &format!("/v1.53/containers/{id}/attach?stream=1&stdout=1&stderr=1"),
+                None,
+                deadline,
+            )
+            .map_err(|_| failure("Cannot attach to the one-off's output."))?;
+        std::thread::Builder::new()
+            .name("one-off-output".into())
+            .spawn(move || read_capture(&mut stream, deadline))
+            .map_err(|_| failure("Cannot read the one-off's output."))
     }
 
     /// Open an upgraded output stream on a fresh engine connection: the effect
@@ -1107,17 +1128,19 @@ mod tests {
         assert_eq!(calls, 0);
     }
     /// A fake engine socket: each accepted connection reads one request and
-    /// writes its response. The exec start is answered as an upgraded stream.
+    /// writes its response. A 101 answer is an upgraded stream, written on its
+    /// own thread as an engine does, so a one-off can start while attached.
     fn serve(
         path: std::path::PathBuf,
-        responses: Vec<(bool, Vec<u8>)>,
+        responses: Vec<(u16, Vec<u8>)>,
     ) -> std::thread::JoinHandle<()> {
         use std::io::{Read, Write};
         use std::os::unix::net::UnixListener;
         let listener = UnixListener::bind(&path).unwrap();
         listener.set_nonblocking(true).unwrap();
         std::thread::spawn(move || {
-            for (upgraded, response) in responses {
+            let mut streams = Vec::new();
+            for (status, response) in responses {
                 let deadline = Instant::now() + Duration::from_secs(5);
                 let mut socket = loop {
                     match listener.accept() {
@@ -1152,20 +1175,27 @@ mod tests {
                     .unwrap_or(0);
                 let mut body = vec![0; length];
                 socket.read_exact(&mut body).unwrap();
-                if upgraded {
+                if status == 101 {
                     assert!(headers.contains("Upgrade: tcp"), "{headers}");
                     socket
                         .write_all(b"HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
                         .unwrap();
+                    streams.push(std::thread::spawn(move || {
+                        socket.write_all(&response).unwrap();
+                    }));
+                    continue;
                 } else {
                     write!(
                         socket,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 {status} Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         response.len()
                     )
                     .unwrap();
                 }
                 socket.write_all(&response).unwrap();
+            }
+            for stream in streams {
+                stream.join().unwrap();
             }
         })
     }
@@ -1200,10 +1230,10 @@ mod tests {
             let worker = serve(
                 path.clone(),
                 vec![
-                    (false, serde_json::to_vec(&json!({"Id":id})).unwrap()),
-                    (true, stream),
+                    (200, serde_json::to_vec(&json!({"Id":id})).unwrap()),
+                    (101, stream),
                     (
-                        false,
+                        200,
                         serde_json::to_vec(
                             &json!({"ID":id,"ContainerID":container,"Running":false,"ExitCode":7}),
                         )
@@ -1232,5 +1262,79 @@ mod tests {
             assert_eq!(result.stdout_dropped, dropped);
             assert_eq!(result.truncated, dropped > 0);
         }
+    }
+    /// HACK-2759 (review L2): an output stream that never ends is read only until the
+    /// deadline, then the read fails and the exec is uncertain.
+    #[test]
+    fn an_output_that_never_ends_stops_at_the_deadline_as_uncertain() {
+        use std::io::Write;
+        let (mut host, mut guest) = std::os::unix::net::UnixStream::pair().unwrap();
+        let writer = std::thread::spawn(move || {
+            let (_, frames) = frames(1, 64 * 1024);
+            while guest.write_all(&frames).is_ok() {}
+        });
+        let started = Instant::now();
+        assert!(read_capture(&mut host, started + Duration::from_millis(200)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let error = execute(
+            &"a".repeat(64),
+            &["tool".into()],
+            None,
+            |_, _, _| Ok(serde_json::to_vec(&json!({"Id":"b".repeat(64)})).unwrap()),
+            |_, _| {
+                Ok(Attached::Stream {
+                    stream: host.try_clone().unwrap(),
+                    deadline: Instant::now() + Duration::from_millis(100),
+                })
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code, "graph_service_exec_uncertain");
+        drop(host);
+        writer.join().unwrap();
+    }
+    /// HACK-2759: the one-off over a real Unix socket. Its attach is an upgraded
+    /// connection opened before the start, and 10 MB of output keeps its beginning.
+    #[test]
+    fn real_unix_transport_attaches_a_one_off_before_its_start() {
+        let name = format!("hkn-{}-oneoff-{}", "b".repeat(32), "c".repeat(32));
+        let id = "e".repeat(64);
+        let (output, multiplexed) = frames(1, 10_000_000);
+        let path = socket_path();
+        let worker = serve(
+            path.clone(),
+            vec![
+                (200, serde_json::to_vec(&json!({"Id":id})).unwrap()),
+                (101, multiplexed),
+                (200, vec![]),
+                (200, serde_json::to_vec(&json!({"StatusCode":0})).unwrap()),
+                (
+                    200,
+                    serde_json::to_vec(&json!({"Id":id,"Name":format!("/{name}"),"State":{"Running":false,"ExitCode":0}}))
+                        .unwrap(),
+                ),
+                (204, vec![]),
+                (404, br#"{"message":"No such container"}"#.to_vec()),
+            ],
+        );
+        let transport = Transport::new(&path, Duration::from_secs(5)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let result = one_off(
+            &name,
+            &one_off_config(),
+            |method, path_, body| transport.request_bytes(method, path_, body),
+            |path_| {
+                let mut stream = crate::provider::agent::connect_until(&path, deadline)?;
+                upgrade(&mut stream, path_, None, deadline).map_err(|_| one_off_uncertain())?;
+                Ok(Attached::Stream { stream, deadline })
+            },
+        );
+        worker.join().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let result = result.unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, output[..OUTPUT_LIMIT]);
+        assert_eq!(result.stdout_dropped, (10_000_000 - OUTPUT_LIMIT) as u64);
     }
 }

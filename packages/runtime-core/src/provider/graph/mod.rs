@@ -2130,6 +2130,11 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
         // (`relay_owner_refused`), so a caller names `hack down --recover` for
         // a live phase only with this. Selection only, like the fields around it.
         "cross_boot_relay": bridges::cleanup::relay_owner_provable(candidate, &owner.token, &receipt),
+        // A stop its owner left at `cleanup-intent` inside its enrolled relay
+        // cleanup, which the cross-boot recovery retires once the pool boots again
+        // (HACK-2746), so a caller starts a stopped pool or names
+        // `hack down --recover` for it. Selection only, like the fields around it.
+        "cross_boot_stop": dead_owner_cleanup::interrupted_stop(candidate, &root, &receipt, &owner),
         // A lost-removal repair whose storage barrier has not confirmed (HACK-2719),
         // read from its host marker: only `hack down --recover` on a running pool
         // finishes it, so a down finding the pool stopped starts it (HACK-2731).

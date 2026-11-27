@@ -736,9 +736,10 @@ export const NATIVE_RESTART_INTENT_UNREADABLE_NOTE =
  * boot can still recover. Starting the pool begins a new boot, so only the
  * cross-boot dead-owner recovery applies: a ready run, a start lost before it
  * was ready (`failed-retained` after the owner's own unwind, or `preparing` or
- * `restoring` without one; HACK-2714), or an interrupted dead-owner recovery
- * resuming by its own
- * selection. The runtime admits a lost start only with a settled relay startup
+ * `restoring` without one; HACK-2714), a stop its owner left at `cleanup-intent`
+ * inside its enrolled relay cleanup when the VM was lost (Ctrl-C, then the
+ * provider killed; `crossBootStop`, HACK-2746), or an interrupted dead-owner
+ * recovery resuming by its own selection. The runtime admits a lost start only with a settled relay startup
  * and no cleanup marker (`crossBootStart`, read from the receipt before the pool
  * is started), and revalidates the dead owner and the ended boot. The
  * same-boot recoveries (`recover-live-owner`, which an interrupted live-owner

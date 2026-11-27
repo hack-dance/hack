@@ -419,6 +419,22 @@ pub(crate) fn relay_owner_provable(candidate: &Candidate, owner: &str, receipt: 
     pinned_predecessor_eligible(receipt) || run_holds_slot(candidate, owner, &receipt.run)
 }
 
+/// Whether the bridge selection an interrupted enrolled cleanup persisted
+/// (`relay-cleanup-bridges.json`, for this run and pool owner) names any route
+/// of the run, so a cross-boot recovery proves the dead relay owner by them
+/// although the cleanup already released the slots (HACK-2746). Presentation
+/// only; unreadable or foreign counts as none.
+pub(crate) fn interrupted_selection_routes(root: &std::path::Path, owner: &str, run: &str) -> bool {
+    selection_path(root)
+        .and_then(|path| state::read_bounded::<Selection>(&path, 65536))
+        .is_ok_and(|selection| {
+            selection.version == 1
+                && selection.owner == owner
+                && selection.run == run
+                && !selection.selected.is_empty()
+        })
+}
+
 fn run_holds_slot(candidate: &Candidate, owner: &str, run: &str) -> bool {
     state::read_bounded::<Store>(&root(candidate).join("state.json"), 65536).is_ok_and(|store| {
         store.version == 1

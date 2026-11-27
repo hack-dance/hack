@@ -50,6 +50,21 @@ pub(in crate::provider::graph::native) struct ServiceExec {
     pub stdout_base64: String,
     pub stderr_base64: String,
     pub truncated: bool,
+    /// Bytes past the 1 MiB cap of each stream, read and dropped (HACK-2759). Absent
+    /// when nothing was dropped, and from an owner that predates them.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub stdout_dropped: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub stderr_dropped: u64,
+}
+#[allow(clippy::trivially_copy_pass_by_ref)]
+pub(super) fn is_zero(count: &u64) -> bool {
+    *count == 0
+}
+/// Dropped counts imply truncation and stay exact JSON integers for the CLI.
+pub(super) fn valid_dropped(truncated: bool, stdout: u64, stderr: u64) -> bool {
+    const SAFE: u64 = (1 << 53) - 1;
+    stdout <= SAFE && stderr <= SAFE && (truncated || stdout + stderr == 0)
 }
 impl ServiceExec {
     pub(in crate::provider::graph::native) fn valid(&self, selected: &ExecSelection) -> bool {
@@ -65,6 +80,7 @@ impl ServiceExec {
             && (0..=255).contains(&self.exit_code)
             && valid_stream(&self.stdout_base64)
             && valid_stream(&self.stderr_base64)
+            && valid_dropped(self.truncated, self.stdout_dropped, self.stderr_dropped)
     }
 }
 /// The owner's answer code when its own lease wait for an authored exec expired
@@ -262,7 +278,7 @@ pub(super) fn execute_with<B: Backend>(
         Ok(())
     };
     fresh()?;
-    let (exit_code, stdout, stderr, truncated) =
+    let (exit_code, stdout, stderr, dropped) =
         backend.exec(&container, selected, deadline, &fresh)?;
     fresh()?;
     let result = ServiceExec {
@@ -272,7 +288,9 @@ pub(super) fn execute_with<B: Backend>(
         exit_code,
         stdout_base64: base64::engine::general_purpose::STANDARD.encode(stdout),
         stderr_base64: base64::engine::general_purpose::STANDARD.encode(stderr),
-        truncated,
+        truncated: dropped.any(),
+        stdout_dropped: dropped.stdout,
+        stderr_dropped: dropped.stderr,
     };
     if !result.valid(selected) {
         return Err(refused());

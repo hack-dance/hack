@@ -408,7 +408,7 @@ impl super::Engine<'_> {
         )?;
         deliver(&mut stream, deadline_for_values, values)?;
         let raw = read_output(&stream, deadline)?;
-        let (stdout, stderr, truncated) = super::service_exec::decode(&raw)
+        let output = super::service_exec::capture(&raw)
             .map_err(|_| failed(Stage::Output, Reason::Protocol))?;
         self.guest
             .verify()
@@ -442,9 +442,11 @@ impl super::Engine<'_> {
             as i32;
         Ok(super::service_exec::ExecOutput {
             exit_code,
-            stdout,
-            stderr,
-            truncated,
+            truncated: output.stdout_dropped + output.stderr_dropped > 0,
+            stdout: output.stdout,
+            stderr: output.stderr,
+            stdout_dropped: output.stdout_dropped,
+            stderr_dropped: output.stderr_dropped,
         })
     }
 }

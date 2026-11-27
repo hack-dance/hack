@@ -2,6 +2,10 @@ import { resolveNativeImageExecStaleEnvWarning } from "../backends/native-exec-s
 import { nativeProjectExec } from "../backends/native-project-exec.ts";
 import type { NativeProjectRunScope } from "../backends/native-project-run.ts";
 import type { NativeRuntimeSelection } from "../backends/native-runtime-client.ts";
+import {
+  nativeCommandExitCode,
+  nativeCommandTruncatedMessage,
+} from "../lib/native-command-output.ts";
 
 /**
  * The native branch of `hack exec`: one bounded noninteractive command through the
@@ -47,7 +51,12 @@ export async function runNativeProjectExec(input: {
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);
   if (result.truncated) {
-    process.stderr.write("Native exec output was truncated.\n");
+    process.stderr.write(
+      nativeCommandTruncatedMessage({
+        operation: "exec",
+        exitCode: result.exitCode,
+      })
+    );
   }
-  return result.exitCode;
+  return nativeCommandExitCode(result);
 }

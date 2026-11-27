@@ -40,7 +40,7 @@ impl Backend for Executing<'_> {
         selected: &ExecSelection,
         deadline: Instant,
         fresh: &dyn Fn() -> Result<(), CandidateError>,
-    ) -> Result<(i32, Vec<u8>, Vec<u8>, bool), CandidateError> {
+    ) -> Result<ExecCompletion, CandidateError> {
         managed_environment::remaining_until(deadline)?;
         fresh()?;
         assert_eq!(
@@ -65,7 +65,7 @@ impl Backend for Executing<'_> {
                 .next()
                 .unwrap()["State"]["StartedAt"] = json!("2026-10-09T00:00:01.000000000Z");
         }
-        Ok((17, vec![0, 255], b"err\n".to_vec(), false))
+        Ok((17, vec![0, 255], b"err\n".to_vec(), Default::default()))
     }
 }
 fn selected() -> ExecSelection {

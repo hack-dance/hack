@@ -35,6 +35,11 @@ pub(in crate::provider::graph::native) struct ServiceRun {
     pub stdout_base64: String,
     pub stderr_base64: String,
     pub truncated: bool,
+    /// Bytes past the 1 MiB cap of each stream, read and dropped (HACK-2759).
+    #[serde(default, skip_serializing_if = "exec::is_zero")]
+    pub stdout_dropped: u64,
+    #[serde(default, skip_serializing_if = "exec::is_zero")]
+    pub stderr_dropped: u64,
 }
 impl ServiceRun {
     pub(in crate::provider::graph::native) fn valid(&self, selected: &RunSelection) -> bool {
@@ -53,6 +58,7 @@ impl ServiceRun {
             && (0..=255).contains(&self.exit_code)
             && exec::valid_stream(&self.stdout_base64)
             && exec::valid_stream(&self.stderr_base64)
+            && exec::valid_dropped(self.truncated, self.stdout_dropped, self.stderr_dropped)
     }
 }
 
@@ -374,7 +380,7 @@ pub(super) fn execute_with<B: Backend>(
     };
     fresh()?;
     record(root, &receipt, &selected.service, &member, &name)?;
-    let (container, exit_code, stdout, stderr, truncated) =
+    let (container, exit_code, stdout, stderr, dropped) =
         backend.one_off(&name, &config, deadline, &fresh)?;
     fresh()?;
     discard(root, &run, &name)?;
@@ -387,7 +393,9 @@ pub(super) fn execute_with<B: Backend>(
         exit_code,
         stdout_base64: base64::engine::general_purpose::STANDARD.encode(stdout),
         stderr_base64: base64::engine::general_purpose::STANDARD.encode(stderr),
-        truncated,
+        truncated: dropped.any(),
+        stdout_dropped: dropped.stdout,
+        stderr_dropped: dropped.stderr,
     };
     if !result.valid(selected) {
         return Err(refused());

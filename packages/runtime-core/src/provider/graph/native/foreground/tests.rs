@@ -1342,6 +1342,8 @@ fn finite_exec_wire_authenticates_owner_member_and_binary_nonzero_completion() {
                     stdout_base64: "AP9B".into(),
                     stderr_base64: "ZXJyCg==".into(),
                     truncated: false,
+                    stdout_dropped: 0,
+                    stderr_dropped: 0,
                 },
             },
         };
@@ -1430,6 +1432,8 @@ fn finite_one_off_wire_authenticates_owner_member_fresh_container_and_binary_non
             stdout_base64: "AP9B".into(),
             stderr_base64: "ZXJyCg==".into(),
             truncated: false,
+            stdout_dropped: 0,
+            stderr_dropped: 0,
         };
         let name = format!("hkn-{RUN}-oneoff-{}", "a".repeat(32));
         let reply = |one_off: runtime::ServiceRun| Reply {
@@ -2044,6 +2048,8 @@ fn a_command_reply_at_the_output_cap_is_delivered() {
                 stdout_base64: stream_at_cap.clone(),
                 stderr_base64: stream_at_cap.clone(),
                 truncated: true,
+                stdout_dropped: 0,
+                stderr_dropped: 0,
             },
         },
     };
@@ -2129,6 +2135,8 @@ fn an_owner_from_before_the_upgrade_still_runs_exec_and_run() {
                         stdout_base64: "AP9B".into(),
                         stderr_base64: String::new(),
                         truncated: false,
+                        stdout_dropped: 0,
+                        stderr_dropped: 0,
                     },
                 },
                 _ => Outcome::OneOff {
@@ -2142,6 +2150,8 @@ fn an_owner_from_before_the_upgrade_still_runs_exec_and_run() {
                         stdout_base64: "AP9B".into(),
                         stderr_base64: String::new(),
                         truncated: false,
+                        stdout_dropped: 0,
+                        stderr_dropped: 0,
                     },
                 },
             };

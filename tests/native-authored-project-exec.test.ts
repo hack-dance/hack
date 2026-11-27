@@ -679,6 +679,10 @@ test.each([
   "overflow",
   "exit",
   "phase",
+  "dropped-untruncated",
+  "dropped-fraction",
+  "dropped-zero",
+  "dropped-unknown",
 ])("exec reply %s cannot replace authority or completion", async (kind) =>
   owned(`exec reply ${kind}`, async () => {
     const f = await fixture(),
@@ -718,6 +722,22 @@ test.each([
         phase: "removed",
       };
     }
+    // HACK-2759: dropped counts imply truncation, are whole and nonzero, and
+    // are the only optional keys.
+    const exec: Record<string, unknown> = value.result.exec;
+    if (kind === "dropped-untruncated") {
+      exec.truncated = false;
+      exec.stdout_dropped = 5;
+    }
+    if (kind === "dropped-fraction") {
+      exec.stdout_dropped = 1.5;
+    }
+    if (kind === "dropped-zero") {
+      exec.stderr_dropped = 0;
+    }
+    if (kind === "dropped-unknown") {
+      exec.stdin_dropped = 1;
+    }
     expect(() =>
       parseNativeAuthoredExec(
         kind === "extra" ? { ...value, private: "must-not-render" } : value,
@@ -725,6 +745,25 @@ test.each([
         "web"
       )
     ).toThrow();
+  }));
+
+test("HACK-2759: exec reply carries the owner's dropped counts, absent from an older owner", async () =>
+  owned("exec reply dropped counts", async () => {
+    const f = await fixture();
+    const value = structuredClone(f.reply);
+    Object.assign(value.result.exec, {
+      stdout_dropped: 302_304,
+      stderr_dropped: 17,
+    });
+    expect(parseNativeAuthoredExec(value, f.receipt, "web").dropped).toEqual({
+      stdout: 302_304,
+      stderr: 17,
+    });
+    // An owner that predates the counts sends `truncated` alone.
+    expect(parseNativeAuthoredExec(f.reply, f.receipt, "web").dropped).toEqual({
+      stdout: 0,
+      stderr: 0,
+    });
   }));
 
 test("exec drain refuses unrelated action, private input and malformed selection before spawn", async () => {
@@ -941,6 +980,95 @@ macTest.each([
           expect(await Bun.file(attempts).text()).toBe("exec\n");
           expect(result.stdout).toBe("literal stdout\n");
           expect(result.stderr).toBe("literal stderr\n");
+        }
+      },
+      19_000
+    ),
+  20_000
+);
+
+/**
+ * HACK-2759, through the real CLI and a runtime that prints its reply: an
+ * output past the 1 MiB cap writes the kept beginning, names the dropped bytes
+ * on stderr and exits 1 although the command exited 0; and a failure is
+ * reported on stderr, never on the stdout that carries the command's output.
+ * `HACK_LOGGER` is left unset, so the default logger is in play.
+ */
+macTest.each([
+  { case: "truncated", code: 1 },
+  { case: "unconfirmed", code: 1 },
+])(
+  "source CLI exec $case keeps stdout for the command's output",
+  async ({ case: outcome, code }) =>
+    owned(
+      `source CLI exec ${outcome}`,
+      async () => {
+        const f = await fixture();
+        await Bun.write(
+          join(f.scope.projectDir, "hack.project.json"),
+          JSON.stringify({
+            version: 1,
+            services: { web: { image: "synthetic:test" } },
+          })
+        );
+        f.reply.result.exec.exit_code = 0;
+        f.reply.result.exec.stdout_base64 =
+          Buffer.from("kept beginning\n").toString("base64");
+        f.reply.result.exec.stderr_base64 = "";
+        f.reply.result.exec.truncated = true;
+        Object.assign(f.reply.result.exec, {
+          stdout_dropped: 302_304,
+          stderr_dropped: 17,
+        });
+        const reply =
+          outcome === "truncated"
+            ? `console.log(${JSON.stringify(JSON.stringify(f.reply))});`
+            : "process.exit(3);";
+        await Bun.write(f.runtime.binary, `#!${process.execPath}\n${reply}\n`);
+        caseAdmission();
+        const result = await captureCompletedJobFixtureCommand({
+          argv: [
+            process.execPath,
+            "--no-env-file",
+            resolve(import.meta.dir, "../index.ts"),
+            "--path",
+            f.scope.projectRoot,
+            "exec",
+            "--workdir",
+            "/app",
+            "web",
+            "--",
+            ...command,
+          ],
+          cwd: f.scope.projectRoot,
+          env: {
+            PATH: "/usr/bin:/bin",
+            HOME: f.scope.projectRoot,
+            HACK_HOME: join(f.scope.projectRoot, "home"),
+            HACK_RUNTIME_BACKEND: "native",
+            HACK_NATIVE_BINARY: f.runtime.binary,
+            HACK_NATIVE_HOME: f.runtime.home,
+            HACK_CONFIG_COMPILER_BINARY:
+              process.env.HACK_CONFIG_COMPILER_BINARY ??
+              resolve(import.meta.dir, "../dist/hack-config-compiler"),
+            HACK_EXECUTION_MODE: "non_interactive",
+            CI: "1",
+          },
+          captures: join(f.scope.projectRoot, "captures"),
+          timeoutMs: 15_000,
+          onUnconfirmed: () =>
+            poisonCurrent("source CLI capture lifetime unconfirmed"),
+        });
+        expect(result.exitCode).toBe(code);
+        if (outcome === "truncated") {
+          expect(result.stdout).toBe("kept beginning\n");
+          expect(result.stderr).toBe(
+            "hack exec output was truncated: the first 1 MiB of each stream was written and 302304 bytes of stdout and 17 bytes of stderr were dropped. The command succeeded, but hack exits with status 1 because its output is incomplete.\n"
+          );
+        } else {
+          expect(result.stdout).toBe("");
+          expect(result.stderr).toContain("E_LIFECYCLE_FAILED");
+          expect(result.stderr).toContain("unconfirmed");
         }
       },
       19_000

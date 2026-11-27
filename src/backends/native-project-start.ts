@@ -50,7 +50,7 @@ import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
 import {
   nativeCrossBootRecoverable,
-  nativeLiveRelayUnprovable,
+  nativeReadyLossRetirable,
   parseNativeForegroundOwner,
 } from "./native-cross-boot-recovery.ts";
 import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
@@ -5316,12 +5316,12 @@ async function lostVmFailure(opts: {
  *   with `cross_boot_start` (settled relay and host dependency startup, no
  *   cleanup marker). No run, or a failed or foreign selection, leaves it not
  *   retirable, so no refused command is named (#1273 review).
- * - A ready run: retirable unless the selection shows a live receipt whose
- *   relay owner the runtime cannot prove (`nativeLiveRelayUnprovable`:
- *   `cross_boot_relay` false, no published port and an unsettled host relay
- *   startup, HACK-2731). Any other phase (a VM lost during the owner's own
- *   stop leaves `cleanup-intent` or `stopped-data-retained`), an unknown run
- *   or a failed read keeps the down advice it always had (#1279 review).
+ * - A ready run: as `nativeReadyLossRetirable` reads the selection. A live
+ *   receipt is retirable unless its relay owner is unprovable (HACK-2731). A
+ *   stop the owner left at `cleanup-intent` (Ctrl-C, then the VM lost) is
+ *   only when the runtime finishes it across the boot (`cross_boot_stop`,
+ *   HACK-2746). Any other phase, an unknown run or a failed read keeps the
+ *   down advice it always had (#1279 review).
  *
  * Any other stage is returned as it is.
  */
@@ -5362,7 +5362,7 @@ export async function nativeLostStartRetirable(opts: {
   if (opts.loss.stage === "ready") {
     return selection === undefined
       ? opts.loss
-      : { ...opts.loss, retirable: !nativeLiveRelayUnprovable(selection) };
+      : { ...opts.loss, retirable: nativeReadyLossRetirable(selection) };
   }
   return {
     ...opts.loss,

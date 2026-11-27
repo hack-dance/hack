@@ -761,6 +761,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - name: Prepare Compose fixtures
         run: |
+          # tmux comes from Ubuntu's own archive. The runner image also ships a
+          # Microsoft package source that has returned 403 and failed the update.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/microsoft-prod.sources
           sudo apt-get update
           sudo apt-get install --yes tmux
           docker pull alpine:3.20
@@ -820,7 +823,12 @@ jobs:
         with:
           bun-version: "1.4.4"
       - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install --yes tmux
+        run: |
+          # tmux comes from Ubuntu's own archive. The runner image also ships a
+          # Microsoft package source that has returned 403 and failed the update.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/microsoft-prod.sources
+          sudo apt-get update
+          sudo apt-get install --yes tmux
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Create isolated Hack network

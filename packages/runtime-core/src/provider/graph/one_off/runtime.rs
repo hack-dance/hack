@@ -216,7 +216,7 @@ fn attached_output(
         std::thread::sleep(Duration::from_millis(20));
     }
     let capture = reader.join().map_err(|_| unread())?.map_err(|_| unread())?;
-    let truncated = capture.stdout_dropped + capture.stderr_dropped > 0;
+    let truncated = capture.truncated();
     Ok((capture.stdout, capture.stderr, truncated))
 }
 

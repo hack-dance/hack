@@ -40,6 +40,7 @@ import {
   nativeAuthoredCommandFailure,
   tryNativeAuthoredCommand,
 } from "../src/lib/native-authored-command.ts";
+import { nativeCommandTruncatedMessage } from "../src/lib/native-command-output.ts";
 import type { NativeComposeCommandOptions } from "../src/lib/native-compose-command.ts";
 import { captureCompletedJobFixtureCommand } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
 import { restoreEnv } from "./helpers/env.ts";
@@ -1167,3 +1168,22 @@ macTest.each([1, 2])(
       }
     })
 );
+
+/**
+ * HACK-2759: without counts the notice says only what the runtime observed.
+ * A large output whose end the engine connection lost past the kept range is
+ * reported without counts, so the notice says "at most".
+ */
+test("the notice without counts claims at most the kept beginning", () => {
+  expect(nativeCommandTruncatedMessage({ operation: "exec" })).toBe(
+    "hack exec output is incomplete: at most the first 1 MiB of each stream was written and the rest was dropped.\n"
+  );
+  expect(
+    nativeCommandTruncatedMessage({
+      operation: "run",
+      dropped: { stdout: 0, stderr: 0 },
+    })
+  ).toBe(
+    "hack run output is incomplete: at most the first 1 MiB of each stream was written and the rest was dropped.\n"
+  );
+});

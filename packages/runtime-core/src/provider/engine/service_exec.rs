@@ -24,6 +24,13 @@ pub(in crate::provider) struct ExecOutput {
         allow(dead_code)
     )]
     pub stderr_dropped: u64,
+    /// The end of the output was lost past the kept range ([`Capture::finish`]);
+    /// `truncated` is set and both counts are zero.
+    #[cfg_attr(
+        not(all(feature = "native-config-plan", target_os = "macos")),
+        allow(dead_code)
+    )]
+    pub tail_lost: bool,
 }
 
 fn uncertain() -> CandidateError {
@@ -86,6 +93,10 @@ pub(in crate::provider) struct Capture {
     pub stderr: Vec<u8>,
     pub stdout_dropped: u64,
     pub stderr_dropped: u64,
+    /// The stream ended partway through a frame whose stream had already filled
+    /// its kept range (see [`Capture::finish`]). How much was lost is unknown, so
+    /// the dropped counts are cleared rather than understated.
+    pub tail_lost: bool,
     header: Vec<u8>,
     frame: Option<(u8, usize)>,
 }
@@ -125,16 +136,35 @@ impl Capture {
         }
         Ok(())
     }
-    /// The stream ended: a partial frame is a protocol failure.
-    pub(super) fn finish(self) -> Result<Self, ()> {
-        if self.header.is_empty() && self.frame.is_none() {
-            Ok(self)
-        } else {
-            Err(())
+    /// The stream ended. A stream that ends inside a frame closed early, which
+    /// fails the read, with one exception (HACK-2759): the provider's engine
+    /// socket can close before it delivers the last 64 to 128 KiB of a large
+    /// output. When the cut frame's stream already holds its full kept range,
+    /// the bytes it lost lie past what is kept, so the kept bytes are still that
+    /// stream's exact beginning. The read then succeeds as truncated with
+    /// [`Capture::tail_lost`] set. Frames after the cut are unknown (either
+    /// stream), so neither stream is claimed complete and the dropped counts are
+    /// cleared. A cut inside the kept range, or inside a frame header (its
+    /// stream is unknown) before both streams are full, still fails.
+    pub(super) fn finish(mut self) -> Result<Self, ()> {
+        let full = |kept: &Vec<u8>| kept.len() == OUTPUT_LIMIT;
+        let past_kept = match self.frame {
+            None if self.header.is_empty() => return Ok(self),
+            None => full(&self.stdout) && full(&self.stderr),
+            Some((1, _)) => full(&self.stdout),
+            Some(_) => full(&self.stderr),
+        };
+        if !past_kept {
+            return Err(());
         }
+        self.tail_lost = true;
+        self.stdout_dropped = 0;
+        self.stderr_dropped = 0;
+        Ok(self)
     }
-    fn truncated(&self) -> bool {
-        self.stdout_dropped + self.stderr_dropped > 0
+    /// Whether any output was not kept: past the cap, or lost at the end.
+    pub(in crate::provider) fn truncated(&self) -> bool {
+        self.tail_lost || self.stdout_dropped + self.stderr_dropped > 0
     }
 }
 
@@ -144,7 +174,13 @@ impl Capture {
 pub(super) fn capture(bytes: &[u8]) -> Result<Capture, CandidateError> {
     let mut capture = Capture::default();
     capture.feed(bytes).map_err(|_| uncertain())?;
-    capture.finish().map_err(|_| uncertain())
+    // A whole response body never loses its tail in transport: a cut frame
+    // here is malformed, whatever was kept.
+    capture
+        .finish()
+        .ok()
+        .filter(|capture| !capture.tail_lost)
+        .ok_or_else(uncertain)
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -155,23 +191,34 @@ pub(super) fn decode(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>, bool), Candidate
 }
 
 /// An engine output stream opened before the command starts (HACK-2759): an
-/// exec's upgraded start, or a one-off's attach before its start. It is read to
-/// its end into a [`Capture`] afterwards.
+/// exec's upgraded start, or a one-off's attach before its start.
+///
+/// The stream is read from the moment its headers arrive, on a thread of its
+/// own, and joined afterwards. Nothing (a caller's selection check, the
+/// one-off's start request) runs between the upgrade and the first read: a
+/// reader that falls behind a fast command leaves its output queued in the
+/// provider's engine socket, which can drop that queue when the engine closes
+/// the stream (HACK-2759 captures: the last 64 to 128 KiB).
 pub(in crate::provider) enum Attached {
-    Stream {
-        stream: std::os::unix::net::UnixStream,
-        deadline: Instant,
-    },
+    Reading(std::thread::JoinHandle<Result<Capture, ReadFailure>>),
     #[cfg(test)]
     Recorded(Vec<u8>),
 }
 impl Attached {
+    /// Start reading `stream` to its end within `deadline`.
+    pub(in crate::provider) fn read(
+        mut stream: std::os::unix::net::UnixStream,
+        deadline: Instant,
+    ) -> Result<Self, ()> {
+        std::thread::Builder::new()
+            .name("engine-output".into())
+            .spawn(move || read_capture(&mut stream, deadline))
+            .map(Self::Reading)
+            .map_err(|_| ())
+    }
     fn capture(self) -> Result<Capture, ReadFailure> {
         match self {
-            Self::Stream {
-                mut stream,
-                deadline,
-            } => read_capture(&mut stream, deadline),
+            Self::Reading(reader) => reader.join().unwrap_or(Err(ReadFailure::Stream)),
             #[cfg(test)]
             Self::Recorded(bytes) => {
                 let mut capture = Capture::default();
@@ -465,7 +512,7 @@ impl Engine<'_> {
                 let stream = self
                     .upgraded(path, Some(body), deadline)
                     .map_err(uncertain_at)?;
-                Ok(Attached::Stream { stream, deadline })
+                Attached::read(stream, deadline).map_err(|()| uncertain_at(Step::Read))
             },
         )
     }
@@ -481,6 +528,8 @@ pub(in crate::provider) struct OneOffOutput {
     /// Bytes of each stream past [`OUTPUT_LIMIT`], read and dropped.
     pub stdout_dropped: u64,
     pub stderr_dropped: u64,
+    /// The end of the output was lost past the kept range ([`Capture::finish`]).
+    pub tail_lost: bool,
 }
 
 #[cfg(any(all(feature = "native-config-plan", target_os = "macos"), test))]
@@ -548,7 +597,7 @@ impl Engine<'_> {
                 let stream = self
                     .upgraded(path, None, deadline)
                     .map_err(|_| one_off_uncertain())?;
-                Ok(Attached::Stream { stream, deadline })
+                Attached::read(stream, deadline).map_err(|()| one_off_uncertain())
             },
         )
     }
@@ -650,6 +699,7 @@ fn one_off(
         stderr: output.stderr,
         stdout_dropped: output.stdout_dropped,
         stderr_dropped: output.stderr_dropped,
+        tail_lost: output.tail_lost,
     })
 }
 
@@ -748,6 +798,7 @@ fn execute(
         truncated,
         stdout_dropped: output.stdout_dropped,
         stderr_dropped: output.stderr_dropped,
+        tail_lost: output.tail_lost,
     })
 }
 
@@ -1374,7 +1425,7 @@ mod tests {
                 |path_, body| {
                     let mut stream = crate::provider::agent::connect_until(&path, deadline)?;
                     upgrade(&mut stream, path_, Some(body), deadline).map_err(|_| uncertain())?;
-                    Ok(Attached::Stream { stream, deadline })
+                    Ok(Attached::read(stream, deadline).unwrap())
                 },
             );
             worker.join().unwrap();
@@ -1385,6 +1436,144 @@ mod tests {
             assert_eq!(result.stdout_dropped, dropped);
             assert_eq!(result.truncated, dropped > 0);
         }
+    }
+    /// HACK-2759 (VM captures): the provider's engine socket closed exec streams
+    /// 64 to 128 KiB before their end, inside a stdout frame. A fake engine that
+    /// closes the same way: past the kept 1 MiB the exec completes with its own
+    /// exit status, truncated, kept bytes exact and no counts claimed; inside the
+    /// kept range it stays uncertain at the format step.
+    #[test]
+    fn an_engine_that_closes_inside_a_frame_loses_only_a_tail_past_the_kept_range() {
+        let container = "a".repeat(64);
+        let id = "b".repeat(64);
+        let (output, multiplexed) = frames(1, 1_351_648);
+        // Cuts inside a frame, as observed: 1,286,624 of 1,351,648 and 600,000.
+        for (cut, lost) in [(1_286_624, true), (600_000, false)] {
+            let path = socket_path();
+            let mut responses = vec![
+                (200, serde_json::to_vec(&json!({"Id":id})).unwrap()),
+                (101, multiplexed[..cut].to_vec()),
+            ];
+            if lost {
+                responses.push((
+                    200,
+                    serde_json::to_vec(
+                        &json!({"ID":id,"ContainerID":container,"Running":false,"ExitCode":3}),
+                    )
+                    .unwrap(),
+                ));
+            }
+            let worker = serve(path.clone(), responses);
+            let transport = Transport::new(&path, Duration::from_secs(5)).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let result = execute(
+                &container,
+                &["tool".into()],
+                None,
+                |method, path, body| transport.request_bytes(method, path, body),
+                |path_, body| {
+                    let mut stream = crate::provider::agent::connect_until(&path, deadline)?;
+                    upgrade(&mut stream, path_, Some(body), deadline).map_err(|_| uncertain())?;
+                    Ok(Attached::read(stream, deadline).unwrap())
+                },
+            );
+            worker.join().unwrap();
+            std::fs::remove_file(&path).unwrap();
+            if lost {
+                let result = result.unwrap();
+                assert_eq!(result.exit_code, 3);
+                assert_eq!(result.stdout, output[..OUTPUT_LIMIT]);
+                assert!(result.truncated && result.tail_lost);
+                assert_eq!((result.stdout_dropped, result.stderr_dropped), (0, 0));
+            } else {
+                let error = result.err().unwrap();
+                assert_eq!(error.message, uncertain_at(Step::Format).message);
+            }
+        }
+    }
+    /// HACK-2759: the exec's output is read from the moment its start returns,
+    /// not after the caller's selection check. Here the check waits for the
+    /// engine to finish writing 4 MiB, which a socket buffer only holds if the
+    /// output is already being read.
+    #[test]
+    fn exec_output_is_read_while_the_callers_check_runs() {
+        use std::io::Write;
+        let container = "a".repeat(64);
+        let id = "b".repeat(64);
+        let (host, mut guest) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (output, multiplexed) = frames(1, 4 * 1024 * 1024);
+        let (written, wrote) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            guest.write_all(&multiplexed).unwrap();
+            written.send(()).unwrap();
+        });
+        let checks = std::cell::Cell::new(0);
+        let mut host = Some(host);
+        let result = execute_guarded(
+            &container,
+            &["tool".into()],
+            None,
+            &|| {
+                checks.set(checks.get() + 1);
+                // The check right after the start returns.
+                if checks.get() == 4 {
+                    wrote
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|_| uncertain())?;
+                }
+                Ok(())
+            },
+            |_, path, _| {
+                Ok(serde_json::to_vec(&if path.ends_with("/exec") {
+                    json!({"Id":id})
+                } else {
+                    json!({"ID":id,"ContainerID":container,"Running":false,"ExitCode":0})
+                })
+                .unwrap())
+            },
+            |_, _| {
+                Ok(Attached::read(
+                    host.take().unwrap(),
+                    Instant::now() + Duration::from_secs(10),
+                )
+                .unwrap())
+            },
+        )
+        .unwrap();
+        writer.join().unwrap();
+        assert_eq!(result.stdout, output[..OUTPUT_LIMIT]);
+        assert!(result.truncated && !result.tail_lost);
+    }
+    /// The lost-tail rule itself: only a cut whose stream already filled its
+    /// kept range succeeds; a cut header needs both streams full; a whole
+    /// response body never accepts a cut.
+    #[test]
+    fn a_cut_frame_is_a_lost_tail_only_past_its_streams_kept_range() {
+        let past = [frame(2, b"err"), frames(1, OUTPUT_LIMIT + 100).1].concat();
+        let cut = past.len() - 50;
+        let mut capture = Capture::default();
+        capture.feed(&past[..cut]).unwrap();
+        let capture = capture.finish().unwrap();
+        assert!(capture.tail_lost && capture.truncated());
+        assert_eq!((capture.stdout_dropped, capture.stderr_dropped), (0, 0));
+        assert_eq!(capture.stderr, b"err");
+        // The same bytes as one response body are malformed.
+        assert!(super::capture(&past[..cut]).is_err());
+        // A cut stderr frame while only stdout is full: its loss is inside
+        // stderr's kept range.
+        let stderr_cut = [frames(1, OUTPUT_LIMIT).1, frame(2, b"late stderr")].concat();
+        let mut capture = Capture::default();
+        capture.feed(&stderr_cut[..stderr_cut.len() - 4]).unwrap();
+        assert!(capture.finish().is_err());
+        // A cut header: its stream is unknown, and stderr is not full.
+        let header_cut = [frames(1, OUTPUT_LIMIT).1, frame(1, b"x")[..5].to_vec()].concat();
+        let mut capture = Capture::default();
+        capture.feed(&header_cut).unwrap();
+        assert!(capture.finish().is_err());
+        // Inside the kept range.
+        let mut capture = Capture::default();
+        capture.feed(&past[..OUTPUT_LIMIT / 2]).unwrap();
+        assert!(capture.finish().is_err());
     }
     /// HACK-2759 (review L2): an output stream that never ends is read only until the
     /// deadline, then the read fails and the exec is uncertain.
@@ -1405,10 +1594,11 @@ mod tests {
             None,
             |_, _, _| Ok(serde_json::to_vec(&json!({"Id":"b".repeat(64)})).unwrap()),
             |_, _| {
-                Ok(Attached::Stream {
-                    stream: host.try_clone().unwrap(),
-                    deadline: Instant::now() + Duration::from_millis(100),
-                })
+                Ok(Attached::read(
+                    host.try_clone().unwrap(),
+                    Instant::now() + Duration::from_millis(100),
+                )
+                .unwrap())
             },
         )
         .err()
@@ -1450,7 +1640,7 @@ mod tests {
             |path_| {
                 let mut stream = crate::provider::agent::connect_until(&path, deadline)?;
                 upgrade(&mut stream, path_, None, deadline).map_err(|_| one_off_uncertain())?;
-                Ok(Attached::Stream { stream, deadline })
+                Ok(Attached::read(stream, deadline).unwrap())
             },
         );
         worker.join().unwrap();

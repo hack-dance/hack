@@ -25,16 +25,19 @@ pub(super) use run::ServiceRun;
 pub(super) use run::execute as service_run;
 /// Bytes of an exec's or one-off's stdout and stderr past the per-stream output
 /// cap, read to the end and dropped (HACK-2759). The kept bytes are the beginning.
+/// `lost` is an output whose end the engine socket lost past the kept range: the
+/// output is incomplete by an unknown amount, so both counts are zero.
 #[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Dropped {
     pub stdout: u64,
     pub stderr: u64,
+    pub lost: bool,
 }
 #[cfg(any(target_os = "macos", test))]
 impl Dropped {
     pub(super) fn any(self) -> bool {
-        self.stdout + self.stderr > 0
+        self.lost || self.stdout + self.stderr > 0
     }
 }
 /// Exit code, bounded stdout/stderr and dropped bytes of one service exec.
@@ -282,6 +285,7 @@ impl Backend for OwnedBackend<'_> {
                 let dropped = Dropped {
                     stdout: v.stdout_dropped,
                     stderr: v.stderr_dropped,
+                    lost: v.tail_lost,
                 };
                 (v.exit_code, v.stdout, v.stderr, dropped)
             })
@@ -300,6 +304,7 @@ impl Backend for OwnedBackend<'_> {
                 let dropped = Dropped {
                     stdout: v.stdout_dropped,
                     stderr: v.stderr_dropped,
+                    lost: v.tail_lost,
                 };
                 (v.container, v.exit_code, v.stdout, v.stderr, dropped)
             })

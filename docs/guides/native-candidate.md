@@ -1974,7 +1974,12 @@ stream is kept, and the rest is read to its end and dropped, so output size alon
 never makes the outcome unconfirmed. When anything was dropped, `hack exec` and
 `hack run` write the kept output and say on stderr that the output is incomplete and,
 when known, how many bytes of each stream were dropped. The exit status stays the command's own, so a
-passing command with a large output still passes. Errors of `hack exec` and `hack run` go to stderr, so stdout carries only
+passing command with a large output still passes. The engine connection can lose the last
+frames of a large output. When the cut comes after a stream's kept 1 MiB, the kept bytes
+are still that stream's exact beginning, and the exit status comes from the engine's own
+record. The command then reports the output as incomplete without byte counts, saying at
+most the first 1 MiB of each stream was written. A cut inside the kept range leaves the
+outcome unconfirmed. Errors of `hack exec` and `hack run` go to stderr, so stdout carries only
 the command's output.
 
 Exec is noninteractive: stdin is closed, no TTY is allocated, and arguments are passed

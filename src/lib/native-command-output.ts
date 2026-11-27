@@ -5,6 +5,10 @@
  * writes what was kept and says on stderr that the output is incomplete and how
  * much was dropped. The exit status stays the command's own, so a passing
  * command with a large output (a CI test run) still passes.
+ *
+ * Without counts the notice claims no more than the runtime observed: the
+ * runtime also reports a large output whose end the engine socket lost past the
+ * kept range, with no counts, so "at most" covers a stream that kept less.
  */
 
 /** Bytes of each stream past the cap, when the runtime reported them. */
@@ -29,6 +33,6 @@ export function nativeCommandTruncatedMessage(input: {
   const what =
     dropped.length > 0
       ? `only the first 1 MiB of each stream was written and ${dropped.join(" and ")} were dropped`
-      : "only the first 1 MiB of each stream was written and the rest was dropped";
+      : "at most the first 1 MiB of each stream was written and the rest was dropped";
   return `hack ${input.operation} output is incomplete: ${what}.\n`;
 }

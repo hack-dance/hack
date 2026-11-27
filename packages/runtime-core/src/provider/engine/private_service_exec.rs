@@ -294,7 +294,8 @@ fn read_capture(
         },
     )?;
     // A stream that ends inside a frame closed early; a malformed frame is a
-    // protocol failure. The two are reported apart (HACK-2759 review).
+    // protocol failure. The two are reported apart (HACK-2759 review). A cut
+    // past the kept range is a lost tail, reported as truncation (`finish`).
     capture
         .finish()
         .map_err(|_| failed(Stage::Output, Reason::Closed))
@@ -477,7 +478,8 @@ impl super::Engine<'_> {
             as i32;
         Ok(super::service_exec::ExecOutput {
             exit_code,
-            truncated: output.stdout_dropped + output.stderr_dropped > 0,
+            truncated: output.truncated(),
+            tail_lost: output.tail_lost,
             stdout: output.stdout,
             stderr: output.stderr,
             stdout_dropped: output.stdout_dropped,
@@ -870,6 +872,32 @@ mod tests {
             assert_eq!(capture.stdout, output[..limit], "{total}");
             assert_eq!(capture.stdout_dropped, (total - limit) as u64);
             assert!(capture.stderr.is_empty());
+        }
+    }
+    /// HACK-2759 (VM captures): the private exec's stream closed inside a frame,
+    /// 64 to 128 KiB before its end. Past the kept 1 MiB that is a lost tail: the
+    /// kept bytes are exact and nothing is counted. Inside it, the output step
+    /// fails as closed.
+    #[test]
+    fn a_private_exec_stream_cut_inside_a_frame_loses_only_a_tail_past_the_kept_range() {
+        let limit = super::super::service_exec::OUTPUT_LIMIT;
+        let (output, multiplexed) = framed(1, 1_351_648);
+        for (cut, lost) in [(1_220_101, true), (700_000, false)] {
+            let (host, mut guest) = UnixStream::pair().unwrap();
+            let bytes = multiplexed[..cut].to_vec();
+            let writer = std::thread::spawn(move || guest.write_all(&bytes).unwrap());
+            let result = read_capture(&host, Instant::now() + Duration::from_secs(20));
+            writer.join().unwrap();
+            if lost {
+                let capture = result.unwrap();
+                assert_eq!(capture.stdout, output[..limit]);
+                assert!(capture.tail_lost && capture.truncated());
+                assert_eq!((capture.stdout_dropped, capture.stderr_dropped), (0, 0));
+            } else {
+                let error = result.err().unwrap();
+                assert_eq!(stage_of(&error)["stage"], "output");
+                assert_eq!(stage_of(&error)["reason"], "closed");
+            }
         }
     }
     /// HACK-2759 (review L2): a command whose output never ends is not read forever.

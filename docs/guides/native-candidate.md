@@ -1970,10 +1970,10 @@ parse, input and transport failures still exit non-zero in JSON mode.
 Exec requires a running service and returns Base64 stdout/stderr to preserve arbitrary
 bytes, an exit code, and a truncation flag. The CLI also exits with the command's exit
 code. Retained exec output is limited to 1 MiB per stream: the beginning of each
-stream is kept, and the rest is read to its end and dropped, so a large output never
-makes the outcome unconfirmed. When anything was dropped, `hack exec` and `hack run`
-write the kept output and say on stderr that the output is incomplete and how many
-bytes of each stream were dropped. The exit status stays the command's own, so a
+stream is kept, and the rest is read to its end and dropped, so output size alone
+never makes the outcome unconfirmed. When anything was dropped, `hack exec` and
+`hack run` write the kept output and say on stderr that the output is incomplete and,
+when known, how many bytes of each stream were dropped. The exit status stays the command's own, so a
 passing command with a large output still passes. Errors of `hack exec` and `hack run` go to stderr, so stdout carries only
 the command's output.
 

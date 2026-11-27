@@ -40,6 +40,10 @@ def worker(root, behavior):
             (root / 'input.txt').write_text(sys.stdin.readline())
         print('child stdout', flush=True)
         print('child stderr', file=sys.stderr, flush=True)
+        # Published only after every input and output above is complete: the
+        # probe signals on this, so a slow worker is never cancelled between
+        # creating input.txt and printing (HACK-2727).
+        (root / 'io.done').write_text('yes')
         if behavior == 'normal':
             sys.exit(7)
     while True:
@@ -147,7 +151,7 @@ def probe(bun, entrypoint, requested_signal, behavior, mode):
                     raise RuntimeError('Command did not resume after fg')
             if behavior in ['normal', 'io', 'pipe']:
                 os.write(fd, b'hello tty\n')
-                if not wait_for(['input.txt']):
+                if not wait_for(['io.done']):
                     raise RuntimeError('Command did not read terminal stdin')
             if behavior != 'normal':
                 if mode == 'paused':

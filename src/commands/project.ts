@@ -170,6 +170,7 @@ import { preflightNativeProjectSource } from "../backends/native-project-source-
 import {
   NativeStartupCanceledError,
   type NativeStartupProgress,
+  nativeLostStartRetirable,
   restartPreflightLossStage,
   routeNativeLostVm,
   startNativeProject,
@@ -7598,12 +7599,24 @@ async function restartNativeImageProject({
     // its intent or stops anything) gets the stage message (HACK-2096 real-VM
     // row 6). The old run is still the live run, so a loss is retired like a
     // ready one; a retry of a cleaned restart has its old run stopped; a
-    // prepared one has an unconfirmed stop, which no command retires yet.
-    preflight: async (run, { cleanedRetry, preparedRetry, signal }) =>
-      await routeNativeLostVm({
+    // prepared one has an unconfirmed stop, which no command retires yet. A
+    // live old run with no published port and an unsettled relay startup
+    // cannot be retired either, as the runtime's selection then shows
+    // (HACK-2731).
+    preflight: async (run, { cleanedRetry, preparedRetry, signal }) => {
+      const loss = restartPreflightLossStage({ cleanedRetry, preparedRetry });
+      return await routeNativeLostVm({
         home: startup.runtime.home,
         signal,
-        loss: restartPreflightLossStage({ cleanedRetry, preparedRetry }),
+        loss,
+        resolveLoss: () =>
+          nativeLostStartRetirable({
+            loss,
+            runtime: native,
+            projectRoot: startup.scope.projectRoot,
+            run,
+            invoke: invokeNativeRuntime,
+          }),
         run: async () => {
           await preflightNativeProjectSource({
             runtime: native,
@@ -7632,7 +7645,8 @@ async function restartNativeImageProject({
             recoverStopped: recovery !== undefined,
           });
         },
-      }),
+      });
+    },
     down: async () => {
       dropEnvFingerprint();
       const code = await handleDown({

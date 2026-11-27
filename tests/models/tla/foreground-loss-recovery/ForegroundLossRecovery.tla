@@ -27,6 +27,10 @@
 \* `ports`: the project publishes a port, so its run holds bridge routes once
 \* ready. A run without one has no route to prove its relay owner by, only the
 \* relay owner's own publication, which the owner's unwind removes (HACK-2711).
+\* `settled`: whether the run's relay and host dependency startup had settled
+\* when the VM died (every dependency service released or completed). An owner
+\* that dies with a host dependency service still `Prepared` or `Provisioned`
+\* leaves it unsettled (HACK-2731), which `Unsettled` lets the model choose.
 \* `left`: what the dead owner of a recorded run lost at Requested left in its
 \* receipt: "failed" when its own unwind ran (`failed-retained`), "restoring"
 \* when it died without unwinding (killed, crashed, or taken down with the CLI
@@ -64,6 +68,14 @@
 \*   RouteProof = "exit": a run with no route proves its dead owner's relay by
 \*     the relay's clean exit (HACK-2711); "pinned": only a still-published
 \*     relay endpoint counts, which a no-port run's unwound owner no longer has.
+\*     Either proof needs a settled relay startup; routes do not.
+\*   Unsettled: a relay startup may be left unsettled when the VM dies after
+\*     services were requested (HACK-2731).
+\*   LiveRelayAdvice: the message once ready names `hack down --recover` only
+\*     when the runtime can prove the dead owner's relay (`cross_boot_relay`:
+\*     routes, or a settled relay startup; this fix). FALSE is #1273, which
+\*     checked settlement only for a start lost before ready
+\*     (`cross_boot_start`).
 \*   ClassifyRule = "veto": a start error counts as a lost VM from the pool
 \*     record (a gone provider pid in any phase, or an ended boot); only a
 \*     `running` record with a live pid vetoes a lost-provider code (this
@@ -79,12 +91,13 @@
 EXTENDS Naturals, Sequences
 
 CONSTANTS MessageRule, ErrorRule, ReleaseLock, RetireIntent, RepairLeftover,
-          ClassifyRule, StorageBarrier, CrossBootStart, RouteProof
+          ClassifyRule, StorageBarrier, CrossBootStart, RouteProof, Unsettled,
+          LiveRelayAdvice
 
 VARIABLES kind, recorded, ports, start, lostAt, endedBy, leftover, stale,
-          left, receipt, intent, lock, msg, todo, outcome
+          left, settled, receipt, intent, lock, msg, todo, outcome
 vars == <<kind, recorded, ports, start, lostAt, endedBy, leftover, stale,
-          left, receipt, intent, lock, msg, todo, outcome>>
+          left, settled, receipt, intent, lock, msg, todo, outcome>>
 
 Commands == {"down", "up", "restart"}
 Stages == {"Preparing", "Requested", "GraphReady", "Serving"}
@@ -99,6 +112,7 @@ TypeOK ==
     /\ leftover \in BOOLEAN
     /\ stale \in BOOLEAN
     /\ left \in {"none", "failed", "restoring"}
+    /\ settled \in BOOLEAN
     /\ receipt \in {"none", "stopped", "unready", "ready"}
     /\ intent \in {"none", "cleaned"}
     /\ lock \in BOOLEAN
@@ -117,13 +131,14 @@ Init ==
     /\ kind = "restart" => recorded
     /\ ports \in BOOLEAN
     /\ start = "Preparing" /\ lostAt = "none" /\ endedBy = "none"
-    /\ leftover = FALSE /\ stale = FALSE /\ left = "none"
+    /\ leftover = FALSE /\ stale = FALSE /\ left = "none" /\ settled = TRUE
     /\ receipt = IF recorded THEN "stopped" ELSE "none"
     /\ intent = IF kind = "restart" THEN "cleaned" ELSE "none"
     /\ lock = (kind = "restart")
     /\ msg = "none" /\ todo = <<>> /\ outcome = "pending"
 
-Frozen == <<kind, recorded, ports, endedBy, leftover, stale, left, msg, todo,
+Frozen == <<kind, recorded, ports, endedBy, leftover, stale, left, settled,
+            msg, todo,
             outcome>>
 
 \* The first service of this run is requested (`graph.onRequested`).
@@ -160,6 +175,8 @@ Die ==
     /\ stale' \in BOOLEAN
     /\ left' \in IF recorded /\ start = "Requested"
                  THEN {"failed", "restoring"} ELSE {"none"}
+    /\ settled' \in IF Unsettled /\ start # "Preparing"
+                    THEN BOOLEAN ELSE {TRUE}
     /\ UNCHANGED <<kind, recorded, ports, endedBy, receipt, intent, lock, msg,
                    todo, outcome>>
 
@@ -170,10 +187,17 @@ StageMessage(at) ==
       [] at = "Requested" -> "inspect"
       [] OTHER -> "downUp"
 
-\* This fix: a recorded run lost at Requested is retired like one lost once
-\* ready; a fresh `up` lost there has no record for the down to find.
+\* A recorded run lost at Requested is retired like one lost once ready, when
+\* the runtime admits that start (`cross_boot_start`, which needs a settled
+\* relay startup); a fresh `up` lost there has no record for the down to find.
+\* With LiveRelayAdvice, a run lost once ready that publishes no port and whose
+\* relay startup had not settled names no command (HACK-2731).
 RecoverMessage(at) ==
-    IF at = "Requested" /\ recorded THEN "downUp" ELSE StageMessage(at)
+    CASE at = "Requested" /\ recorded ->
+            IF settled THEN "downUp" ELSE "inspect"
+      [] at \in {"GraphReady", "Serving"} /\ LiveRelayAdvice
+            /\ ~ports /\ ~settled -> "inspect"
+      [] OTHER -> StageMessage(at)
 
 Message(at) ==
     CASE MessageRule = "recover" -> RecoverMessage(at)
@@ -204,7 +228,7 @@ End(by, m, lockAfter) ==
     /\ lock' = lockAfter
     /\ outcome' = IF Steps(m) = <<>> THEN "ok" ELSE "pending"
     /\ UNCHANGED <<kind, recorded, ports, lostAt, leftover, stale, left,
-                   receipt, intent>>
+                   settled, receipt, intent>>
 
 \* The pool watch sees the lost VM, prints the message, runs `beforeLostExit`
 \* (the restart's lock release) and exits 1; nothing else of the start runs.
@@ -234,8 +258,8 @@ OrdinaryFail ==
     /\ start' = "Lost" /\ lostAt' = start /\ endedBy' = "ordinary"
     /\ todo' = <<>> /\ outcome' = "ok"
     /\ lock' = FALSE
-    /\ UNCHANGED <<kind, recorded, ports, leftover, stale, left, receipt,
-                   intent>>
+    /\ UNCHANGED <<kind, recorded, ports, leftover, stale, left, settled,
+                   receipt, intent>>
 
 \* `hack down --recover` depends on where the start was lost, not on what the
 \* message said. Lost while preparing, the record (if any) is still the
@@ -244,16 +268,19 @@ OrdinaryFail ==
 \* with data kept: once ready and mapped always, and lost in between only a
 \* recorded run, with the recovery of a lost start (CrossBootStart, HACK-2714).
 \* Either needs the dead owner's relay proved: by the run's routes, or with no
-\* published port by the relay's clean exit (RouteProof, HACK-2711).
+\* published port by the relay's clean exit (RouteProof, HACK-2711), which
+\* needs a settled relay startup (HACK-2731). A lost start also needs it
+\* settled whatever its ports (`cross_boot_start`).
 \* Containers a lost VM brought back fail the confirmation unless the down
 \* removes them again.
-RelayProved == ports \/ RouteProof = "exit"
+RelayProved == ports \/ (settled /\ RouteProof = "exit")
 LostStartAdmitted ==
     \/ CrossBootStart = "restoring"
     \/ CrossBootStart = "failed" /\ left = "failed"
 Retirable ==
     CASE lostAt = "Preparing" -> TRUE
-      [] lostAt = "Requested" -> recorded /\ LostStartAdmitted /\ RelayProved
+      [] lostAt = "Requested" ->
+            recorded /\ LostStartAdmitted /\ settled /\ RelayProved
       [] OTHER -> RelayProved
 DownAccepts ==
     /\ Retirable
@@ -286,6 +313,7 @@ Step ==
                          THEN "none"
                          ELSE IF c = "restart" THEN "none" ELSE intent
     /\ UNCHANGED <<kind, recorded, ports, start, lostAt, endedBy, stale, left,
+                   settled,
                    lock, msg>>
 
 Next == Request \/ GraphReady \/ Serve \/ Die \/ Watch \/ StartFails
@@ -296,11 +324,15 @@ Spec == Init /\ [][Next]_vars
 NoRefusedAdvice == outcome # "refused"
 \* The message withholds a command only when none can work: the run was lost
 \* after its services were requested and before it was ready and mapped, and
-\* no cross-boot recovery retires it (a fresh `up`, or the runtime before
-\* HACK-2714).
+\* no cross-boot recovery retires it (a fresh `up`, the runtime before
+\* HACK-2714, or a start whose relay startup had not settled), or once ready
+\* when the run publishes no port and its relay startup had not settled
+\* (HACK-2731).
 NoNeedlessWithholding ==
     msg = "inspect" =>
-        lostAt = "Requested" /\ ~(recorded /\ CrossBootStart # "none")
+        \/ lostAt = "Requested"
+           /\ ~(recorded /\ CrossBootStart # "none" /\ settled)
+        \/ lostAt \in {"GraphReady", "Serving"} /\ ~ports /\ ~settled
 \* Reachability witness (expected to fail): a lost restart is recovered by
 \* following its message.
 NoRestartRecovery ==

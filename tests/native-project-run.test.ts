@@ -13,10 +13,13 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  clearNativeLostRemoval,
   loadNativeProjectRun as load,
+  nativeLostRemovalRecorded,
   nativeRunEnvironmentAvailable,
   nativeRunEnvironmentMarkers,
   normalizeNativeProfiles,
+  recordNativeLostRemoval,
   removeNativeProjectRun as remove,
   saveNativeProjectRun as save,
 } from "../src/backends/native-project-run.ts";
@@ -48,6 +51,41 @@ async function fixture() {
   await mkdir(nativeHome);
   return { projectRoot, projectDir, nativeHome, branch: null };
 }
+// HACK-2731 (#1279 review): the lost-removal marker names exactly one run, and
+// removing that run's mapping removes it, with a temporary file an interrupted
+// record left beside it. Other files in the folder stay.
+test("removing a run mapping removes its lost-removal marker and leftovers", async () => {
+  const opts = await fixture();
+  await save({ ...opts, run });
+  await recordNativeLostRemoval({ ...opts, run });
+  expect(await nativeLostRemovalRecorded({ ...opts, run })).toBe(true);
+  expect(
+    await nativeLostRemovalRecorded({
+      ...opts,
+      run: { ...run, run: "e".repeat(32) },
+    })
+  ).toBe(false);
+  // A later record replaces the marker rather than refusing.
+  await recordNativeLostRemoval({ ...opts, run });
+  const root = join(opts.projectDir, ".internal", "native-runs");
+  const marker = (await readdir(root)).find((name) =>
+    name.endsWith(".lost-removal.json")
+  );
+  expect(marker).toBeDefined();
+  await writeFile(join(root, `${marker}.interrupted.tmp`), "{}", {
+    mode: 0o600,
+  });
+  await writeFile(join(root, "unrelated.tmp"), "{}", { mode: 0o600 });
+  await remove({ ...opts, expected: run });
+  expect(await load(opts)).toBeNull();
+  expect(await nativeLostRemovalRecorded({ ...opts, run })).toBe(false);
+  const left = await readdir(root);
+  expect(left.some((name) => name.startsWith(marker as string))).toBe(false);
+  expect(left).toContain("unrelated.tmp");
+  // Clearing nothing is not an error.
+  await clearNativeLostRemoval(opts);
+});
+
 test("exclusive project/branch mapping roundtrips and exact cleanup preserves other branch", async () => {
   const opts = await fixture();
   expect(await load(opts)).toBeNull();

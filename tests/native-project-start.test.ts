@@ -89,6 +89,8 @@ import {
   classifyNativeLostProvider,
   NATIVE_START_POOL_CHECK_MS,
   NATIVE_START_POOL_GRACE_MS,
+  type NativeForegroundLossStage,
+  nativeForegroundPoolEndMessage,
   watchNativeStartPool,
 } from "../src/backends/native-start-pool-watch.ts";
 import type { NativeStartupLogTail } from "../src/backends/native-startup-logs.ts";
@@ -8758,6 +8760,25 @@ test("a failed exited-provider recovery says so, then keeps the original refusal
   ).toHaveLength(1);
 });
 
+/** The run a lost start's selection is read for, and a full reply for it. */
+const lostRun = { run: "1".repeat(32), owner: "2".repeat(32) };
+function foregroundOwnerReply(
+  selected: Record<string, unknown>
+): Record<string, unknown> {
+  return {
+    version: 1,
+    run: lostRun.run,
+    owner: lostRun.owner,
+    receipt_sha256: "c".repeat(64),
+    foreground: "exited",
+    live_owner_recovery: null,
+    ...selected,
+  };
+}
+const lostRuntime = { home: "/unused" } as Parameters<
+  typeof nativeLostStartRetirable
+>[0]["runtime"];
+
 test.each([
   {
     name: "settled",
@@ -8784,6 +8805,18 @@ test.each([
     retirable: true,
   },
   { name: "ready", selected: { phase: "ready-observed" }, retirable: true },
+  // HACK-2731: a live run with no published port and an unsettled relay
+  // startup, which the runtime refuses (`relay_owner_refused`).
+  {
+    name: "started, relay unprovable",
+    selected: { phase: "started-observed", cross_boot_relay: false },
+    retirable: false,
+  },
+  {
+    name: "started, relay provable",
+    selected: { phase: "started-observed", cross_boot_relay: true },
+    retirable: true,
+  },
   // A pending same-boot recovery resumes only in its own boot.
   {
     name: "same-boot recovery pending",
@@ -8797,49 +8830,270 @@ test.each([
   },
   // An older runtime that does not report it, or a failed selection.
   { name: "older runtime", selected: { phase: "restoring" }, retirable: false },
-  { name: "no phase", selected: {}, retirable: false },
+  { name: "no phase", selected: { phase: undefined }, retirable: false },
   { name: "failed selection", selected: undefined, retirable: false },
+  // HACK-2731: the reply is read by the down's own parser, so a reply the down
+  // refuses never names it. Before, each of these was read as retirable.
+  {
+    name: "another version",
+    selected: { phase: "ready-observed", version: 2 },
+    retirable: false,
+  },
+  {
+    name: "another owner",
+    selected: { phase: "ready-observed", owner: "9".repeat(32) },
+    retirable: false,
+  },
+  {
+    name: "pending recovery not a digest",
+    selected: { phase: "ready-observed", live_owner_recovery: "pending" },
+    retirable: false,
+  },
+  {
+    name: "pending recovery not a string",
+    selected: { phase: "ready-observed", live_owner_recovery: 7 },
+    retirable: false,
+  },
+  {
+    name: "no receipt digest",
+    selected: { phase: "ready-observed", receipt_sha256: undefined },
+    retirable: false,
+  },
 ])("a recorded run lost before ready is retirable only as the runtime admits it ($name)", async ({
   selected,
   retirable,
 }) => {
-  const runId = "1".repeat(32);
   const calls: string[][] = [];
   const loss = await nativeLostStartRetirable({
     loss: { stage: "requested", recorded: true },
-    runtime: { home: "/unused" } as Parameters<
-      typeof nativeLostStartRetirable
-    >[0]["runtime"],
+    runtime: lostRuntime,
     projectRoot: "/unused",
-    run: runId,
+    run: lostRun,
     invoke: (async (request: { args: readonly string[] }) => {
       calls.push([...request.args]);
       if (selected === undefined) {
         throw new Error("selection failed");
       }
-      return { version: 1, run: runId, ...selected };
+      return foregroundOwnerReply(selected);
     }) as unknown as Parameters<typeof nativeLostStartRetirable>[0]["invoke"],
   });
   expect(loss).toEqual({ stage: "requested", recorded: true, retirable });
   expect(calls).toEqual([
-    ["graph", "foreground-owner", "--run-id", runId, "--json"],
+    ["graph", "foreground-owner", "--run-id", lostRun.run, "--json"],
   ]);
 });
 
-test("only a recorded requested loss asks the runtime", async () => {
+test.each([
+  // HACK-2731: the ready-stage advice had the same gap before #1273.
+  {
+    name: "relay unprovable",
+    reply: foregroundOwnerReply({
+      phase: "ready-observed",
+      foreground: "running",
+      cross_boot_relay: false,
+    }),
+    expected: { stage: "ready", retirable: false },
+  },
+  {
+    name: "relay provable",
+    reply: foregroundOwnerReply({
+      phase: "ready-observed",
+      foreground: "running",
+      cross_boot_relay: true,
+    }),
+    expected: { stage: "ready", retirable: true },
+  },
+  // An older runtime does not report it: retired as before.
+  {
+    name: "older runtime",
+    reply: foregroundOwnerReply({
+      phase: "ready-observed",
+      foreground: "running",
+    }),
+    expected: { stage: "ready", retirable: true },
+  },
+  // #1279 review: a ready-stage loss whose receipt is not live (a VM lost
+  // during the owner's own stop) is not refused for its relay, so it keeps the
+  // down advice, whatever `cross_boot_relay` says.
+  {
+    name: "owner's stop, cleanup-intent with a dead-owner hint",
+    reply: foregroundOwnerReply({
+      phase: "cleanup-intent",
+      cross_boot_relay: true,
+      dead_owner_recovery: "d".repeat(64),
+    }),
+    expected: { stage: "ready", retirable: true },
+  },
+  {
+    name: "owner's stop, cleanup-intent, relay unprovable",
+    reply: foregroundOwnerReply({
+      phase: "cleanup-intent",
+      cross_boot_relay: false,
+    }),
+    expected: { stage: "ready", retirable: true },
+  },
+  {
+    name: "stopped retained",
+    reply: foregroundOwnerReply({
+      phase: "stopped-data-retained",
+      foreground: "absent",
+      cross_boot_relay: true,
+    }),
+    expected: { stage: "ready", retirable: true },
+  },
+  // A pending same-boot recovery is not a relay refusal either.
+  {
+    name: "same-boot recovery pending",
+    reply: foregroundOwnerReply({
+      phase: "ready-observed",
+      live_owner_recovery: "a".repeat(64),
+      cross_boot_relay: true,
+    }),
+    expected: { stage: "ready", retirable: true },
+  },
+  // A failed or foreign read keeps the down advice a ready run always had.
+  {
+    name: "failed selection",
+    reply: undefined,
+    expected: { stage: "ready" },
+  },
+  {
+    name: "foreign selection",
+    reply: foregroundOwnerReply({
+      phase: "ready-observed",
+      owner: "9".repeat(32),
+    }),
+    expected: { stage: "ready" },
+  },
+])("a ready run lost with its VM is retirable unless its relay owner is unprovable ($name)", async ({
+  reply,
+  expected,
+}) => {
+  const loss = await nativeLostStartRetirable({
+    loss: { stage: "ready" },
+    runtime: lostRuntime,
+    projectRoot: "/unused",
+    run: lostRun,
+    invoke: (async () => {
+      if (reply === undefined) {
+        throw new Error("selection failed");
+      }
+      return reply;
+    }) as unknown as Parameters<typeof nativeLostStartRetirable>[0]["invoke"],
+  });
+  expect(loss).toEqual(expected as NativeForegroundLossStage);
+});
+
+// A restart lost in its preflight has the ready stage (its old run is still
+// the live run) and goes through the same selection (#1279 review).
+test.each([
+  {
+    name: "relay unprovable",
+    selected: { phase: "ready-observed", cross_boot_relay: false },
+    retirable: false,
+  },
+  {
+    name: "relay provable",
+    selected: { phase: "ready-observed", cross_boot_relay: true },
+    retirable: true,
+  },
+  {
+    name: "cleanup-intent",
+    selected: { phase: "cleanup-intent", cross_boot_relay: false },
+    retirable: true,
+  },
+  {
+    name: "stopped retained",
+    selected: { phase: "stopped-data-retained", foreground: "absent" },
+    retirable: true,
+  },
+])("a restart lost in its preflight withholds the down only for an unprovable live relay ($name)", async ({
+  selected,
+  retirable,
+}) => {
+  const loss = restartPreflightLossStage({
+    cleanedRetry: false,
+    preparedRetry: false,
+  });
+  expect(loss).toEqual({ stage: "ready" });
+  const resolved = await nativeLostStartRetirable({
+    loss,
+    runtime: lostRuntime,
+    projectRoot: "/unused",
+    run: lostRun,
+    invoke: (async () =>
+      foregroundOwnerReply(selected)) as unknown as Parameters<
+      typeof nativeLostStartRetirable
+    >[0]["invoke"],
+  });
+  expect(resolved).toEqual({ stage: "ready", retirable });
+  const message = nativeForegroundPoolEndMessage(
+    { bootId: "b".repeat(32) },
+    resolved
+  );
+  expect(message.includes("Run hack down --recover")).toBe(retirable);
+});
+
+// #1279 review (Codex P2): the start's own error (here the final inspection's
+// unconfirmed cleanup) recommends `hack down --recover`. Its cause line must
+// not name that command when the stage message says none can retire the run.
+test.each([
+  { name: "unprovable ready", loss: { stage: "ready", retirable: false } },
+  { name: "provable ready", loss: { stage: "ready", retirable: true } },
+  { name: "ready, not read", loss: { stage: "ready" } },
+] as {
+  name: string;
+  loss: NativeForegroundLossStage;
+}[])("a lost VM's cause line names the down only where the stage message does ($name)", ({
+  loss,
+}) => {
+  const end = { bootId: "b".repeat(32), providerPid: 4242 };
+  const cause = new Error(
+    "Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Run hack down --recover to resume this run's confirmed cleanup with data retained. Native exit diagnostic: process_identity_unavailable."
+  );
+  const lost = new NativeForegroundVmLostError({ end, loss, cause });
+  const withheld = loss.stage === "ready" && loss.retirable === false;
+  const cleanup =
+    "Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained.";
+  const diagnostic = "Native exit diagnostic: process_identity_unavailable.";
+  expect(lost.message).toBe(
+    [
+      nativeForegroundPoolEndMessage(end, loss),
+      withheld
+        ? `(cause: ${cleanup} ${diagnostic})`
+        : `(cause: ${cleanup} Run hack down --recover to resume this run's confirmed cleanup with data retained. ${diagnostic})`,
+    ].join("\n")
+  );
+  expect(lost.message.includes("hack down --recover")).toBe(!withheld);
+});
+
+test("a ready run whose relay owner is unprovable is told no command", () => {
+  const end = { bootId: "b".repeat(32) };
+  const named = nativeForegroundPoolEndMessage(end, { stage: "ready" });
+  expect(named).toContain("Run hack down --recover");
+  expect(
+    nativeForegroundPoolEndMessage(end, { stage: "ready", retirable: true })
+  ).toBe(named);
+  const withheld = nativeForegroundPoolEndMessage(end, {
+    stage: "ready",
+    retirable: false,
+  });
+  expect(withheld).not.toContain("hack down");
+  expect(withheld).not.toContain("hack up");
+  expect(withheld).toContain("Keep this native home unchanged");
+});
+
+test("only a recorded requested loss, or a ready one, asks the runtime", async () => {
   const invoke = (async () => {
     throw new Error("not asked");
   }) as unknown as Parameters<typeof nativeLostStartRetirable>[0]["invoke"];
   const base = {
-    runtime: { home: "/unused" } as Parameters<
-      typeof nativeLostStartRetirable
-    >[0]["runtime"],
+    runtime: lostRuntime,
     projectRoot: "/unused",
-    run: "1".repeat(32),
+    run: lostRun,
     invoke,
   };
   for (const loss of [
-    { stage: "ready" } as const,
     { stage: "preparing", recorded: true } as const,
     { stage: "requested", recorded: false } as const,
   ]) {
@@ -8852,6 +9106,14 @@ test("only a recorded requested loss asks the runtime", async () => {
       loss: { stage: "requested", recorded: true },
     })
   ).toEqual({ stage: "requested", recorded: true, retirable: false });
+  // A ready run whose mapping is unknown keeps its advice.
+  expect(
+    await nativeLostStartRetirable({
+      ...base,
+      run: undefined,
+      loss: { stage: "ready" },
+    })
+  ).toEqual({ stage: "ready" });
 });
 
 test("a restart preflight's loss stage follows the restart it retries", () => {

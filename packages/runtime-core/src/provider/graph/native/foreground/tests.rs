@@ -109,6 +109,17 @@ fn status(receipt: Receipt) -> Reply {
 
 #[test]
 fn authored_interactive_exec_half_close_keeps_client_alive_until_reader_closes() {
+    // A macOS socket pair can be inherited if an unrelated thread forks
+    // before the close-on-exec flags are set (HACK-2745).
+    crate::provider::run_isolated(
+        "provider::graph::native::foreground::tests::authored_interactive_exec_half_close_child",
+        crate::provider::ISOLATED_HANG_GUARD,
+    );
+}
+
+#[test]
+#[ignore = "isolated child launched by authored_interactive_exec_half_close_keeps_client_alive_until_reader_closes"]
+fn authored_interactive_exec_half_close_child() {
     use std::os::unix::net::UnixStream;
 
     let fixture = Fixture::new();

@@ -55,7 +55,11 @@ pub(super) fn closing_loopback_tcp() -> (TcpCloseFixture, SocketAddr) {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     thread::park_timeout(Duration::from_millis(2));
                 }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted
+                    ) => {}
                 Err(error) => return Err(error),
             }
         }

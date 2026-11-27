@@ -104,7 +104,7 @@ pub(super) const MAX_CONNECT_BUDGET: Duration = Duration::from_secs(5);
 
 /// Hang guard for [`run_isolated`]: the child launches the whole test binary on a host that
 /// may be heavily loaded, so this bounds a hang rather than the fixture's own timing.
-pub(super) const ISOLATED_HANG_GUARD: Duration = Duration::from_secs(120);
+pub(crate) const ISOLATED_HANG_GUARD: Duration = Duration::from_secs(120);
 
 /// Bytes of each child stream kept for a failure message. The readers always drain the
 /// whole stream, so the child is never blocked on a full pipe; only the tail, where libtest
@@ -162,14 +162,16 @@ impl DrainedStream {
 /// unrelated parallel tests: their pre-exec forks (`process::clean_command`) hold copies
 /// of every descriptor of this process until they exec, so a whole-host process scan or
 /// an `flock` release can observe this test's sockets, files or locks in another
-/// process. `bound` is a hang guard for launching the whole binary on a loaded host.
+/// process. Isolation also prevents another test thread from reusing a descriptor number
+/// between closing it and checking that it is invalid. `bound` is a hang guard for launching
+/// the whole binary on a loaded host.
 ///
 /// The child's stdout and stderr are drained on reader threads while it runs: a child
 /// that fails with more output than a pipe buffer holds must exit and report its own
 /// failure, not block on a write until the hang guard reports a watchdog instead. The
 /// bound covers both the child's exit and the readers reaching end of stream, so a
 /// descendant that keeps a copy of either pipe open is reported rather than waited on.
-pub(super) fn run_isolated(test: &str, bound: Duration) {
+pub(crate) fn run_isolated(test: &str, bound: Duration) {
     struct OwnedChild(Child);
     impl Drop for OwnedChild {
         fn drop(&mut self) {

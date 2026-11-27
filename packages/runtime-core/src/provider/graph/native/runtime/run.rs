@@ -56,6 +56,18 @@ impl ServiceRun {
     }
 }
 
+/// The owner's answer code for a one-off of a service whose member has mounts a
+/// one-off cannot carry: persistent storage or a live source (HACK-2752). It is
+/// decided before any record or container exists, so nothing ran.
+pub(super) const OWNER_RUN_MOUNTS_UNSUPPORTED: &str = "graph_authored_run_mounts_unsupported";
+
+fn mounts_unsupported() -> CandidateError {
+    CandidateError::new(
+        OWNER_RUN_MOUNTS_UNSUPPORTED,
+        "An authored one-off cannot carry its service's persistent storage or live source mounts; nothing ran.",
+    )
+}
+
 fn valid_name(run: &str, name: &str) -> bool {
     name.strip_prefix(&format!("hkn-{run}-oneoff-"))
         .is_some_and(|token| hex(token, 32))
@@ -236,6 +248,8 @@ fn one_off_config(
     let image = resource.image.as_deref().ok_or_else(refused)?;
     let member = resource.id.as_deref().ok_or_else(refused)?;
     let process = &observed["Config"];
+    // Mounts the receipt did not record are not a supported shape; they keep the
+    // plain refusal (the recorded ones are refused earlier, HACK-2752).
     if observed["Image"] != image
         || !observed["HostConfig"]["Mounts"]
             .as_array()
@@ -334,10 +348,16 @@ pub(super) fn execute_with<B: Backend>(
     if !selected.valid()
         || receipt.phase != Phase::ReadyObserved
         || !receipt.readiness.contains_key(&selected.service)
-        || receipt.source.is_some()
-        || receipt.data_mounts.contains_key(&selected.service)
     {
         return Err(refused());
+    }
+    // A one-off is a fresh container with none of the member's mounts. A run of a
+    // service that mounts persistent storage, or of a project with a live source,
+    // is refused before anything is recorded or created, with its own code, so the
+    // CLI says it is unsupported and that nothing ran (HACK-2752). It used to be
+    // the plain `refused()`, which the CLI reported as an unconfirmed completion.
+    if receipt.source.is_some() || receipt.data_mounts.contains_key(&selected.service) {
+        return Err(mounts_unsupported());
     }
     let resource = receipt
         .resources
@@ -354,9 +374,12 @@ pub(super) fn execute_with<B: Backend>(
     let config = one_off_config(&receipt, resource, &observed, selected, token)?;
     // Recheck the complete current selection immediately before each create/start
     // transport, and after each response. A failed post-effect proof withholds output.
+    // The persistent-data witness of the project's other services is proven once
+    // before the first transport and once after the last response (HACK-2752); see
+    // `snapshot_unwitnessed_until`.
     let fresh = || {
         managed_environment::remaining_until(deadline)?;
-        snapshot_until(backend, receipt.clone(), Some(deadline))?;
+        snapshot_unwitnessed_until(backend, receipt.clone(), Some(deadline))?;
         if exec::member(backend, &receipt, resource)? != generation {
             return Err(refused());
         }
@@ -366,7 +389,11 @@ pub(super) fn execute_with<B: Backend>(
     record(root, &receipt, &selected.service, &member, &name)?;
     let (container, exit_code, stdout, stderr, truncated) =
         backend.one_off(&name, &config, deadline, &fresh)?;
-    fresh()?;
+    managed_environment::remaining_until(deadline)?;
+    snapshot_until(backend, receipt.clone(), Some(deadline))?;
+    if exec::member(backend, &receipt, resource)? != generation {
+        return Err(refused());
+    }
     discard(root, &run, &name)?;
     let result = ServiceRun {
         receipt,

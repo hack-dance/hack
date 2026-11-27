@@ -198,6 +198,7 @@ if (process.argv.includes("structured")) { console.error(JSON.stringify({code:"s
 if (process.argv.includes("foreground-stopped")) { console.error(JSON.stringify({code:"native_graph_foreground",cause_code:"runtime_not_running",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("foreground-other")) { console.error(JSON.stringify({code:"native_graph_foreground",cause_code:"engine_protocol",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("foreground-run-lease")) { console.error(JSON.stringify({code:"native_graph_foreground",cause_code:"graph_authored_run_lease_busy",message:"synthetic-secret-diagnostic"})); process.exit(23); }
+if (process.argv.includes("foreground-run-mounts")) { console.error(JSON.stringify({code:"native_graph_foreground",cause_code:"graph_authored_run_mounts_unsupported",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("foreground-not-started")) { console.error(JSON.stringify({code:"native_graph_foreground",cause_code:"graph_authored_command_not_started",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("foreground-exec-lease")) { console.error(JSON.stringify({code:"native_graph_foreground",cause_code:"graph_authored_exec_lease_busy",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("one-off-fail")) { console.error(JSON.stringify({code:"graph_one_off_failed",cause_code:"graph_one_off_cancelled",message:"synthetic-secret-diagnostic"})); process.exit(23); }
@@ -1279,6 +1280,12 @@ bunTest.each([
     argument: "foreground-not-started",
     stopped: false,
     cause: "graph_authored_command_not_started",
+  },
+  // HACK-2752: a one-off of a storage-backed service.
+  {
+    argument: "foreground-run-mounts",
+    stopped: false,
+    cause: "graph_authored_run_mounts_unsupported",
   },
 ])(
   "authored control failure preserves only its closed causes: $argument",

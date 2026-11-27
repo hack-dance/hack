@@ -1381,7 +1381,9 @@ function nativeFailureCause(input: {
         // `NATIVE_OWNER_AUTHORED_*` in native-command-lease.ts.
         input.cause === "graph_authored_exec_lease_busy" ||
         input.cause === "graph_authored_run_lease_busy" ||
-        input.cause === "graph_authored_command_not_started"))
+        input.cause === "graph_authored_command_not_started" ||
+        // HACK-2752: a one-off of a storage-backed or live-source service.
+        input.cause === "graph_authored_run_mounts_unsupported"))
     ? input.cause
     : undefined;
 }

@@ -228,6 +228,8 @@ test("HACK-2742: only the authored owner's exact pre-effect causes are not-run r
     ["native_graph_foreground", undefined],
     ["graph_owner_recovery", NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED],
     [NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED, undefined],
+    // HACK-2752: the run-only mounts code never classifies an exec.
+    ["native_graph_foreground", "graph_authored_run_mounts_unsupported"],
   ] as const) {
     expect(
       nativeAuthoredCommandNotRunRefusal(

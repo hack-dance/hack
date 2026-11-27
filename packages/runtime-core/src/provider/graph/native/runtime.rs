@@ -1392,16 +1392,53 @@ fn snapshot_until<B: Backend>(
     receipt: Receipt,
     deadline: Option<Instant>,
 ) -> Result<Snapshot, CandidateError> {
+    snapshot_checked_until(backend, receipt, deadline, true)
+}
+
+/// [`snapshot_until`] without the persistent-data witness, for the recheck
+/// around each engine transport of a command in a running member (HACK-2752).
+/// The witness reopens the guest data tool and reads each enrolled volume's
+/// retained witness through it, twice per snapshot. A finite exec took eleven
+/// snapshots (one before and one after each of its three transports, plus the
+/// outer checks), 22 witness reads, so a storage-backed service's exec spent
+/// about 16 s of its fixed 30 s budget on a real VM proving the same volumes
+/// again. A transport into the
+/// running member cannot change its mounts: those are fixed by the member's
+/// start generation, which every recheck still compares. The command proves the
+/// witness with a full snapshot before its first transport and again after its
+/// last response, before any output is released.
+#[cfg(any(target_os = "macos", test))]
+fn snapshot_unwitnessed_until<B: Backend>(
+    backend: &B,
+    receipt: Receipt,
+    deadline: Option<Instant>,
+) -> Result<Snapshot, CandidateError> {
+    snapshot_checked_until(backend, receipt, deadline, false)
+}
+
+fn snapshot_checked_until<B: Backend>(
+    backend: &B,
+    receipt: Receipt,
+    deadline: Option<Instant>,
+    witness: bool,
+) -> Result<Snapshot, CandidateError> {
     let verify_source = || match deadline {
         Some(deadline) => backend.verify_source_until(&receipt, deadline),
         None => backend.verify_source(&receipt, receipt.phase != Phase::Removed),
     };
-    verify_source()?;
     let data_deadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(40));
-    backend.verify_data(&receipt, data_deadline, &|| Ok(()))?;
+    let verify_data = || {
+        if witness {
+            backend.verify_data(&receipt, data_deadline, &|| Ok(()))
+        } else {
+            Ok(())
+        }
+    };
+    verify_source()?;
+    verify_data()?;
     let observations = service_observations(backend, &receipt)?;
     verify_source()?;
-    backend.verify_data(&receipt, data_deadline, &|| Ok(()))?;
+    verify_data()?;
     Ok(Snapshot {
         receipt,
         observations,

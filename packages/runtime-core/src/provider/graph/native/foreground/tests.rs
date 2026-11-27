@@ -378,14 +378,15 @@ fn owner_codec_refuses_legacy_kind_unknown_fields_and_wrong_process_incarnation(
 }
 
 #[test]
-fn publication_four_binds_session_and_preserves_closed_legacy_live_codecs() {
+fn publication_five_binds_session_and_preserves_closed_legacy_live_codecs() {
     let fixture = Fixture::new();
     let review = fixture.receipt().review;
     let publication = owner::Publication::bind(&fixture.candidate, &review).unwrap();
     let file = fixture.owner_root().join("owner.json");
     let bytes = fs::read(&file).unwrap();
     let qualified: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(qualified["version"], 4);
+    // Version 5: the session-qualified record of an owner that accepts commands.
+    assert_eq!(qualified["version"], 5);
     assert!(
         qualified["host_boot_uuid"] == serde_json::to_value(host_boot::read().unwrap()).unwrap(),
         "Publication must retain the observed boot qualifier"
@@ -488,7 +489,7 @@ fn session_codec_refuses_missing_mixed_downgraded_and_unknown_qualifiers() {
             "micros" => bad["host_boot_micros"] = json!(1),
             "v3" => bad["version"] = json!(3),
             "v2" => bad["version"] = json!(2),
-            "future" => bad["version"] = json!(5),
+            "future" => bad["version"] = json!(6),
             _ => unreachable!(),
         }
         fs::write(&file, serde_json::to_vec(&bad).unwrap()).unwrap();

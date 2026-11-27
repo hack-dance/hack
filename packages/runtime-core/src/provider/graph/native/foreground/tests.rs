@@ -172,6 +172,9 @@ fn real_compiler_review_crosses_authenticated_native_socket_without_compose_fiel
         };
         let input: Request = transport::read(&mut stream, Duration::from_secs(1), 4096).unwrap();
         input.validate(&receipt.review).unwrap();
+        if input.version == ACCEPTING_VERSION {
+            transport::send_marker(&stream, ACCEPTED, Duration::from_secs(1)).unwrap();
+        }
         assert!(matches!(input.action, Action::Status));
         transport::write(
             &mut stream,
@@ -749,10 +752,24 @@ fn changed(mut receipt: Receipt, field: &str) -> Receipt {
     receipt.validate(RUN, &receipt.owner).unwrap();
     receipt
 }
+/// The owner side of one request, as the serve loop does it: take the
+/// connection, read and validate the request and, for a command, accept it.
 fn accepted(
     publication: &owner::Publication,
     review: &native_input::Review,
 ) -> std::os::unix::net::UnixStream {
+    let (stream, input) = taken(publication, review);
+    if input.version == ACCEPTING_VERSION {
+        transport::send_marker(&stream, ACCEPTED, Duration::from_secs(1)).unwrap();
+    }
+    stream
+}
+
+/// Take and validate one request without accepting it.
+fn taken(
+    publication: &owner::Publication,
+    review: &native_input::Review,
+) -> (std::os::unix::net::UnixStream, Request) {
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut stream = loop {
         if let Some(stream) = publication.accept().unwrap() {
@@ -763,7 +780,7 @@ fn accepted(
     };
     let input: Request = transport::read(&mut stream, Duration::from_secs(1), 4096).unwrap();
     input.validate(review).unwrap();
-    stream
+    (stream, input)
 }
 
 #[test]
@@ -1010,6 +1027,9 @@ fn finite_logs_wire_authenticates_the_live_native_owner_and_exact_member() {
         };
         let input: Request = transport::read(&mut stream, Duration::from_secs(2), 4096).unwrap();
         input.validate(&receipt.review).unwrap();
+        if input.version == ACCEPTING_VERSION {
+            transport::send_marker(&stream, ACCEPTED, Duration::from_secs(1)).unwrap();
+        }
         assert!(input.action == Action::Logs);
         assert_eq!(input.logs.as_ref().unwrap().service, "web");
         assert_eq!(input.logs.as_ref().unwrap().tail, 17);
@@ -1190,6 +1210,9 @@ fn interactive_handoff_failures_keep_only_the_attempted_session() {
             let request: Request =
                 transport::read(&mut stream, Duration::from_secs(1), LIMIT).unwrap();
             request.validate(&receipt.review).unwrap();
+            if request.version == ACCEPTING_VERSION {
+                transport::send_marker(&stream, ACCEPTED, Duration::from_secs(1)).unwrap();
+            }
             assert_eq!(request.session.as_deref(), Some(SESSION));
             if case != "disconnect-before-descriptor" {
                 let (attached, _engine) = UnixStream::pair().unwrap();
@@ -1295,6 +1318,9 @@ fn finite_exec_wire_authenticates_owner_member_and_binary_nonzero_completion() {
         };
         let input: Request = transport::read(&mut stream, Duration::from_secs(2), 4096).unwrap();
         input.validate(&receipt.review).unwrap();
+        if input.version == ACCEPTING_VERSION {
+            transport::send_marker(&stream, ACCEPTED, Duration::from_secs(1)).unwrap();
+        }
         assert!(input.action == Action::Exec);
         assert!(input.logs.is_none());
         let selected = input.exec.as_ref().unwrap();
@@ -1382,6 +1408,9 @@ fn finite_one_off_wire_authenticates_owner_member_fresh_container_and_binary_non
         };
         let input: Request = transport::read(&mut stream, Duration::from_secs(2), 4096).unwrap();
         input.validate(&receipt.review).unwrap();
+        if input.version == ACCEPTING_VERSION {
+            transport::send_marker(&stream, ACCEPTED, Duration::from_secs(1)).unwrap();
+        }
         assert!(input.action == Action::Run);
         assert!(input.logs.is_none());
         assert!(input.exec.is_none());
@@ -1751,39 +1780,6 @@ fn a_command_left_in_the_backlog_of_an_owner_that_ended_through_cleanup_is_not_s
     }
 }
 
-/// HACK-2742 review: the same end without the owner's evidence stays
-/// unconfirmed. An owner that accepted and read the request, then dropped the
-/// connection unanswered but is still published, may have processed it; an
-/// owner that sent part of an answer before it ended did process it.
-#[test]
-fn an_unanswered_command_without_a_clean_owner_end_stays_unconfirmed() {
-    for case in ["alive", "partial"] {
-        let fixture = Fixture::new();
-        let receipt = admitted(fixture.receipt());
-        let publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
-        let root = journal::reserve(&fixture.candidate, &receipt).unwrap();
-        std::thread::scope(|scope| {
-            let caller =
-                scope.spawn(|| exec(&fixture.candidate, RUN, "web", &["true".into()], None));
-            let mut stream = accepted(&publication, &receipt.review);
-            if case == "partial" {
-                stream.write_all(&[0, 0, 0]).unwrap();
-            }
-            drop(stream);
-            if case == "partial" {
-                end_through_cleanup(publication, &root, &receipt);
-                let error = caller.join().unwrap().err().unwrap();
-                assert!(error.cause_code.is_none(), "{case}: {}", error.code);
-            } else {
-                let error = caller.join().unwrap().err().unwrap();
-                assert!(error.cause_code.is_none(), "{case}: {}", error.code);
-                let mut publication = publication;
-                publication.finish().unwrap();
-            }
-        });
-    }
-}
-
 /// HACK-2742 review: a stale pin whose socket is gone refuses the connect before
 /// anything is sent, so it answers not-started too.
 #[test]
@@ -1853,12 +1849,73 @@ fn an_interactive_request_left_in_the_backlog_of_an_ended_owner_is_not_started()
     }
 }
 
-/// HACK-2742 re-review (L1): dead-owner recovery saves the run removed and
-/// archives the publication rather than deleting it, which otherwise looks like
-/// the owner's own retirement. While either archive path is present the owner's
-/// clean end is not proven, so the unanswered backlog request stays unconfirmed.
+/// HACK-2742 review (P1): the not-started proof is the owner's own acceptance of
+/// this request, not its retirement. An owner that took and read the request but
+/// closed without accepting it never started it, even while it stays published.
 #[test]
-fn a_backlog_request_after_a_recovery_archived_retirement_stays_unconfirmed() {
+fn a_command_the_owner_took_but_never_accepted_is_not_started() {
+    for action in [Action::Exec, Action::Run] {
+        let fixture = Fixture::new();
+        let receipt = admitted(fixture.receipt());
+        let mut publication =
+            owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+        journal::reserve(&fixture.candidate, &receipt).unwrap();
+        std::thread::scope(|scope| {
+            let caller = scope.spawn(|| match action {
+                Action::Exec => exec(&fixture.candidate, RUN, "web", &["true".into()], None),
+                _ => one_off(&fixture.candidate, RUN, "web", &["true".into()], None),
+            });
+            let (stream, input) = taken(&publication, &receipt.review);
+            assert_eq!(input.version, ACCEPTING_VERSION);
+            drop(stream);
+            let error = caller.join().unwrap().err().unwrap();
+            assert_eq!(error.code, "native_graph_foreground");
+            assert_eq!(
+                error.cause_code.as_deref(),
+                Some("graph_authored_command_not_started")
+            );
+        });
+        publication.finish().unwrap();
+    }
+}
+
+/// HACK-2742 review (P1): once the owner accepted a command, a missing or partial
+/// answer stays unconfirmed, even when the owner then ends through its normal
+/// cleanup within moments (the lost-large-reply case Codex found).
+#[test]
+fn an_accepted_command_without_its_reply_stays_unconfirmed() {
+    for case in ["closed-then-cleanup", "partial"] {
+        let fixture = Fixture::new();
+        let receipt = admitted(fixture.receipt());
+        let publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+        let root = journal::reserve(&fixture.candidate, &receipt).unwrap();
+        std::thread::scope(|scope| {
+            let caller =
+                scope.spawn(|| exec(&fixture.candidate, RUN, "web", &["true".into()], None));
+            let mut stream = accepted(&publication, &receipt.review);
+            if case == "partial" {
+                stream.write_all(&[0, 0, 0]).unwrap();
+            }
+            drop(stream);
+            if case == "closed-then-cleanup" {
+                end_through_cleanup(publication, &root, &receipt);
+                let error = caller.join().unwrap().err().unwrap();
+                assert!(error.cause_code.is_none(), "{case}: {}", error.code);
+            } else {
+                let error = caller.join().unwrap().err().unwrap();
+                assert!(error.cause_code.is_none(), "{case}: {}", error.code);
+                let mut publication = publication;
+                publication.finish().unwrap();
+            }
+        });
+    }
+}
+
+/// HACK-2742 review: a backlog request was never accepted, so it is not started
+/// however the publication was then retired, including a dead-owner recovery
+/// that archives the publication files instead of deleting them.
+#[test]
+fn a_backlog_request_is_not_started_whatever_retired_the_publication() {
     for archive in [
         "control-feedface.retired.sock",
         "owner-feedface.retired.json",
@@ -1874,71 +1931,148 @@ fn a_backlog_request_after_a_recovery_archived_retirement_stays_unconfirmed() {
             pending_connection(&publication);
             end_through_cleanup(publication, &root, &receipt);
             let error = caller.join().unwrap().err().unwrap();
-            // The failing step races the listener's close (write or read), so
-            // the code differs; only the not-started answer is ruled out.
-            assert_ne!(
-                error.code, "graph_authored_command_not_started",
+            assert_eq!(error.code, "native_graph_foreground", "{archive}");
+            assert_eq!(
+                error.cause_code.as_deref(),
+                Some("graph_authored_command_not_started"),
                 "{archive}"
-            );
-            assert!(
-                error.cause_code.is_none(),
-                "{archive}: {:?}",
-                error.cause_code
             );
         });
     }
 }
 
-/// HACK-2742 re-review (L2): a retained receipt for this exact session means the
-/// owner had admitted it, so even an unanswered close followed by the owner's
-/// clean end stays session-correlated (uncertain), never not-started.
+/// HACK-2742 review: the interactive request the owner accepted and then left
+/// unanswered stays session-correlated (uncertain); the one it took without
+/// accepting is not started, with no session, while the owner is still published.
+/// A close of this side's own stream by the leash watcher, once the frontend is
+/// gone, is never read as the owner's close.
 #[test]
-fn an_unanswered_interactive_request_with_its_session_receipt_stays_uncertain() {
-    use crate::provider::{
-        graph::interactive_exec::Options,
-        interactive_session::{self, Backend, Binding},
-        interactive_terminal::Leash,
-    };
+fn an_interactive_request_is_not_started_only_without_the_owners_acceptance() {
+    use crate::provider::{graph::interactive_exec::Options, interactive_terminal::Leash};
     use std::os::unix::net::UnixStream;
     const SESSION: &str = "12345678-abcd-abcd-abcd-123456789abc";
+    for case in ["accepted", "not-accepted", "frontend-gone"] {
+        let fixture = Fixture::new();
+        let receipt = admitted(fixture.receipt());
+        let mut publication =
+            owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+        journal::reserve(&fixture.candidate, &receipt).unwrap();
+        let (input, mut frontend) = UnixStream::pair().unwrap();
+        frontend.write_all(&[0; 4]).unwrap();
+        let (leash, _) = Leash::receive(input.into()).unwrap();
+        let argv = vec!["tool".into()];
+        let options = Options {
+            session: SESSION,
+            run: RUN,
+            service: "web",
+            owner: &receipt.owner,
+            plan: receipt.review.review_id(),
+            namespace: receipt.review.scope().namespace,
+            native: true,
+            argv: &argv,
+            workdir: None,
+            expected_container: None,
+            expected_generation: None,
+        };
+        std::thread::scope(|scope| {
+            let caller =
+                scope.spawn(|| interactive(&fixture.candidate, &options, [43, 91], &leash));
+            let error = match case {
+                "accepted" => {
+                    drop(accepted(&publication, &receipt.review));
+                    caller.join().unwrap().err().unwrap()
+                }
+                "not-accepted" => {
+                    drop(taken(&publication, &receipt.review));
+                    caller.join().unwrap().err().unwrap()
+                }
+                _ => {
+                    // The owner holds the request unanswered while the frontend
+                    // goes away; the watcher then shuts this side down.
+                    let (stream, _) = taken(&publication, &receipt.review);
+                    drop(frontend);
+                    let error = caller.join().unwrap().err().unwrap();
+                    drop(stream);
+                    error
+                }
+            };
+            if case == "not-accepted" {
+                assert_eq!(error.code, "graph_authored_command_not_started");
+                assert!(error.session().is_none());
+            } else {
+                assert_ne!(error.code, "graph_authored_command_not_started", "{case}");
+                assert_eq!(error.session(), Some(SESSION), "{case}");
+            }
+        });
+        publication.finish().unwrap();
+    }
+}
+
+/// HACK-2742 review (P1): a command reply at the output cap, 1 MiB on each
+/// stream (1,398,104 bytes of base64 each), is beyond the request bound and was
+/// lost before any byte was sent. The owner's reply writer now delivers it, and
+/// the requester reads it whole.
+#[test]
+fn a_command_reply_at_the_output_cap_is_delivered() {
+    use base64::Engine as _;
     let fixture = Fixture::new();
-    let receipt = admitted(fixture.receipt());
-    let publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
-    let root = journal::reserve(&fixture.candidate, &receipt).unwrap();
-    let binding = Binding {
-        backend: Backend::Authored,
-        namespace: "a".repeat(64),
+    let mut receipt = fixture.receipt();
+    receipt.phase = Phase::ReadyObserved;
+    for (index, resource) in receipt.resources.values_mut().enumerate() {
+        resource.id = Some(format!("{:064x}", index + 1));
+        resource.phase = if resource.kind == Kind::Container {
+            "started"
+        } else {
+            "created"
+        }
+        .into();
+    }
+    let stream_at_cap = base64::engine::general_purpose::STANDARD.encode(vec![0xA5; 1024 * 1024]);
+    assert_eq!(stream_at_cap.len(), 1_398_104);
+    let reply = Reply {
+        version: 2,
+        kind: ReplyKind::NativeGraphControlReply,
         run: RUN.into(),
-        owner: "c".repeat(32),
-        boot: "00000000-0000-4000-8000-000000000001".into(),
-        container: "d".repeat(64),
-        generation: "2026-11-12T01:02:03.123456789Z".into(),
-        service: "web".into(),
+        review: receipt.review.review_id().into(),
+        result: Outcome::Exec {
+            exec: runtime::ServiceExec {
+                receipt: receipt.clone(),
+                service: "web".into(),
+                container: receipt.resources["container:web"].id.clone().unwrap(),
+                exit_code: 0,
+                stdout_base64: stream_at_cap.clone(),
+                stderr_base64: stream_at_cap.clone(),
+                truncated: true,
+            },
+        },
     };
-    drop(interactive_session::admit(&fixture.candidate, binding, SESSION).unwrap());
-    let (input, mut frontend) = UnixStream::pair().unwrap();
-    frontend.write_all(&[0; 4]).unwrap();
-    let (leash, _) = Leash::receive(input.into()).unwrap();
-    let argv = vec!["tool".into()];
-    let options = Options {
-        session: SESSION,
-        run: RUN,
-        service: "web",
-        owner: &receipt.owner,
-        plan: receipt.review.review_id(),
-        namespace: receipt.review.scope().namespace,
-        native: true,
-        argv: &argv,
-        workdir: None,
-        expected_container: None,
-        expected_generation: None,
-    };
+    // The request bound cannot carry it: this was the lost reply.
+    let (mut small, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    assert!(transport::write(&mut small, &reply, Duration::from_secs(1)).is_err());
+
+    let mut publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+    journal::reserve(&fixture.candidate, &receipt).unwrap();
     std::thread::scope(|scope| {
-        let caller = scope.spawn(|| interactive(&fixture.candidate, &options, [43, 91], &leash));
-        pending_connection(&publication);
-        end_through_cleanup(publication, &root, &receipt);
-        let error = caller.join().unwrap().err().unwrap();
-        assert_ne!(error.code, "graph_authored_command_not_started");
-        assert_eq!(error.session(), Some(SESSION));
+        let caller = scope.spawn(|| exec(&fixture.candidate, RUN, "web", &["true".into()], None));
+        let mut stream = accepted(&publication, &receipt.review);
+        let selected = runtime::ExecSelection {
+            service: "web".into(),
+            argv: vec!["true".into()],
+            workdir: None,
+        };
+        reply
+            .validate(&receipt, Action::Exec, None, Some(&selected), None)
+            .unwrap();
+        deliver_reply(&mut stream, &reply, Action::Exec).unwrap();
+        let value = caller.join().unwrap().unwrap();
+        assert_eq!(
+            value["result"]["exec"]["stdout_base64"],
+            stream_at_cap.as_str()
+        );
+        assert_eq!(
+            value["result"]["exec"]["stderr_base64"],
+            stream_at_cap.as_str()
+        );
     });
+    publication.finish().unwrap();
 }

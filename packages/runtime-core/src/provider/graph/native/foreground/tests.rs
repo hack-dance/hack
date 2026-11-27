@@ -1699,3 +1699,156 @@ fn a_requester_whose_owner_is_gone_before_the_write_answers_not_started() {
     assert_eq!(error.code, "graph_authored_command_not_started");
     assert!(error.session().is_none());
 }
+
+/// Wait until the owner's listener holds a connection it has not accepted.
+fn pending_connection(publication: &owner::Publication) {
+    use std::os::fd::AsRawFd;
+    let mut descriptor = libc::pollfd {
+        fd: publication.descriptor().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one valid pollfd for the listener the publication owns.
+    let ready = unsafe { libc::poll(&mut descriptor, 1, 5000) };
+    assert_eq!(ready, 1, "the requester never connected");
+}
+
+/// The owner's normal end: its run saved as removed, then its publication
+/// retired and its listener closed, with any backlog connection unaccepted.
+fn end_through_cleanup(publication: owner::Publication, root: &std::path::Path, receipt: &Receipt) {
+    let mut publication = publication;
+    journal::save(root, &removed(receipt.clone())).unwrap();
+    publication.finish().unwrap();
+    drop(publication);
+}
+
+/// HACK-2742 review, VM row 4 reproduced: the requester connected while the
+/// owner was busy in its own `hack down` cleanup and wrote its request into the
+/// listen backlog; the owner then saved its run removed, retired and closed the
+/// listener without accepting it. Nothing was processed, so finite exec and run
+/// answer not-started instead of an unconfirmed completion.
+#[test]
+fn a_command_left_in_the_backlog_of_an_owner_that_ended_through_cleanup_is_not_started() {
+    for action in [Action::Exec, Action::Run] {
+        let fixture = Fixture::new();
+        let receipt = admitted(fixture.receipt());
+        let publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+        let root = journal::reserve(&fixture.candidate, &receipt).unwrap();
+        std::thread::scope(|scope| {
+            let caller = scope.spawn(|| match action {
+                Action::Exec => exec(&fixture.candidate, RUN, "web", &["true".into()], None),
+                _ => one_off(&fixture.candidate, RUN, "web", &["true".into()], None),
+            });
+            pending_connection(&publication);
+            end_through_cleanup(publication, &root, &receipt);
+            let error = caller.join().unwrap().err().unwrap();
+            assert_eq!(error.code, "native_graph_foreground", "{}", error.message);
+            assert_eq!(
+                error.cause_code.as_deref(),
+                Some("graph_authored_command_not_started")
+            );
+        });
+    }
+}
+
+/// HACK-2742 review: the same end without the owner's evidence stays
+/// unconfirmed. An owner that accepted and read the request, then dropped the
+/// connection unanswered but is still published, may have processed it; an
+/// owner that sent part of an answer before it ended did process it.
+#[test]
+fn an_unanswered_command_without_a_clean_owner_end_stays_unconfirmed() {
+    for case in ["alive", "partial"] {
+        let fixture = Fixture::new();
+        let receipt = admitted(fixture.receipt());
+        let publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+        let root = journal::reserve(&fixture.candidate, &receipt).unwrap();
+        std::thread::scope(|scope| {
+            let caller =
+                scope.spawn(|| exec(&fixture.candidate, RUN, "web", &["true".into()], None));
+            let mut stream = accepted(&publication, &receipt.review);
+            if case == "partial" {
+                stream.write_all(&[0, 0, 0]).unwrap();
+            }
+            drop(stream);
+            if case == "partial" {
+                end_through_cleanup(publication, &root, &receipt);
+                let error = caller.join().unwrap().err().unwrap();
+                assert!(error.cause_code.is_none(), "{case}: {}", error.code);
+            } else {
+                let error = caller.join().unwrap().err().unwrap();
+                assert!(error.cause_code.is_none(), "{case}: {}", error.code);
+                let mut publication = publication;
+                publication.finish().unwrap();
+            }
+        });
+    }
+}
+
+/// HACK-2742 review: a stale pin whose socket is gone refuses the connect before
+/// anything is sent, so it answers not-started too.
+#[test]
+fn a_stale_pin_with_a_dead_socket_is_not_started() {
+    let fixture = Fixture::new();
+    let receipt = admitted(fixture.receipt());
+    let _publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+    fs::remove_file(fixture.owner_root().join("control.sock")).unwrap();
+    let error = exec(&fixture.candidate, RUN, "web", &["true".into()], None)
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.cause_code.as_deref(),
+        Some("graph_authored_command_not_started")
+    );
+}
+
+/// HACK-2742 review, VM row 4b reproduced: the interactive request left in the
+/// backlog of an owner that ended through cleanup answers not-started with no
+/// session; while that owner is still published, the same unanswered close
+/// stays session-correlated (uncertain).
+#[test]
+fn an_interactive_request_left_in_the_backlog_of_an_ended_owner_is_not_started() {
+    use crate::provider::{graph::interactive_exec::Options, interactive_terminal::Leash};
+    use std::os::unix::net::UnixStream;
+    const SESSION: &str = "12345678-abcd-abcd-abcd-123456789abc";
+    for ended in [true, false] {
+        let fixture = Fixture::new();
+        let receipt = admitted(fixture.receipt());
+        let publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+        let root = journal::reserve(&fixture.candidate, &receipt).unwrap();
+        let (input, mut frontend) = UnixStream::pair().unwrap();
+        frontend.write_all(&[0; 4]).unwrap();
+        let (leash, _) = Leash::receive(input.into()).unwrap();
+        let argv = vec!["tool".into()];
+        let options = Options {
+            session: SESSION,
+            run: RUN,
+            service: "web",
+            owner: &receipt.owner,
+            plan: receipt.review.review_id(),
+            namespace: receipt.review.scope().namespace,
+            native: true,
+            argv: &argv,
+            workdir: None,
+            expected_container: None,
+            expected_generation: None,
+        };
+        std::thread::scope(|scope| {
+            let caller =
+                scope.spawn(|| interactive(&fixture.candidate, &options, [43, 91], &leash));
+            if ended {
+                pending_connection(&publication);
+                end_through_cleanup(publication, &root, &receipt);
+                let error = caller.join().unwrap().err().unwrap();
+                assert_eq!(error.code, "graph_authored_command_not_started");
+                assert!(error.session().is_none());
+            } else {
+                let stream = accepted(&publication, &receipt.review);
+                drop(stream);
+                let error = caller.join().unwrap().err().unwrap();
+                assert_eq!(error.session(), Some(SESSION));
+                let mut publication = publication;
+                publication.finish().unwrap();
+            }
+        });
+    }
+}

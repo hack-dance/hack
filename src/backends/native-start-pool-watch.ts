@@ -35,7 +35,9 @@
  * on a graph owner whose VM was gone and never exited. `onEnded` receives the
  * evidence, so a foreground start can name the lost VM before it exits.
  */
+
 import { isRecord } from "../lib/guards.ts";
+import type { NativeReadyLossWithheld } from "./native-cross-boot-recovery.ts";
 import {
   nativeHttpsPoolBootEnded,
   readNativePoolRecord,
@@ -85,7 +87,12 @@ export type NativeForegroundLossStage =
        */
       readonly retirable?: boolean;
     }
-  | { readonly stage: "ready"; readonly retirable?: boolean };
+  | {
+      readonly stage: "ready";
+      readonly retirable?: boolean;
+      /** With `retirable` false: why no command retires it (HACK-2757). */
+      readonly withheld?: NativeReadyLossWithheld;
+    };
 
 /**
  * What a foreground start prints when its VM is lost (HACK-2096): which VM, that
@@ -148,13 +155,21 @@ function lossAdvice(loss: NativeForegroundLossStage): string {
     return UNRECORDED_REQUESTED_ADVICE;
   }
   if (loss.stage === "ready" && loss.retirable === false) {
-    return UNPROVABLE_READY_ADVICE;
+    return WITHHELD_READY_ADVICE[loss.withheld ?? "relay"];
   }
   return LOSS_ADVICE[loss.stage];
 }
 
-const UNPROVABLE_READY_ADVICE =
-  "It was lost once it was ready, but the runtime cannot prove which relay owner it had (the run publishes no port and its host relay startup had not settled), so no hack command can retire it yet. Keep this native home unchanged for inspection; hack ps --json shows what the run left.";
+const KEEP_HOME =
+  "Keep this native home unchanged for inspection; hack ps --json shows what the run left.";
+
+/** Why a ready-stage loss names no command, by its selection (HACK-2757). */
+const WITHHELD_READY_ADVICE: Readonly<Record<NativeReadyLossWithheld, string>> =
+  {
+    relay: `It was lost once it was ready, but the runtime cannot prove which relay owner it had (the run publishes no port and its host relay startup had not settled), so no hack command can retire it yet. ${KEEP_HOME}`,
+    stop: `It was lost during its own stop (Ctrl-C), and the runtime cannot finish that stop after the VM restarts: its relay cleanup marker names no ended boot of this pool, or the bridge selection the stop saved is missing or does not match. No hack command can retire it yet. ${KEEP_HOME}`,
+    "stop-unreported": `It was lost during its own stop (Ctrl-C), and this native runtime is too old to report whether it can finish that stop after the VM restarts, so no hack command is named. ${KEEP_HOME}`,
+  };
 
 const UNRECORDED_REQUESTED_ADVICE =
   "It was lost before its services were ready, and no hack command can retire a run lost at that point yet. Keep this native home unchanged for inspection; hack ps --json shows what the run left.";

@@ -419,20 +419,75 @@ pub(crate) fn relay_owner_provable(candidate: &Candidate, owner: &str, receipt: 
     pinned_predecessor_eligible(receipt) || run_holds_slot(candidate, owner, &receipt.run)
 }
 
-/// Whether the bridge selection an interrupted enrolled cleanup persisted
-/// (`relay-cleanup-bridges.json`, for this run and pool owner) names any route
-/// of the run, so a cross-boot recovery proves the dead relay owner by them
-/// although the cleanup already released the slots (HACK-2746). Presentation
-/// only; unreadable or foreign counts as none.
-pub(crate) fn interrupted_selection_routes(root: &std::path::Path, owner: &str, run: &str) -> bool {
-    selection_path(root)
-        .and_then(|path| state::read_bounded::<Selection>(&path, 65536))
-        .is_ok_and(|selection| {
-            selection.version == 1
-                && selection.owner == owner
-                && selection.run == run
-                && !selection.selected.is_empty()
-        })
+/// Whether the cross-boot recovery of a stop interrupted inside its enrolled relay
+/// cleanup, in `old_boot`, can prove the dead relay owner, as far as host files show
+/// (HACK-2746, HACK-2757). While the bridge registry still records the run's slots,
+/// `capture_previous_boot` selects them. Otherwise it reads the selection the
+/// cleanup persisted (`relay-cleanup-bridges.json`) and accepts it only as
+/// [`interrupted_selection_admits`] does here; an empty one then needs a settled
+/// relay startup. Presentation only (`graph foreground-owner`): read without a lease
+/// or the guest; an unreadable or foreign file counts as no proof, and the recovery
+/// revalidates everything itself.
+pub(crate) fn interrupted_stop_provable(
+    candidate: &Candidate,
+    graph_root: &std::path::Path,
+    owner: &crate::provider::state::Owner,
+    receipt: &Receipt,
+    old_boot: &str,
+) -> bool {
+    if run_holds_slot(candidate, &owner.token, &receipt.run) {
+        return true;
+    }
+    let Ok(prior) =
+        selection_path(graph_root).and_then(|path| state::read_bounded::<Selection>(&path, 65536))
+    else {
+        return false;
+    };
+    let path = root(candidate).join("state.json");
+    let serial = match state::read_bounded::<Store>(&path, 65536) {
+        Ok(store) if store.version == 1 && store.owner == owner.token => store.next_launch_serial,
+        // A pool without the bridge registry reads it as empty (`load_store`).
+        Err(_) if owner.application_bridge.is_none() && !path.exists() => 0,
+        _ => return false,
+    };
+    interrupted_selection_admits(
+        &prior,
+        receipt,
+        &owner.token,
+        old_boot,
+        owner.application_bridge.map_or(0, |intent| intent.slots),
+        serial,
+    )
+}
+
+/// The checks `capture_previous_boot` applies to the persisted selection of an
+/// interrupted enrolled cleanup (`pending_interrupted`): this pool owner, captured
+/// in `old_boot` with no earlier boot or predecessor proof of its own, this run and
+/// plan, this bridge capacity, a serial the registry has reached, and bindings that
+/// [`validate_bindings`] accepts (route assignments running on that boot). An
+/// empty one also needs a settled relay startup, which its predecessor proof
+/// requires ([`select_predecessor`]).
+fn interrupted_selection_admits(
+    prior: &Selection,
+    receipt: &Receipt,
+    owner: &str,
+    old_boot: &str,
+    capacity: u8,
+    serial: u64,
+) -> bool {
+    prior.version == 1
+        && prior.owner == owner
+        && prior.boot == old_boot
+        && prior.previous_boot.is_none()
+        && prior.predecessor_owner.is_none()
+        && prior.predecessor_absence.is_none()
+        && prior.predecessor_exit.is_none()
+        && prior.run == receipt.run
+        && prior.plan == receipt.plan_id
+        && prior.capacity == capacity
+        && prior.serial <= serial
+        && validate_bindings(receipt, prior, None).is_ok()
+        && (!prior.selected.is_empty() || pinned_predecessor_eligible(receipt))
 }
 
 fn run_holds_slot(candidate: &Candidate, owner: &str, run: &str) -> bool {
@@ -1352,6 +1407,52 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn an_interrupted_selection_is_admitted_only_as_capture_previous_boot_admits_it() {
+        // HACK-2757 (review of #1290): the advice for a Ctrl-C stop lost with its
+        // VM names `hack down --recover` only for a persisted selection the
+        // recovery's own capture accepts.
+        let (selected, store) = live_selection();
+        let assignment = store.slots[&0].clone();
+        let receipt = receipt_for_assignment(&selected, &assignment);
+        let boot = selected.boot.clone();
+        let admits = |prior: &Selection| {
+            interrupted_selection_admits(prior, &receipt, &selected.owner, &boot, 3, 1)
+        };
+        assert!(admits(&selected));
+        let changed = |change: &dyn Fn(&mut Selection)| {
+            let mut prior = selected.clone();
+            change(&mut prior);
+            admits(&prior)
+        };
+        assert!(!changed(&|prior| prior.owner = "9".repeat(32)));
+        assert!(!changed(
+            &|prior| prior.boot = "22222222-2222-2222-2222-222222222222".into()
+        ));
+        assert!(!changed(&|prior| prior.previous_boot = Some("0".repeat(8))));
+        assert!(!changed(
+            &|prior| prior.predecessor_owner = Some("4".repeat(64))
+        ));
+        assert!(!changed(&|prior| prior.run = "9".repeat(32)));
+        assert!(!changed(&|prior| prior.plan = "9".repeat(64)));
+        assert!(!changed(&|prior| prior.capacity = 4));
+        assert!(!changed(&|prior| prior.serial = 2));
+        // Route assignments must be running on that boot, with their helpers.
+        assert!(!changed(&|prior| {
+            prior.selected.get_mut(&0).unwrap().assignment.phase = "stopped".into()
+        }));
+        assert!(!changed(&|prior| {
+            prior.selected.get_mut(&0).unwrap().assignment.boot_id = "other".into()
+        }));
+        assert!(!changed(&|prior| prior
+            .selected
+            .get_mut(&0)
+            .unwrap()
+            .helper = None));
+        // An empty one needs a settled relay startup: this receipt has none.
+        assert!(!changed(&|prior| prior.selected.clear()));
     }
 
     #[test]

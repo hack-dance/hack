@@ -197,7 +197,7 @@ test("HACK-2742: only the authored owner's exact pre-effect causes are not-run r
     [
       NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED,
       "hack run",
-      "hack run did not start: the project's owner stopped or changed while the command waited for the native runtime lock (graph_authored_command_not_started); nothing ran.",
+      "hack run did not start: the project's owner stopped or changed before the command was sent or started (graph_authored_command_not_started); nothing ran.",
     ],
   ] as const) {
     const refusal = nativeAuthoredCommandNotRunRefusal(

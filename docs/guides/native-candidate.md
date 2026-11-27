@@ -5468,7 +5468,7 @@ and the command says `nothing ran` with `Holder: unavailable.` and `Retry hack e
 once the holder finishes.` A pending Ctrl-C of the owner, its `hack down`, or a
 changed owner publication ends the owner's wait at once; the owner then answers
 `graph_authored_command_not_started`, and the command says it did not start, that
-nothing ran, and to check `hack ps` and retry once the project is up. Any other
+nothing ran, and to check `hack ps` and retry once the project is up. The command says the same when the owner exits while the command is still waiting for the lock, for example during the project's own `hack down`: nothing has been sent at that point. A failure after the request is sent keeps "unconfirmed". Any other
 authored failure keeps its report, "completion is unconfirmed" included. An authored
 one-off runs in a fresh container without the service's mounts, so `hack run` of a
 service that mounts persistent storage, or in a project with a live source, is
@@ -5477,8 +5477,7 @@ command says nothing ran and to use `hack exec <service> -- <command>` in the
 service's own container instead. In a project with persistent storage, an authored
 exec or run proves the storage identity once before its command and again after it,
 before any output is released, rather than around each of its engine requests. A
-compose
-project's one-off `run` is answered by its owner, which waits at most 15 seconds on
+compose project's one-off `run` is answered by its owner, which waits at most 15 seconds on
 its only loop, within one 15-second bound for its selection and admission before its
 job is reserved; a pending Ctrl-C or `hack down` ends that wait at once without
 starting the command. When fresh values are delivered through private stdin, output that is still arriving

@@ -389,7 +389,7 @@ test.each([
         nativeCauseCode: NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED,
       }),
     lines: [
-      "hack run did not start: the project's owner stopped or changed while the command waited for the native runtime lock (graph_authored_command_not_started); nothing ran.",
+      "hack run did not start: the project's owner stopped or changed before the command was sent or started (graph_authored_command_not_started); nothing ran.",
       "Check hack ps, then retry hack run once the project is up.",
     ],
     detail: {

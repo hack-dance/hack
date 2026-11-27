@@ -218,7 +218,9 @@ export const NATIVE_OWNER_AUTHORED_RUN_LEASE_BUSY =
 /**
  * The authored owner's answer when its own check (a pending signal, its
  * `hack down`, a changed publication or pin) ended an exec or run before it
- * took the lease (`OWNER_COMMAND_NOT_STARTED`, HACK-2742). Nothing ran.
+ * took the lease (`OWNER_COMMAND_NOT_STARTED`, HACK-2742). The requester gives
+ * the same code when it failed before it wrote its request, for example because
+ * the owner exited during the requester's lease wait (VM row 4). Nothing ran.
  */
 export const NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED =
   "graph_authored_command_not_started";
@@ -251,7 +253,7 @@ export function nativeCommandNotStartedMessage(
   command: NativeLeaseCommand
 ): string {
   return [
-    `${command} did not start: the project's owner stopped or changed while the command waited for the native runtime lock (${NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED}); nothing ran.`,
+    `${command} did not start: the project's owner stopped or changed before the command was sent or started (${NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED}); nothing ran.`,
     `Check hack ps, then retry ${command} once the project is up.`,
   ].join("\n");
 }

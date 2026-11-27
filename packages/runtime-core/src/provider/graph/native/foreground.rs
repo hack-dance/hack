@@ -22,6 +22,37 @@ fn refused() -> CandidateError {
         "Native foreground ownership is changed, unavailable or uncertain; its exact evidence was preserved. Use tagged native control for a live owner; no recovery or replay was attempted.",
     )
 }
+/// A finite command's requester failed before it wrote its request (HACK-2742
+/// review): nothing was sent, so nothing ran. It reaches the CLI as the owner's
+/// not-started code under this module's refusal, as the owner's own refusal
+/// does. Failures after the write keep their codes ("unconfirmed").
+fn command_not_sent(_error: CandidateError) -> CandidateError {
+    refused().with_cause_code(runtime::OWNER_COMMAND_NOT_STARTED.to_owned())
+}
+
+/// [`command_not_sent`] for an interactive exec, whose value-free report
+/// carries one code, so the owner's not-started code is that code.
+fn interactive_not_sent(_error: CandidateError) -> CandidateError {
+    CandidateError::new(
+        runtime::OWNER_COMMAND_NOT_STARTED,
+        "The interactive exec was not sent to its owner; nothing ran.",
+    )
+}
+
+/// The requester's answer for an owner's pre-intent `Refused { code }` of an
+/// interactive exec. The owner's pre-effect wait codes keep their own code,
+/// because the interactive report carries only one code and the CLI reads it
+/// as "nothing ran" (HACK-2742). Every other code is wrapped as before.
+fn interactive_owner_refusal(code: String) -> CandidateError {
+    match runtime::owner_pre_effect_code(&code) {
+        Some(known) => CandidateError::new(
+            known,
+            "The owner refused the interactive exec before it started; nothing ran.",
+        ),
+        None => refused().with_cause_code(code),
+    }
+}
+
 /// Whether the run's foreground owner process is still running (see `owner::holds_lock`).
 pub(in crate::provider) fn owner_running(candidate: &Candidate, run: &str) -> Option<bool> {
     owner::holds_lock(candidate, run)
@@ -694,16 +725,18 @@ pub(in crate::provider) fn interactive(
     if !selected.valid() {
         return Err(refused());
     }
-    let pin = owner::Pin::load(candidate, run)?;
+    // Everything before the request is written is pre-send: a pin or owner that
+    // is gone or changed answers the owner's not-started code (HACK-2742 review).
+    let pin = owner::Pin::load(candidate, run).map_err(interactive_not_sent)?;
     let review = pin.review();
-    let expected = journal::read_control(candidate, review)?;
+    let expected = journal::read_control(candidate, review).map_err(interactive_not_sent)?;
     if (
         expected.owner.as_str(),
         review.review_id(),
         review.scope().namespace,
     ) != pins
     {
-        return Err(refused());
+        return Err(interactive_not_sent(refused()));
     }
     // HACK-2742: wait out another project's stop before anything is sent, as a
     // finite exec does (HACK-2739). The frontend's leash ends the wait. A
@@ -714,8 +747,10 @@ pub(in crate::provider) fn interactive(
         Instant::now() + crate::provider::lifecycle::COMMAND_REQUEST_LEASE_WAIT,
         &|| leash.check(),
     )?;
-    let mut stream = pin.connect()?;
-    let _lifetime = leash.watch_control(&stream)?;
+    // The owner may have exited during that wait (its own `hack down`): its pin
+    // no longer connects, and nothing was sent.
+    let mut stream = pin.connect().map_err(interactive_not_sent)?;
+    let _lifetime = leash.watch_control(&stream).map_err(interactive_not_sent)?;
     let input = Request {
         version: 2,
         kind: RequestKind::NativeGraphControl,
@@ -760,11 +795,7 @@ pub(in crate::provider) fn interactive(
             result.map_err(|_: CandidateError| CandidateError::new("session_cleanup_uncertain", "Interactive session handoff changed; the session was retained and no start was replayed.").with_session(&session.session))
         }
         Outcome::InteractiveRefused { session } if session == options.session => Err(CandidateError::new("session_cleanup_uncertain", "Interactive admission ended after its durable intent; the session was retained and no start was replayed.").with_session(&session)),
-        // HACK-2742: the owner's pre-effect wait refusals keep their own code,
-        // because the interactive report carries only one code and the CLI
-        // reads it as "nothing ran". Every other pre-intent refusal is wrapped.
-        Outcome::Refused { code, .. } if descriptor.is_none() && runtime::owner_pre_effect_code(&code).is_some() => Err(CandidateError::new(runtime::owner_pre_effect_code(&code).ok_or_else(refused)?, "The owner refused the interactive exec before it started; nothing ran.")),
-        Outcome::Refused { code, .. } if descriptor.is_none() => Err(refused().with_cause_code(code)),
+        Outcome::Refused { code, .. } if descriptor.is_none() => Err(interactive_owner_refusal(code)),
         _ => Err(uncertain(refused())),
     }
 }
@@ -776,10 +807,23 @@ fn request_selected(
     exec_selected: Option<runtime::ExecSelection>,
     one_off_selected: Option<runtime::RunSelection>,
 ) -> Result<Value, CandidateError> {
-    let pin = owner::Pin::load(candidate, run)?;
+    // For a command (exec, one-off run), every failure before the request is
+    // written is pre-send. The owner may have exited while the requester waited
+    // for the lease (its own `hack down`, HACK-2742 review): its pin is gone or no
+    // longer connects. Those answer the owner's not-started code so the CLI says
+    // nothing ran. Status, observe, logs and cleanup keep their own refusals.
+    let command = matches!(action, Action::Exec | Action::Run);
+    let not_sent = |error: CandidateError| {
+        if command {
+            command_not_sent(error)
+        } else {
+            error
+        }
+    };
+    let pin = owner::Pin::load(candidate, run).map_err(not_sent)?;
     let review = pin.review();
-    let expected = journal::read_control(candidate, review)?;
-    let mut stream = pin.connect()?;
+    let expected = journal::read_control(candidate, review).map_err(not_sent)?;
+    let mut stream = pin.connect().map_err(not_sent)?;
     let input = Request {
         version: 2,
         kind: RequestKind::NativeGraphControl,

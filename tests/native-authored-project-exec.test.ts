@@ -405,7 +405,7 @@ test("HACK-2742: an owner check that ended the exec's wait (a pending signal or 
       operation: "exec",
     });
     expect(failure.message.split("\n")).toEqual([
-      "hack exec did not start: the project's owner stopped or changed while the command waited for the native runtime lock (graph_authored_command_not_started); nothing ran.",
+      "hack exec did not start: the project's owner stopped or changed before the command was sent or started (graph_authored_command_not_started); nothing ran.",
       "Check hack ps, then retry hack exec once the project is up.",
     ]);
     expect(failure.detail).toEqual({

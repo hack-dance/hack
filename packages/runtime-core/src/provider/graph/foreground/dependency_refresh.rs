@@ -410,8 +410,8 @@ mod automatic_tests {
 mod owner_lease_tests {
     use super::*;
     use crate::provider::engine::command_lease_tests::{
-        PROJECT_STOP_POLL_SLACK, PROJECT_STOP_REFUSAL, assert_waited_then_acquired, hold_lease,
-        hold_lease_as_project_stop, running_pool,
+        PROJECT_STOP_REFUSAL, assert_waited_then_acquired, hold_lease, hold_lease_as_project_stop,
+        running_pool,
     };
     use std::cell::Cell;
 
@@ -458,7 +458,9 @@ mod owner_lease_tests {
         let hold = Duration::from_millis(600);
         let (_release, holder) = hold_lease_as_project_stop(&candidate, hold);
         let started = Instant::now();
-        let deadline = started + hold + PROJECT_STOP_POLL_SLACK;
+        // The backoff caps at 50 ms and is not scaled with the hold. Allow ten
+        // poll intervals for the holder to run, unlock and be observed on CI.
+        let deadline = started + hold + Duration::from_millis(500);
         let after = requested_selection(&candidate, &run, deadline)
             .err()
             .unwrap();

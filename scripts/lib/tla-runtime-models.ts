@@ -4075,7 +4075,8 @@ const contracts: readonly ModelContract[] = [
     // message before the VM-loss recovery fix. live-relay (HACK-2731) is
     // #1273's message once ready, which ignored an unsettled relay startup.
     // no-cross-boot-stop (HACK-2746) is the runtime and message before a stop
-    // interrupted at `cleanup-intent` was finished across the boot.
+    // interrupted at `cleanup-intent` was finished across the boot, and
+    // old-stop-advice (HACK-2757) is that runtime with the message before.
     // restart-recovers is the reachability witness of a recovered restart.
     name: "foreground-loss-recovery",
     module: "ForegroundLossRecovery",
@@ -4212,6 +4213,23 @@ const contracts: readonly ModelContract[] = [
           'outcome = "refused"',
           'msg = "downUp"',
           'lostAt = "Stopping"',
+        ],
+      },
+      {
+        // HACK-2757 (review of #1290): the runtime that finishes an interrupted
+        // stop across the boot, with the message that always named the down.
+        // A stop whose dead relay owner cannot be proved (no persisted route
+        // and an unsettled relay startup) is then told `hack down --recover`,
+        // which the recovery refuses.
+        name: "old-stop-advice",
+        negative: true,
+        invariant: "NoRefusedAdvice",
+        fields: [
+          'outcome = "refused"',
+          'msg = "downUp"',
+          'lostAt = "Stopping"',
+          "ports = FALSE",
+          "settled = FALSE",
         ],
       },
       {

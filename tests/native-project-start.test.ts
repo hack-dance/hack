@@ -8903,7 +8903,7 @@ test.each([
       foreground: "running",
       cross_boot_relay: false,
     }),
-    expected: { stage: "ready", retirable: false },
+    expected: { stage: "ready", retirable: false, withheld: "relay" },
   },
   {
     name: "relay provable",
@@ -8954,12 +8954,12 @@ test.each([
       cross_boot_relay: true,
       cross_boot_stop: false,
     }),
-    expected: { stage: "ready", retirable: false },
+    expected: { stage: "ready", retirable: false, withheld: "stop" },
   },
   {
     name: "owner's stop, cleanup-intent, older runtime",
     reply: foregroundOwnerReply({ phase: "cleanup-intent" }),
-    expected: { stage: "ready", retirable: false },
+    expected: { stage: "ready", retirable: false, withheld: "stop-unreported" },
   },
   {
     name: "stopped retained",
@@ -9020,6 +9020,7 @@ test.each([
     name: "relay unprovable",
     selected: { phase: "ready-observed", cross_boot_relay: false },
     retirable: false,
+    withheld: "relay",
   },
   {
     name: "relay provable",
@@ -9035,15 +9036,22 @@ test.each([
     name: "cleanup-intent the runtime refuses",
     selected: { phase: "cleanup-intent", cross_boot_relay: false },
     retirable: false,
+    withheld: "stop-unreported",
   },
   {
     name: "stopped retained",
     selected: { phase: "stopped-data-retained", foreground: "absent" },
     retirable: true,
   },
-])("a restart lost in its preflight withholds the down only for an unprovable live relay ($name)", async ({
+] as {
+  name: string;
+  selected: Record<string, unknown>;
+  retirable: boolean;
+  withheld?: "relay" | "stop" | "stop-unreported";
+}[])("a restart lost in its preflight withholds the down only for an unprovable live relay ($name)", async ({
   selected,
   retirable,
+  withheld,
 }) => {
   const loss = restartPreflightLossStage({
     cleanedRetry: false,
@@ -9060,7 +9068,11 @@ test.each([
       typeof nativeLostStartRetirable
     >[0]["invoke"],
   });
-  expect(resolved).toEqual({ stage: "ready", retirable });
+  expect(resolved).toEqual(
+    withheld === undefined
+      ? { stage: "ready", retirable }
+      : { stage: "ready", retirable, withheld }
+  );
   const message = nativeForegroundPoolEndMessage(
     { bootId: "b".repeat(32) },
     resolved
@@ -9124,7 +9136,11 @@ test.each([
       typeof nativeLostStartRetirable
     >[0]["invoke"],
   });
-  expect(loss).toEqual({ stage: "ready", retirable: crossBootStop });
+  expect(loss).toEqual(
+    crossBootStop
+      ? { stage: "ready", retirable: true }
+      : { stage: "ready", retirable: false, withheld: "stop" }
+  );
   const end = { bootId: "b".repeat(32), providerPid: 4242 };
   const cause = new Error(
     "Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Run hack down --recover to resume this run's confirmed cleanup with data retained."
@@ -9133,6 +9149,32 @@ test.each([
   const [, , advice, causeLine] = lost.message.split("\n");
   expect(advice?.includes("hack down --recover")).toBe(crossBootStop);
   expect(causeLine?.includes("hack down --recover")).toBe(crossBootStop);
+});
+
+// HACK-2757 (review of #1290): a ready-stage loss that names no command says
+// why: an unprovable relay, a stop the runtime cannot finish across the boot,
+// or a runtime too old to say.
+test.each([
+  { withheld: "relay", says: "publishes no port" },
+  { withheld: "stop", says: "relay cleanup marker names no ended boot" },
+  { withheld: "stop-unreported", says: "too old to report" },
+] as const)("a ready-stage loss that names no command gives its reason ($withheld)", ({
+  withheld,
+  says,
+}) => {
+  const message = nativeForegroundPoolEndMessage(
+    { bootId: "b".repeat(32) },
+    { stage: "ready", retirable: false, withheld }
+  );
+  expect(message).toContain(says);
+  expect(message).not.toContain("hack down");
+  expect(message).toContain("Keep this native home unchanged");
+  const reasons = [
+    "publishes no port",
+    "relay cleanup marker names no ended boot",
+    "too old to report",
+  ];
+  expect(reasons.filter((reason) => message.includes(reason))).toEqual([says]);
 });
 
 test("a ready run whose relay owner is unprovable is told no command", () => {

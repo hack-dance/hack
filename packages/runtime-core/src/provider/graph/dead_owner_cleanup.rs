@@ -96,13 +96,25 @@ pub(super) fn unconfirmed_start(receipt: &Receipt) -> bool {
 /// A stop its owner left inside its enrolled relay cleanup, at `cleanup-intent`,
 /// when its VM was lost (HACK-2746, real VM: Ctrl-C, then the provider killed while
 /// the receipt read `cleanup-intent`). The relay cleanup marker is still `pending`
-/// for one of the pool's recorded boots and the bridge selection it persisted is
-/// beside it. The cross-boot recovery admits that receipt once the pool boots again
-/// (`interrupted_enrollment` in `prepare`), provided it can prove the dead relay
-/// owner: by the routes that selection names, or by a settled relay startup. So a
-/// caller starts a stopped pool, or names `hack down --recover`, only for one this
-/// returns. Selection only, read from host files; the recovery revalidates the dead
-/// owner, the ended boot and every inventory.
+/// for a boot that has ended, and the bridge selection it persisted is beside it.
+/// The cross-boot recovery admits that receipt once the pool boots again
+/// (`interrupted_enrollment` in `execute`, and in `archive_completed_prior`; the
+/// explicit cleanup's `prepare` refuses it), provided it can prove the dead relay
+/// owner: by the run's slots, or by a persisted selection its capture accepts
+/// (`bridges::cleanup::interrupted_stop_provable`). So a caller starts a stopped
+/// pool, or names `hack down --recover`, only for one this returns.
+///
+/// The ended boot is one of the pool's earlier boots, or its last recorded boot
+/// unless that boot is still live: the record says `running` and its provider is
+/// alive (the check `runtime status` makes, [`identity::provider_gone`]). A provider
+/// killed with its VM leaves the record `running` with the dead boot until
+/// `runtime recover` writes `recovered-unclean`; that boot has ended (`status` reads
+/// it `process-exited`), so it counts (#1291 review). A live boot never counts
+/// (HACK-2757): the cross-boot recovery never selects the current boot, so an owner
+/// that died while its VM kept running is not one. A provider whose state cannot
+/// be read counts as live, so nothing is promised. Selection only, read from host
+/// files; the recovery revalidates the dead owner, the ended boot and every
+/// inventory.
 pub(super) fn interrupted_stop(
     candidate: &Candidate,
     root: &std::path::Path,
@@ -119,17 +131,30 @@ pub(super) fn interrupted_stop(
     if receipt.phase != "cleanup-intent" || receipt.relay_startup.is_none() {
         return false;
     }
+    let current = owner.guest_boot_id.as_deref().filter(|_| live_boot(owner));
     let mut boots: Vec<String> = owner.guest_boot_id.iter().cloned().collect();
     boots
         .extend(crate::provider::boot_history::earlier_boots(candidate, owner).unwrap_or_default());
-    let enrolled_boot = boots.iter().any(|boot| {
-        host_relay::context(&receipt.owner, boot)
-            .is_ok_and(|context| marker.runtime == context.runtime && marker.boot == context.boot)
-    });
-    enrolled_boot
-        && exists(&root.join("relay-cleanup-bridges.json")).unwrap_or(false)
-        && (bridges::cleanup::relay_owner_provable(candidate, &owner.token, receipt)
-            || bridges::cleanup::interrupted_selection_routes(root, &owner.token, &receipt.run))
+    let Some(old_boot) = boots.iter().find(|boot| {
+        current != Some(boot.as_str())
+            && host_relay::context(&receipt.owner, boot).is_ok_and(|context| {
+                marker.runtime == context.runtime && marker.boot == context.boot
+            })
+    }) else {
+        return false;
+    };
+    exists(&root.join("relay-cleanup-bridges.json")).unwrap_or(false)
+        && bridges::cleanup::interrupted_stop_provable(candidate, root, owner, receipt, old_boot)
+}
+
+/// Whether the pool record's boot is still live: `running`, with a provider that
+/// is not proven gone. An unreadable provider state counts as live.
+fn live_boot(owner: &Owner) -> bool {
+    owner.phase == "running"
+        && owner
+            .process
+            .as_ref()
+            .is_none_or(|process| !identity::provider_gone(process).unwrap_or(false))
 }
 
 fn validate(
@@ -3231,8 +3256,8 @@ mod tests {
         // receipt read `cleanup-intent`. The enrolled cleanup's marker is pending for
         // the run's boot, its bridge selection is persisted beside it, and its slots
         // were already released. The cross-boot recovery admits that receipt
-        // (`interrupted_enrollment`), so `graph foreground-owner` reports
-        // `cross_boot_stop` and `hack up` names `hack down --recover`.
+        // (`interrupted_enrollment` in `execute`), so `graph foreground-owner`
+        // reports `cross_boot_stop` and `hack up` names `hack down --recover`.
         let fixture = super::super::retained_startup::tests::Fixture::new();
         let owner = Owner::load(&fixture.candidate).unwrap();
         let boot = owner.guest_boot_id.clone().unwrap();
@@ -3256,7 +3281,9 @@ mod tests {
         assert!(!stop(&receipt));
         let selection = |selected: serde_json::Value| {
             json!({"version":1,"owner":owner.token,"boot":boot,"run":receipt.run,
-                "plan":receipt.plan_id,"capacity":2,"serial":1,"selected":selected})
+                "plan":receipt.plan_id,
+                "capacity":owner.application_bridge.map_or(0, |intent| intent.slots),
+                "serial":0,"selected":selected})
         };
         state::write(
             &root.join("relay-cleanup-bridges.json"),
@@ -3279,8 +3306,10 @@ mod tests {
         let mut ready = receipt.clone();
         ready.phase = "ready-observed".into();
         assert!(!stop(&ready));
-        // Without a settled relay startup, only the persisted routes prove the dead
-        // relay owner: none, then one.
+        // Without a settled relay startup, only persisted routes the recovery's
+        // capture accepts prove the dead relay owner (HACK-2757): none, nor a
+        // reserved route without its helper evidence, which that capture refuses
+        // (`bridges::cleanup` tests cover the accepted shape).
         let mut unsettled = receipt.clone();
         unsettled.relay_startup.as_mut().unwrap().control_only = false;
         assert!(!stop(&unsettled));
@@ -3291,6 +3320,98 @@ mod tests {
                 "container_id":"c","network_id":"n","boot_id":boot,"phase":"reserved"}}})),
         )
         .unwrap();
-        assert!(stop(&unsettled));
+        assert!(!stop(&unsettled));
+        // A selection of another plan, capacity or boot is refused by that capture.
+        for changed in [
+            json!({"plan":"9".repeat(64)}),
+            json!({"capacity":9}),
+            json!({"boot":"33333333-3333-3333-3333-333333333333"}),
+            json!({"previous_boot":"33333333-3333-3333-3333-333333333333"}),
+        ] {
+            let mut value = selection(json!({}));
+            for (key, field) in changed.as_object().unwrap() {
+                value[key] = field.clone();
+            }
+            state::write(&root.join("relay-cleanup-bridges.json"), &value).unwrap();
+            assert!(!stop(&receipt), "{changed}");
+        }
+        state::write(
+            &root.join("relay-cleanup-bridges.json"),
+            &selection(json!({})),
+        )
+        .unwrap();
+        assert!(stop(&receipt));
+    }
+
+    #[test]
+    fn an_owner_that_died_while_its_vm_kept_running_is_not_a_cross_boot_stop_but_a_killed_provider_is()
+     {
+        // HACK-2757 (review of #1290): the cross-boot recovery never selects the
+        // pool's current boot, so while the pool runs a marker of that boot is not a
+        // cross-boot stop; `hack up` and the advice do not send it to
+        // `hack down --recover`. Once the pool has booted again, the same marker is
+        // one of an earlier boot.
+        let fixture = super::super::retained_startup::tests::Fixture::new();
+        let mut owner = Owner::load(&fixture.candidate).unwrap();
+        let boot = owner.guest_boot_id.clone().unwrap();
+        let root = fixture.graph();
+        let mut receipt = fixture.receipt();
+        receipt.phase = "cleanup-intent".into();
+        receipt.relay_startup = Some(serde_json::from_value(json!({"control_only":true,"guest_root":null,"control_root":"/private/owned","control_generation":"a".repeat(32),"artifact":"e".repeat(64),"services":{}})).unwrap());
+        let context = host_relay::context(&receipt.owner, &boot).unwrap();
+        receipt.relay_cleanup = Some(
+            serde_json::from_value(json!({
+                "version":1,"runtime":context.runtime,"boot":context.boot,"operation":([3;16]),
+                "effect":([4;32]),"control_root":"/private/owned","phase":"pending"
+            }))
+            .unwrap(),
+        );
+        state::write(
+            &root.join("relay-cleanup-bridges.json"),
+            &json!({"version":1,"owner":owner.token,"boot":boot,"run":receipt.run,
+                "plan":receipt.plan_id,
+                "capacity":owner.application_bridge.map_or(0, |intent| intent.slots),
+                "serial":0,"selected":{}}),
+        )
+        .unwrap();
+        // The VM was lost and `runtime recover` ran: the pool is stopped with that
+        // boot recorded.
+        assert_ne!(owner.phase, "running");
+        assert!(interrupted_stop(
+            &fixture.candidate,
+            &root,
+            &receipt,
+            &owner
+        ));
+        // #1291 review: the provider was killed and nothing rewrote the record, so
+        // it still says `running` with the dead boot (`runtime status` reads it
+        // `process-exited`). That boot has ended: still a cross-boot stop, so the
+        // lost-VM advice and `hack up` name `hack down --recover` (HACK-2746 rows).
+        owner.phase = "running".into();
+        assert!(identity::provider_gone(owner.process.as_ref().unwrap()).unwrap());
+        assert!(interrupted_stop(
+            &fixture.candidate,
+            &root,
+            &receipt,
+            &owner
+        ));
+        // The owner died while its VM kept running: a live provider, so the boot is
+        // still current and nothing is promised.
+        owner.process = Some(identity::observe(std::process::id() as i32).unwrap());
+        assert!(!interrupted_stop(
+            &fixture.candidate,
+            &root,
+            &receipt,
+            &owner
+        ));
+        // The pool booted again: the run's boot is now an earlier one.
+        owner.previous_guest_boot_id = Some(boot.clone());
+        owner.guest_boot_id = Some("44444444-4444-4444-4444-444444444444".into());
+        assert!(interrupted_stop(
+            &fixture.candidate,
+            &root,
+            &receipt,
+            &owner
+        ));
     }
 }

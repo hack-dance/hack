@@ -7,7 +7,9 @@ import {
 } from "../lib/project-env-config.ts";
 import {
   NATIVE_RECOVERABLE_LIVE_PHASES,
+  type NativeForegroundOwnerSelection,
   nativeCrossBootRecoverable,
+  parseNativeForegroundOwner,
 } from "./native-cross-boot-recovery.ts";
 import { awaitNativeEndedBootOwner } from "./native-ended-boot-owner.ts";
 import {
@@ -50,11 +52,13 @@ import {
   lostRemovalPending,
 } from "./native-project-retained.ts";
 import {
+  clearNativeLostRemoval,
   describeNativeRunEnvironmentChange,
   loadNativeProjectRun,
   loadNativeRestartIntent,
   type NativeProjectRun,
   type NativeProjectRunScope,
+  nativeLostRemovalRecorded,
   nativeProjectStartupPending,
   nativeRunEnvironmentChange,
   removeNativeProjectRun,
@@ -140,29 +144,7 @@ function verify(
     }
   }
 }
-const RECEIPT_SHA = /^[a-f0-9]{64}$/;
-const RECOVERY_CODE = /^[a-z][a-z0-9_]{0,63}$/;
-
-const FOREGROUND_STATES = new Set(["absent", "running", "exited", "uncertain"]);
-/** What `graph foreground-owner` selected; it grants no recovery authority. */
-type ForegroundOwnerSelection = {
-  readonly phase: string;
-  readonly receiptSha256: string;
-  readonly foreground: "absent" | "running" | "exited" | "uncertain";
-  /** Original receipt digest of an interrupted same-boot dead-owner recovery. */
-  readonly liveOwnerRecovery: string | null;
-  readonly deadOwnerRecovery: string | null;
-  /** Guest completion commit. Retirement still finishes and verifies reservation release. */
-  readonly deadOwnerRecoveryComplete: boolean;
-  readonly deadOwnerRecoveryError: string | null;
-  readonly failedStartRecoverable: boolean;
-  /**
-   * The runtime's cross-boot recovery admits this receipt as a start lost before
-   * ready (`cross_boot_start`: a lost-start phase, a settled relay startup and no
-   * cleanup marker). Absent from an older runtime, which never admitted one.
-   */
-  readonly crossBootStart: boolean;
-};
+type ForegroundOwnerSelection = NativeForegroundOwnerSelection;
 
 /**
  * The command a refusal names. Plain `hack down` reaches the same owner paths
@@ -229,75 +211,11 @@ async function selectForegroundOwner(opts: {
     args: ["graph", "foreground-owner", "--run-id", opts.run.run, "--json"],
     timeoutMs: 15_000,
   });
-  if (
-    !isRecord(value) ||
-    value.version !== 1 ||
-    !optionalBoolean(value.failed_start_recoverable) ||
-    !optionalBoolean(value.cross_boot_start) ||
-    value.run !== opts.run.run ||
-    value.owner !== opts.run.owner ||
-    typeof value.phase !== "string" ||
-    typeof value.receipt_sha256 !== "string" ||
-    !RECEIPT_SHA.test(value.receipt_sha256) ||
-    typeof value.foreground !== "string" ||
-    !FOREGROUND_STATES.has(value.foreground) ||
-    (value.foreground !== "running" &&
-      !(
-        value.live_owner_recovery === null ||
-        (typeof value.live_owner_recovery === "string" &&
-          RECEIPT_SHA.test(value.live_owner_recovery))
-      )) ||
-    (value.foreground !== "running" &&
-      !(
-        value.dead_owner_recovery === undefined ||
-        value.dead_owner_recovery === null ||
-        (typeof value.dead_owner_recovery === "string" &&
-          RECEIPT_SHA.test(value.dead_owner_recovery))
-      )) ||
-    (value.foreground !== "running" &&
-      !(
-        value.dead_owner_recovery_complete === undefined ||
-        typeof value.dead_owner_recovery_complete === "boolean"
-      )) ||
-    (value.foreground !== "running" &&
-      !(
-        value.dead_owner_recovery_error === undefined ||
-        value.dead_owner_recovery_error === null ||
-        (typeof value.dead_owner_recovery_error === "string" &&
-          RECOVERY_CODE.test(value.dead_owner_recovery_error))
-      ))
-  ) {
+  const selection = parseNativeForegroundOwner(value, opts.run);
+  if (selection === undefined) {
     throw ownerRecoveryRefused(opts.verb);
   }
-  return {
-    phase: value.phase,
-    failedStartRecoverable: value.failed_start_recoverable === true,
-    crossBootStart: value.cross_boot_start === true,
-    receiptSha256: value.receipt_sha256,
-    foreground: value.foreground as ForegroundOwnerSelection["foreground"],
-    liveOwnerRecovery:
-      value.foreground !== "running" &&
-      typeof value.live_owner_recovery === "string"
-        ? value.live_owner_recovery
-        : null,
-    deadOwnerRecovery:
-      value.foreground !== "running" &&
-      typeof value.dead_owner_recovery === "string"
-        ? value.dead_owner_recovery
-        : null,
-    deadOwnerRecoveryComplete:
-      value.foreground !== "running" &&
-      value.dead_owner_recovery_complete === true,
-    deadOwnerRecoveryError:
-      value.foreground !== "running" &&
-      typeof value.dead_owner_recovery_error === "string"
-        ? value.dead_owner_recovery_error
-        : null,
-  };
-}
-
-function optionalBoolean(value: unknown): boolean {
-  return value === undefined || typeof value === "boolean";
+  return selection;
 }
 
 /**
@@ -830,7 +748,10 @@ export const NATIVE_RESTART_INTENT_UNREADABLE_NOTE =
  * retained
  * stop (whose unadmitted owner is retired without the pool) and an unreadable
  * selection are all false: the caller keeps its refusal and never starts a pool
- * it could not then use.
+ * it could not then use. A ready run counts only when the runtime can prove its
+ * dead relay owner (`crossBootRelay`, HACK-2731). Two retained stops also need
+ * the pool: one with an interrupted frontend finalization (HACK-2456), and,
+ * for `hack down --recover`, one whose lost-removal repair is owed (HACK-2731).
  */
 async function deadOwnerOfLiveRun(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -838,6 +759,8 @@ async function deadOwnerOfLiveRun(opts: {
   readonly projectRoot: string;
   readonly run: NativeProjectRun;
   readonly invoke: typeof invokeNativeRuntime;
+  /** `hack down --recover`: an owed lost-removal repair also starts the pool. */
+  readonly recover?: boolean;
 }): Promise<boolean> {
   try {
     const selection = await selectForegroundOwner(opts);
@@ -853,13 +776,29 @@ async function deadOwnerOfLiveRun(opts: {
     ) {
       return true;
     }
+    if (
+      selection.foreground !== "absent" ||
+      selection.phase !== "stopped-data-retained"
+    ) {
+      return false;
+    }
+    // A retained stop whose lost-removal repair is owed (HACK-2731): a retained
+    // start found containers a lost VM brought back (its marker), or a repair
+    // ended before its storage barrier confirmed (the runtime's marker). Only
+    // `hack down --recover` repairs it, on a running pool, and the pool that
+    // start booted may have gone idle and stopped since.
+    if (
+      opts.recover === true &&
+      (selection.lostRemovalPending ||
+        (await nativeLostRemovalRecorded({ ...opts.scope, run: opts.run })))
+    ) {
+      return true;
+    }
     // A recovery that stopped the graph and retired the owner's publication,
     // then failed in its frontend finalization (the shared HTTPS lease, HACK-2456
     // seen on a real VM), leaves a retained stop with no owner and an
     // interrupted frontend lifetime. Finishing it needs a running pool.
     return (
-      selection.foreground === "absent" &&
-      selection.phase === "stopped-data-retained" &&
       (
         await inspectNativeProjectFinalizationLifetime({
           scope: opts.scope,
@@ -887,6 +826,8 @@ async function inspectOrStartStoppedPool(opts: {
   readonly projectRoot: string;
   readonly run: NativeProjectRun;
   readonly invoke: typeof invokeNativeRuntime;
+  /** `hack down --recover` (see {@link deadOwnerOfLiveRun}). */
+  readonly recover?: boolean;
   /** Where the one-line wait notice goes; stderr by default. */
   readonly notice?: (line: string) => void;
   readonly poolBootEnded?: (home: string) => Promise<boolean>;
@@ -1181,6 +1122,7 @@ async function nativeProjectDownOnce(opts: {
   let initial = await inspectOrStartStoppedPool({
     inspect,
     startStoppedPool: opts.startStoppedPool === true,
+    recover: opts.recover === true,
     scope: opts.scope,
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
@@ -1356,11 +1298,19 @@ async function nativeProjectDownOnce(opts: {
   // `hack down --recover` only: see `lostContainerRemovals`.
   // Verify a stopped run, first removing containers a lost VM brought back.
   // The note prints only once the re-inspection verifies the stop.
+  // The retained start's lost-removal marker (HACK-2731), once the stop is
+  // verified with no container to remove again. Advisory: a marker a failed
+  // removal leaves costs one more pool start, never a wrong result.
+  const clearLostRemoval = () =>
+    clearNativeLostRemoval(opts.scope).catch(() => undefined);
   const verifyStoppedRepairing = async (snapshot: unknown): Promise<void> => {
     if (!(opts.recover === true && lostContainerRemovals(snapshot))) {
       verify(snapshot, run, true);
       if (stoppedRetained(snapshot) && lostRemovalPending(snapshot)) {
         throw new ClosedCliError(NATIVE_LOST_REMOVAL_PENDING);
+      }
+      if (!lostContainerRemovals(snapshot)) {
+        await clearLostRemoval();
       }
       return;
     }
@@ -1384,6 +1334,7 @@ async function nativeProjectDownOnce(opts: {
       throw error;
     }
     verify(await inspect(), run, true);
+    await clearLostRemoval();
     (opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)))(
       NATIVE_LOST_REMOVAL_NOTE
     );

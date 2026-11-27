@@ -67,7 +67,10 @@ export type NativeStartPoolEnd = {
  *   reported ready by the runtime and mapped. `recorded` as for `preparing`:
  *   a resumed retained run or a restart's replacement has a run record.
  * - `ready`: the runtime reported the graph ready (receipt `ready-observed`)
- *   and the run mapping is saved.
+ *   and the run mapping is saved. `retirable` is false when the runtime's
+ *   selection, read once the VM was lost, shows it cannot prove the dead
+ *   owner's relay (a run with no published port whose host relay startup had
+ *   not settled, HACK-2731); unknown keeps the down advice.
  */
 export type NativeForegroundLossStage =
   | { readonly stage: "preparing"; readonly recorded: boolean }
@@ -82,7 +85,7 @@ export type NativeForegroundLossStage =
        */
       readonly retirable?: boolean;
     }
-  | { readonly stage: "ready" };
+  | { readonly stage: "ready"; readonly retirable?: boolean };
 
 /**
  * What a foreground start prints when its VM is lost (HACK-2096): which VM, that
@@ -110,6 +113,9 @@ export type NativeForegroundLossStage =
  *   whose host dependency startup had not settled (#1273 review: the runtime
  *   refuses it). The message names no command and says to keep the native home
  *   for inspection.
+ * - `ready` that the runtime cannot retire (`retirable` false: no published
+ *   port and an unsettled host relay startup, which the runtime refuses with
+ *   `relay_owner_refused`; HACK-2731): no command either, as for `requested`.
  */
 export function nativeForegroundPoolEndMessage(
   end: NativeStartPoolEnd,
@@ -129,11 +135,26 @@ export function nativeForegroundPoolEndMessage(
   return [
     lost,
     "This foreground start ends now with exit code 1; the run's data is kept.",
-    loss.stage === "requested" && !(loss.recorded && loss.retirable === true)
-      ? UNRECORDED_REQUESTED_ADVICE
-      : LOSS_ADVICE[loss.stage],
+    lossAdvice(loss),
   ].join("\n");
 }
+
+/** What to run next for a loss at `loss`, or why nothing can be run yet. */
+function lossAdvice(loss: NativeForegroundLossStage): string {
+  if (
+    loss.stage === "requested" &&
+    !(loss.recorded && loss.retirable === true)
+  ) {
+    return UNRECORDED_REQUESTED_ADVICE;
+  }
+  if (loss.stage === "ready" && loss.retirable === false) {
+    return UNPROVABLE_READY_ADVICE;
+  }
+  return LOSS_ADVICE[loss.stage];
+}
+
+const UNPROVABLE_READY_ADVICE =
+  "It was lost once it was ready, but the runtime cannot prove which relay owner it had (the run publishes no port and its host relay startup had not settled), so no hack command can retire it yet. Keep this native home unchanged for inspection; hack ps --json shows what the run left.";
 
 const UNRECORDED_REQUESTED_ADVICE =
   "It was lost before its services were ready, and no hack command can retire a run lost at that point yet. Keep this native home unchanged for inspection; hack ps --json shows what the run left.";

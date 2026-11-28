@@ -225,6 +225,24 @@ export const NATIVE_OWNER_AUTHORED_RUN_LEASE_BUSY =
 export const NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED =
   "graph_authored_command_not_started";
 
+/**
+ * The authored owner's answer for a one-off `hack run` of a service that mounts
+ * persistent storage, or of a project with a live source
+ * (`OWNER_RUN_MOUNTS_UNSUPPORTED` in `native/runtime/run.rs`, HACK-2752). A
+ * one-off is a fresh container without the member's mounts; the owner refuses
+ * before it records or creates anything, so nothing ran.
+ */
+export const NATIVE_OWNER_AUTHORED_RUN_MOUNTS_UNSUPPORTED =
+  "graph_authored_run_mounts_unsupported";
+
+/** The two lines of a one-off its owner cannot run with the service's mounts. */
+export function nativeRunMountsUnsupportedMessage(): string {
+  return [
+    `hack run cannot start a one-off for this service: it mounts persistent storage, or the project has a live source (${NATIVE_OWNER_AUTHORED_RUN_MOUNTS_UNSUPPORTED}); nothing ran.`,
+    "Run the command in the service's own container instead: hack exec <service> -- <command>.",
+  ].join("\n");
+}
+
 const OWNER_LEASE_CODES: readonly string[] = [
   NATIVE_OWNER_AUTHORED_EXEC_LEASE_BUSY,
   NATIVE_OWNER_AUTHORED_RUN_LEASE_BUSY,
@@ -251,6 +269,12 @@ export function nativeOwnerPreEffectMessage(
 ): string | undefined {
   if (code === NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED) {
     return nativeCommandNotStartedMessage(command);
+  }
+  if (
+    code === NATIVE_OWNER_AUTHORED_RUN_MOUNTS_UNSUPPORTED &&
+    command === "hack run"
+  ) {
+    return nativeRunMountsUnsupportedMessage();
   }
   if (OWNER_LEASE_CODES.includes(code)) {
     return nativeCommandLeaseRefusalMessage({

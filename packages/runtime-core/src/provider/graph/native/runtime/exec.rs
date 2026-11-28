@@ -249,13 +249,15 @@ pub(super) fn execute_with<B: Backend>(
         .filter(|r| r.kind == Kind::Container)
         .ok_or_else(refused)?;
     let container = resource.id.clone().ok_or_else(refused)?;
+    // The persistent-data witness is proven once before the first transport and
+    // once after the last response (HACK-2752); see `snapshot_unwitnessed_until`.
     snapshot_until(backend, receipt.clone(), Some(deadline))?;
     let generation = member(backend, &receipt, resource)?;
     // Recheck the complete current selection immediately before each create/start
     // transport, and after each response. A failed post-effect proof withholds output.
     let fresh = || {
         managed_environment::remaining_until(deadline)?;
-        snapshot_until(backend, receipt.clone(), Some(deadline))?;
+        snapshot_unwitnessed_until(backend, receipt.clone(), Some(deadline))?;
         if member(backend, &receipt, resource)? != generation {
             return Err(refused());
         }
@@ -264,7 +266,11 @@ pub(super) fn execute_with<B: Backend>(
     fresh()?;
     let (exit_code, stdout, stderr, truncated) =
         backend.exec(&container, selected, deadline, &fresh)?;
-    fresh()?;
+    managed_environment::remaining_until(deadline)?;
+    snapshot_until(backend, receipt.clone(), Some(deadline))?;
+    if member(backend, &receipt, resource)? != generation {
+        return Err(refused());
+    }
     let result = ServiceExec {
         receipt,
         service: selected.service.clone(),
@@ -325,17 +331,24 @@ pub(in crate::provider::graph::native) fn interactive(
         .ok_or_else(refused)?;
     let container = resource.id.clone().ok_or_else(refused)?;
     let generation = member(&backend, &receipt, resource)?;
-    let fresh = || {
+    // The persistent-data witness is proven once before the session's first
+    // transport; each transport rechecks the rest (HACK-2752).
+    let checked = |witness: bool| {
         guard()?;
         managed_environment::remaining_until(deadline)?;
         journal::read_control(candidate, &expected.review)?.check_binding(expected)?;
-        snapshot_until(&backend, receipt.clone(), Some(deadline))?;
+        if witness {
+            snapshot_until(&backend, receipt.clone(), Some(deadline))?;
+        } else {
+            snapshot_unwitnessed_until(&backend, receipt.clone(), Some(deadline))?;
+        }
         if member(&backend, &receipt, resource)? != generation {
             return Err(refused());
         }
         Ok(())
     };
-    fresh()?;
+    checked(true)?;
+    let fresh = || checked(false);
     owned.engine.interactive_start(
         candidate,
         Binding {

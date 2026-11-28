@@ -318,6 +318,108 @@ fn finite_one_off_refuses_changed_member_mounts_or_data_before_create_and_retain
     }
 }
 
+/// HACK-2752: a one-off of a service that mounts persistent storage is refused
+/// with its own pre-effect code before anything is recorded or created, instead
+/// of the plain refusal the CLI reported as an unconfirmed completion.
+#[test]
+fn a_one_off_of_a_storage_backed_service_is_refused_as_unsupported_before_any_effect() {
+    // Both halves of the refusal: the service mounts persistent storage, or the
+    // project has a live source.
+    for case in ["storage", "source"] {
+        let fixture = Fixture::new(basic());
+        let (graph, mut session) =
+            fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+        ready(&mut session, &graph);
+        let mut receipt = session.receipt.clone();
+        if case == "storage" {
+            receipt.data_mounts.insert(
+                "web".into(),
+                vec![crate::project::native::StorageMount {
+                    storage: "data".into(),
+                    target: "/data".into(),
+                    read_only: false,
+                }],
+            );
+        } else {
+            // Only its presence is read here, before any validation.
+            receipt.source = Some(crate::provider::graph::native::source::Binding {
+                version: 1,
+                policy: "live".into(),
+                share: crate::provider::ProjectShareIntent {
+                    project: "/project".into(),
+                    guest_path: "/source".into(),
+                    device: 1,
+                    inode: 1,
+                    unfiltered_source: false,
+                },
+                mounts: BTreeMap::new(),
+                anchors: BTreeMap::new(),
+            });
+        }
+        let effects = session.backend.state.borrow().effects.clone();
+        let backend = Running {
+            backend: &session.backend,
+            calls: Cell::new(0),
+            mode: "",
+            one_offs: RefCell::new(BTreeMap::new()),
+        };
+        let refused = run::execute_with(
+            &backend,
+            receipt,
+            &session.root,
+            &selected(),
+            Instant::now() + RUN_BUDGET,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(refused.code, run::OWNER_RUN_MOUNTS_UNSUPPORTED, "{case}");
+        assert!(
+            (1..=64).contains(&refused.code.len())
+                && refused
+                    .code
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        );
+        assert_eq!(backend.calls.get(), 0);
+        assert!(records(&session.root).is_empty());
+        assert!(backend.one_offs.borrow().is_empty());
+        assert_eq!(session.backend.state.borrow().effects, effects);
+    }
+}
+
+/// HACK-2752: a one-off proves the persistent-data witness with a full snapshot
+/// before its first transport and after its last response, not before and after
+/// every transport: four witness reads, two per snapshot.
+#[test]
+fn a_one_off_proves_the_data_witness_only_before_and_after_its_command() {
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    ready(&mut session, &graph);
+    session
+        .backend
+        .state
+        .borrow_mut()
+        .log_data_deadlines
+        .clear();
+    let backend = Running {
+        backend: &session.backend,
+        calls: Cell::new(0),
+        mode: "",
+        one_offs: RefCell::new(BTreeMap::new()),
+    };
+    run::execute_with(
+        &backend,
+        session.receipt.clone(),
+        &session.root,
+        &selected(),
+        Instant::now() + RUN_BUDGET,
+    )
+    .unwrap();
+    assert_eq!(backend.calls.get(), 1);
+    assert_eq!(session.backend.state.borrow().log_data_deadlines.len(), 4);
+}
+
 #[test]
 fn cleanup_reaps_a_recorded_one_off_before_stopping_members_and_refuses_foreign_labels() {
     for foreign in [true, false] {

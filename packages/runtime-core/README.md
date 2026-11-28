@@ -594,6 +594,16 @@ another test's spawned child to inherit a socket and delay EOF. Retries are zero
 The admission-pool test group retains the old mutex's serialization of whole-host
 disk-handle scans. Ignored helpers remain ignored and their owning tests still invoke
 them explicitly; `cargo test --doc` runs separately because nextest omits doctests.
+Use the existing `run_isolated` helper for a fixture that asserts a closed
+descriptor number is invalid or waits for EOF on a macOS socket pair. This
+also isolates those assertions when stock Cargo runs tests in one process.
+For a TCP transport failure in a test, keep the loopback listener from
+`provider::test_socket::closing_loopback_tcp` alive through the assertion.
+It shuts down connections before replying. Dropping a port-zero listener releases
+its port while the test still uses the address, and macOS can silently drop
+connection attempts to a TCP socket that is bound without listening. A test
+that stalls an HTTP reply can hold that connection open while its server
+accepts the retry.
 Candidate core runs the rest of each scheduled test suite and its doctests after
 a test failure. A failed qualification pass still stops subsequent repetitions.
 The job runs independent later checks and summarizes failed step IDs. Setup

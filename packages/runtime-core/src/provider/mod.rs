@@ -93,6 +93,8 @@ pub mod storage_usage;
 #[cfg(all(test, unix))]
 mod test_executable;
 #[cfg(all(test, unix))]
+pub(crate) use test_executable::{ISOLATED_HANG_GUARD, run_isolated};
+#[cfg(all(test, unix))]
 mod test_socket;
 pub use image_load::{load as load_image, load_with as load_image_with};
 mod lifecycle;

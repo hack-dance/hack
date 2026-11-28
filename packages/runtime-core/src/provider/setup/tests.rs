@@ -1050,10 +1050,9 @@ fn retry_preheader_failure(close: bool) {
     let handle = thread::spawn(move || {
         let (mut first, _) = listener.accept().unwrap();
         request(&mut first);
-        if !close {
-            thread::sleep(Duration::from_millis(150));
-        }
-        drop(first);
+        // A stalled request stays open past the client's timeout without
+        // delaying acceptance of the retry.
+        let _stalled = (!close).then_some(first);
         let (mut second, _) = listener.accept().unwrap();
         request(&mut second);
         second
@@ -1075,15 +1074,14 @@ fn retry_preheader_failure(close: bool) {
 fn retry_permanent_connection_failure_is_bounded_and_names_host_and_attempts() {
     use std::time::{Duration, Instant};
     let root = Fixture::new();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (_reservation, address) = crate::provider::test_socket::closing_loopback_tcp();
     let pin = FilePin {
-        url: format!("http://{}/archive.tgz", listener.local_addr().unwrap()),
+        url: format!("http://{address}/archive.tgz"),
         archive_sha256: format!("{:x}", crate::Hex(Sha256::digest(b"hello"))),
         size_bytes: 5,
         max_bytes: 16,
         redirect_hosts: vec![],
     };
-    drop(listener);
     let start = Instant::now();
     let failure = download::acquire(&client(), &root.0, &pin).unwrap_err();
     assert!(failure.message.contains("127.0.0.1"));

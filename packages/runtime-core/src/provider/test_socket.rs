@@ -1,10 +1,78 @@
 use std::{
+    io,
+    net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener},
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd},
         unix::ffi::OsStrExt,
     },
     path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
 };
+
+pub(super) struct TcpCloseFixture {
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<io::Result<()>>>,
+}
+
+impl Drop for TcpCloseFixture {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            worker.thread().unpark();
+            let result = worker.join();
+            if !thread::panicking() {
+                result.expect("TCP close worker panicked").unwrap();
+            }
+        }
+    }
+}
+
+/// Reserve a kernel-selected loopback port and close connections before any reply.
+///
+/// Keep the guard alive through the check. Dropping a listener would free the
+/// port, and a bound socket that never listens can silently drop SYNs on macOS.
+pub(super) fn closing_loopback_tcp() -> (TcpCloseFixture, SocketAddr) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
+    let worker = thread::spawn(move || {
+        while !worker_stop.load(Ordering::Acquire) {
+            match listener.accept() {
+                // Shutdown ends the connection even if a concurrent fork still
+                // holds a copy of the accepted descriptor.
+                Ok((stream, _)) => match stream.shutdown(Shutdown::Both) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotConnected => {}
+                    Err(error) => return Err(error),
+                },
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    thread::park_timeout(Duration::from_millis(2));
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    });
+    (
+        TcpCloseFixture {
+            stop,
+            worker: Some(worker),
+        },
+        address,
+    )
+}
 
 /// Bind a stream socket inode at `path` without ever listening on it, for fixtures that need
 /// a stale (closed) socket pathname.
@@ -112,6 +180,24 @@ pub(super) fn unallocated_tcp_port() -> u16 {
 mod tests {
     use super::*;
     use std::os::unix::{fs::FileTypeExt, net::UnixStream};
+
+    #[test]
+    fn a_reserved_tcp_port_closes_connections_and_excludes_other_binders() {
+        use std::{io::Read, net::TcpStream};
+
+        let (_fixture, address) = closing_loopback_tcp();
+        assert_ne!(address.port(), 0);
+        assert_eq!(
+            TcpListener::bind(address).unwrap_err().kind(),
+            io::ErrorKind::AddrInUse
+        );
+        let timeout = Duration::from_secs(5);
+        for _ in 0..3 {
+            let mut client = TcpStream::connect_timeout(&address, timeout).unwrap();
+            client.set_read_timeout(Some(timeout)).unwrap();
+            assert_eq!(client.read(&mut [0]).unwrap(), 0);
+        }
+    }
 
     #[test]
     fn an_inherited_copy_of_an_unlistened_socket_still_refuses_connections() {

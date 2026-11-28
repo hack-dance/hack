@@ -272,6 +272,16 @@ mod tests {
     use std::os::fd::IntoRawFd;
     #[test]
     fn rejected_context_and_descriptor_types_close_the_transferred_fd() {
+        // Other libtest threads can reuse a closed descriptor before F_GETFD.
+        crate::provider::run_isolated(
+            "timings::transport::tests::rejected_descriptor_child",
+            crate::provider::ISOLATED_HANG_GUARD,
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated child launched by rejected_context_and_descriptor_types_close_the_transferred_fd"]
+    fn rejected_descriptor_child() {
         let (sender, _receiver) = std::os::unix::net::UnixDatagram::pair().unwrap();
         let fd = sender.into_raw_fd();
         // SAFETY: scalar operation on this test's owned descriptor.

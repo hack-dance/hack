@@ -15,6 +15,7 @@ use crate::state::{Action, LocalContext};
 
 /// Every designed state that can be shown with `--fixtures <name>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(enum_iterator::Sequence))]
 pub enum Fixture {
     EnvLoading,
     EnvError,
@@ -115,7 +116,8 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 77] = [
+    /// Every fixture in display order.
+    pub const ALL: &'static [Self] = &[
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -280,7 +282,7 @@ impl Fixture {
 
     #[must_use]
     pub fn parse(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|f| f.name() == name)
+        Self::ALL.iter().copied().find(|f| f.name() == name)
     }
 }
 
@@ -1301,8 +1303,19 @@ mod tests {
     }
 
     #[test]
+    fn all_lists_every_variant_once() {
+        for fixture in enum_iterator::all::<Fixture>() {
+            assert!(
+                Fixture::ALL.contains(&fixture),
+                "missing fixture {fixture:?}"
+            );
+        }
+        assert_eq!(Fixture::ALL.len(), enum_iterator::cardinality::<Fixture>());
+    }
+
+    #[test]
     fn names_round_trip() {
-        for f in Fixture::ALL {
+        for &f in Fixture::ALL {
             assert_eq!(Fixture::parse(f.name()), Some(f));
         }
         assert_eq!(Fixture::parse("nope"), None);
@@ -1310,7 +1323,7 @@ mod tests {
 
     #[test]
     fn every_fixture_has_a_snapshot_or_designed_error() {
-        for f in Fixture::ALL {
+        for &f in Fixture::ALL {
             match (f, snapshot(f)) {
                 (Fixture::Loading, Err(SourceError::Pending))
                 | (Fixture::CliMissing, Err(SourceError::CliMissing))
@@ -1329,7 +1342,7 @@ mod tests {
 
     #[test]
     fn fixtures_hold_no_private_paths() {
-        for f in Fixture::ALL {
+        for &f in Fixture::ALL {
             let json = serde_json::to_string(&project(f)).unwrap();
             assert!(!json.contains("/home/") && !json.contains("/Users/"));
         }

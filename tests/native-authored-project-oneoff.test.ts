@@ -28,6 +28,7 @@ import {
   NATIVE_AUTHORED_COMMAND_REQUEST_TIMEOUT_MS,
   NATIVE_OWNER_AUTHORED_COMMAND_NOT_STARTED,
   NATIVE_OWNER_AUTHORED_RUN_LEASE_BUSY,
+  NATIVE_OWNER_AUTHORED_RUN_MOUNTS_UNSUPPORTED,
   nativeCommandLeaseWaitReporter,
 } from "../src/backends/native-command-lease.ts";
 import { NATIVE_RUN_EMPTY_SELECTION_REFUSAL } from "../src/backends/native-project-one-off.ts";
@@ -359,6 +360,24 @@ test.each([
       status: "not_run",
       nativeCode: "native_graph_foreground",
       nativeCauseCode: NATIVE_OWNER_AUTHORED_RUN_LEASE_BUSY,
+    },
+  },
+  {
+    name: "a one-off of a storage-backed service (HACK-2752)",
+    error: () =>
+      new NativeRuntimeRequestError({
+        message: "refused",
+        nativeCode: "native_graph_foreground",
+        nativeCauseCode: NATIVE_OWNER_AUTHORED_RUN_MOUNTS_UNSUPPORTED,
+      }),
+    lines: [
+      "hack run cannot start a one-off for this service: it mounts persistent storage, or the project has a live source (graph_authored_run_mounts_unsupported); nothing ran.",
+      "Run the command in the service's own container instead: hack exec <service> -- <command>.",
+    ],
+    detail: {
+      status: "not_run",
+      nativeCode: "native_graph_foreground",
+      nativeCauseCode: NATIVE_OWNER_AUTHORED_RUN_MOUNTS_UNSUPPORTED,
     },
   },
   {

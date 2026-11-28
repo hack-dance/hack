@@ -6,6 +6,8 @@ struct Executing<'a> {
     restart: bool,
     unknown: bool,
     data_refusal: bool,
+    /// HACK-2752: refuse the data witness only after the command ran.
+    data_refusal_after_command: bool,
 }
 impl Backend for Executing<'_> {
     fn request(
@@ -29,7 +31,7 @@ impl Backend for Executing<'_> {
         deadline: Instant,
         fresh: &dyn Fn() -> Result<(), CandidateError>,
     ) -> Result<(), CandidateError> {
-        if self.data_refusal {
+        if self.data_refusal || (self.data_refusal_after_command && self.calls.get() > 0) {
             return Err(refused());
         }
         self.backend.verify_data(receipt, deadline, fresh)
@@ -103,6 +105,7 @@ fn finite_exec_uses_exact_live_member_and_one_original_source_data_deadline() {
         restart: false,
         unknown: false,
         data_refusal: false,
+        data_refusal_after_command: false,
     };
     let original = fs::read(session.root.join("state.json")).unwrap();
     let deadline = Instant::now() + RUN_BUDGET;
@@ -116,6 +119,47 @@ fn finite_exec_uses_exact_live_member_and_one_original_source_data_deadline() {
     let state = session.backend.state.borrow();
     assert!(state.log_source_deadlines.iter().all(|d| *d == deadline));
     assert!(state.log_data_deadlines.iter().all(|d| *d == deadline));
+}
+/// HACK-2752: a finite exec proves the persistent-data witness with a full
+/// snapshot before its first transport and after its last response (four
+/// witness reads, two per snapshot), not before and after every transport. On a
+/// real VM that repetition made a storage-backed exec take about 16 s. A witness
+/// that fails only after the command still withholds its output.
+#[test]
+fn finite_exec_proves_the_data_witness_only_before_and_after_its_command() {
+    for late_refusal in [false, true] {
+        let fixture = Fixture::new(basic());
+        let (graph, mut session) =
+            fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+        ready(&mut session, &graph);
+        session
+            .backend
+            .state
+            .borrow_mut()
+            .log_data_deadlines
+            .clear();
+        let backend = Executing {
+            backend: &session.backend,
+            calls: Cell::new(0),
+            restart: false,
+            unknown: false,
+            data_refusal: false,
+            data_refusal_after_command: late_refusal,
+        };
+        let result = exec::execute_with(
+            &backend,
+            session.receipt.clone(),
+            &selected(),
+            Instant::now() + RUN_BUDGET,
+        );
+        assert_eq!(backend.calls.get(), 1, "late refusal {late_refusal}");
+        if late_refusal {
+            assert!(result.is_err(), "output was released");
+        } else {
+            assert_eq!(result.unwrap().exit_code, 17);
+            assert_eq!(session.backend.state.borrow().log_data_deadlines.len(), 4);
+        }
+    }
 }
 #[test]
 fn finite_exec_refuses_changed_member_or_data_before_command_and_withholds_restart_or_unknown_completion()
@@ -154,6 +198,7 @@ fn finite_exec_refuses_changed_member_or_data_before_command_and_withholds_resta
             restart: mode == "restart",
             unknown: mode == "unknown",
             data_refusal: mode == "data",
+            data_refusal_after_command: false,
         };
         let mut request = selected();
         if mode == "selection" {

@@ -289,6 +289,26 @@ not started within 2 s; a later failure keeps its code),
 messages, and a PTY case each for a lease refusal and a not-started refusal),
 `native-runtime-client` (the new causes pass the closed filter).
 
+## Storage-backed authored run and exec (HACK-2752)
+
+Two more authored refusals and costs, found on a real VM, sit next to these
+waits but are not lease behaviour, so the model is unchanged:
+
+- `run::execute_with` refused a one-off of a service with persistent data
+  mounts, or of a project with a live source, with the plain `refused()`; the
+  CLI said "unconfirmed". It now answers `graph_authored_run_mounts_unsupported`
+  before any record or container, a pre-effect refusal of the same kind as the
+  model's `not-run` reports (`run_tests.rs`
+  `a_one_off_of_a_storage_backed_service_is_refused_as_unsupported_before_any_effect`).
+- A finite exec rechecked the full snapshot, persistent-data witness included,
+  before and after each engine transport: eleven snapshots, 22 witness reads,
+  about 16 s of a 30 s budget for a storage-backed service. The per-transport
+  recheck now skips the witness (`snapshot_unwitnessed_until`); a full snapshot
+  runs before the first transport and after the last response, so a witness
+  that fails after the command still withholds its output (`exec_tests.rs`
+  `finite_exec_proves_the_data_witness_only_before_and_after_its_command`,
+  `run_tests.rs` `a_one_off_proves_the_data_witness_only_before_and_after_its_command`).
+
 ## The owner's acceptance of a command (HACK-2742 review)
 
 Codex found that "not started" after the request was sent rested on the

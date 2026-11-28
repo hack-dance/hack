@@ -5518,8 +5518,17 @@ once the holder finishes.` A pending Ctrl-C of the owner, its `hack down`, or a
 changed owner publication ends the owner's wait at once; the owner then answers
 `graph_authored_command_not_started`, and the command says it did not start, that
 nothing ran, and to check `hack ps` and retry once the project is up. The command says the same when the owner exits while the command is still waiting for the lock, for example during the project's own `hack down`: nothing has been sent at that point. The owner accepts each command with one byte before it does anything for it, and it drops a command it cannot accept. So the command also says nothing ran when the owner closed the connection without even that byte: for example, the request reached the owner's queue but the owner ended through that `hack down` without taking it, or the owner refused the request. Once the owner has accepted a command, every failure keeps "unconfirmed". A command's answer carries the first 1 MiB of each output stream; a one-off's output is read from the start of the container, not from its logs. A project started by an earlier prerelease keeps working after you upgrade: its owner does not advertise acceptance, so commands are sent to it as before, without this proof, and a failure after sending stays unconfirmed. Any other
-authored failure keeps its report, "completion is unconfirmed" included. A compose
-project's one-off `run` is answered by its owner, which waits at most 15 seconds on
+authored failure keeps its report, "completion is unconfirmed" included. An authored
+one-off runs in a fresh container without the service's mounts, so `hack run` of a
+service that mounts persistent storage, or in a project with a live source, is
+refused with `graph_authored_run_mounts_unsupported` before anything is created: the
+command says nothing ran and to use `hack exec <service> -- <command>` in the
+service's own container instead. In a project with persistent storage, an authored
+finite exec or one-off run proves the storage identity once before its command and
+again after it, before any output is released, rather than around each of its engine
+requests. An interactive exec proves it once before its session starts, because its
+output is streamed as it arrives. A
+compose project's one-off `run` is answered by its owner, which waits at most 15 seconds on
 its only loop, within one 15-second bound for its selection and admission before its
 job is reserved; a pending Ctrl-C or `hack down` ends that wait at once without
 starting the command. When fresh values are delivered through private stdin, output that is still arriving

@@ -391,6 +391,7 @@ mod tests {
                 status: Status::Passed,
                 detail: "Hack 5.0.0".into(),
                 remedy: Remedy::Doc(String::new()),
+                checks: Vec::new(),
             }],
             cli_program: Some("/usr/bin/hack".into()),
             context: ExecutionContext::from_values(&[("HOME".into(), "/home/test-user".into())])
@@ -456,6 +457,7 @@ mod tests {
             status: Status::Unknown,
             detail: "Couldn’t check".into(),
             remedy: Remedy::Copy("hack daemon restart".into()),
+            checks: Vec::new(),
         };
         assert!(machine_repair(&card, &report()).is_none());
     }

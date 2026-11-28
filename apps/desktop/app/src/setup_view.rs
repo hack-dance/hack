@@ -446,12 +446,13 @@ fn card(
 ) -> AnyElement {
     let pane = &app.setup;
     let p = ui.p;
-    let skipped = pane.skipped.contains(&c.id);
+    let skipped = c.status != Status::Blocked && pane.skipped.contains(&c.id);
     let (label, colors) = match (c.status, skipped) {
         (_, true) => ("Skipped for now", p.states.unknown),
         (Status::Passed, false) => ("Passed", p.states.running),
         (Status::NeedsAttention, false) => ("Needs attention", p.states.degraded),
-        (Status::Unknown, false) => ("Unknown", p.states.unknown),
+        (Status::Unknown, false) => ("Couldn't check", p.states.unknown),
+        (Status::Blocked, false) => ("Blocked", p.states.unknown),
     };
     let cli = pane.report.cli_ready();
     let mut actions = div().flex().items_center().gap(space::S3);
@@ -465,8 +466,9 @@ fn card(
             cx,
         ));
     }
-    if c.status != Status::Passed {
+    if !matches!(c.status, Status::Passed | Status::Blocked) {
         match &c.remedy {
+            Remedy::None => {}
             Remedy::Copy(cmd) => {
                 command_line = Some(short_command(cmd));
                 let cmd = cmd.clone();
@@ -569,7 +571,7 @@ fn card(
             }
         }
         // The CLI cannot be skipped: everything else needs it.
-        if c.id != "cli" && !skipped {
+        if c.id != "cli" && !skipped && c.remedy != Remedy::None {
             let id = c.id.clone();
             let enabled = !busy;
             actions = actions.child(
@@ -579,6 +581,26 @@ fn card(
                     }),
             );
         }
+    }
+    if !c.checks.is_empty() {
+        let label = if pane.dns_details_open {
+            "Hide DNS details"
+        } else {
+            "DNS details"
+        };
+        actions = actions.child(
+            action_button(
+                ("setup-dns-details", i),
+                Glyph::ChevronDown,
+                label,
+                true,
+                ui,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.setup.dns_details_open = !this.setup.dns_details_open;
+                cx.notify();
+            })),
+        );
     }
     div()
         .id(SharedString::from(format!("setup-card-{}", c.id)))
@@ -629,7 +651,66 @@ fn card(
                 .child(cmd)
         }))
         .child(actions)
+        .when(pane.dns_details_open && !c.checks.is_empty(), |d| {
+            d.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::S3)
+                    .children(c.checks.iter().map(|check| {
+                        let state = match check.status {
+                            Status::Passed => "Passed",
+                            Status::NeedsAttention => "Needs attention",
+                            Status::Unknown => "Couldn't check",
+                            Status::Blocked => "Blocked",
+                        };
+                        div()
+                            .type_step(text::SMALL)
+                            .text_color(p.text_secondary)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(space::S4)
+                                    .child(
+                                        div()
+                                            .type_step(text::SMALL_STRONG)
+                                            .text_color(p.text_primary)
+                                            .child(format!(
+                                                "{} · {state}",
+                                                dns_piece_name(&check.id)
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .font_family(ui.mono.clone())
+                                            .text_color(p.text_muted)
+                                            .child(check.id.clone()),
+                                    ),
+                            )
+                            .child(check.detail.clone())
+                    })),
+            )
+        })
         .into_any_element()
+}
+
+fn dns_piece_name(id: &str) -> String {
+    match id {
+        "dnsmasq:53" => "Local DNS server answers".into(),
+        "coredns forwarding" => "Containers can resolve project names".into(),
+        "linux dns route" => "Linux sends project domains to Hack".into(),
+        _ => {
+            if let Some(domain) = id.strip_prefix("resolver:") {
+                format!("Mac sends *.{domain} to Hack")
+            } else if let Some(domain) = id.strip_prefix("dnsmasq.conf:") {
+                format!("Hack answers for *.{domain}")
+            } else {
+                id.into()
+            }
+        }
+    }
 }
 
 #[cfg(test)]

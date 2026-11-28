@@ -109,6 +109,7 @@ pub struct RuntimeTarget {
 #[serde(tag = "banner", rename_all = "snake_case")]
 pub enum Banner {
     DaemonOff,
+    DaemonUnreadable,
     /// hackd runs but the CLI cannot use it; `update` names the side to
     /// update (only [`UpdateSide::Daemon`] offers "Restart hackd").
     DaemonMismatch {
@@ -147,8 +148,9 @@ impl Banner {
     pub fn text(&self) -> String {
         match self {
             Self::DaemonOff => {
-                "hackd is off or unreachable: run `hack daemon start` to read project status".into()
+                "hackd is not running: run `hack daemon start` to read project status".into()
             }
+            Self::DaemonUnreadable => "Could not check hackd. Check again.".into(),
             Self::DaemonMismatch { daemon, cli, .. } => crate::source::mismatch_text(daemon, cli),
             Self::EngineDown { error } => format!("Docker not reachable: {error}"),
             Self::DaemonReadFailed { error } => error.clone(),
@@ -163,6 +165,7 @@ impl Banner {
 pub enum Phase {
     Loading,
     CliMissing,
+    CliUnsupported { version: String },
     Error { code: String, message: String },
     Empty,
     Ready,
@@ -1052,6 +1055,9 @@ impl AppModel {
         let mut banners = Vec::new();
         let phase = match (&self.snapshot, &self.last_error) {
             (_, Some(SourceError::CliMissing)) => Phase::CliMissing,
+            (_, Some(SourceError::CliUnsupported { version })) => Phase::CliUnsupported {
+                version: version.clone(),
+            },
             (None, Some(SourceError::Cli { code, message, .. })) => Phase::Error {
                 code: code.clone(),
                 message: message.clone(),
@@ -1060,6 +1066,10 @@ impl AppModel {
                 code: "E_APP_DAEMON_UNAVAILABLE".into(),
                 message: message.clone(),
             },
+            (None, Some(SourceError::DaemonUnreadable)) => Phase::Error {
+                code: "E_APP_DAEMON_UNREADABLE".into(),
+                message: Banner::DaemonUnreadable.text(),
+            },
             (None, _) => Phase::Loading,
             (Some(s), _) if s.projects.projects.is_empty() => Phase::Empty,
             (Some(_), _) => Phase::Ready,
@@ -1067,6 +1077,9 @@ impl AppModel {
         let mut running = Vec::new();
         let mut stopped = Vec::new();
         let mut active_instances = 0;
+        if matches!(self.last_error, Some(SourceError::DaemonUnreadable)) {
+            banners.push(Banner::DaemonUnreadable);
+        }
         if let Some(SourceError::DaemonUnavailable {
             cli,
             daemon,
@@ -1087,7 +1100,10 @@ impl AppModel {
             });
         }
         if let Some(s) = &self.snapshot {
-            if !matches!(self.last_error, Some(SourceError::DaemonUnavailable { .. })) {
+            if !matches!(
+                self.last_error,
+                Some(SourceError::DaemonUnavailable { .. } | SourceError::DaemonUnreadable)
+            ) {
                 match (&s.daemon, s.daemon_mismatch()) {
                     (None, _) => banners.push(Banner::DaemonOff),
                     (Some(_), Some(v)) => banners.push(Banner::mismatch(v, &s.cli_version)),
@@ -1165,6 +1181,10 @@ impl AppModel {
             stopped: stopped.len() - unknown,
             unknown,
         };
+        let cli_version = match &phase {
+            Phase::CliMissing | Phase::CliUnsupported { .. } => None,
+            _ => self.snapshot.as_ref().map(|s| s.cli_version.clone()),
+        };
         ListView {
             phase,
             banners,
@@ -1176,7 +1196,7 @@ impl AppModel {
                 .as_ref()
                 .and_then(|s| s.doctor.as_ref())
                 .map_or(0, crate::models::DoctorReport::attention_count),
-            cli_version: self.snapshot.as_ref().map(|s| s.cli_version.clone()),
+            cli_version,
             counts,
         }
     }
@@ -1386,6 +1406,8 @@ fn describe(e: &SourceError) -> String {
     match e {
         SourceError::Pending => "still loading".into(),
         SourceError::CliMissing => "hack was not found on PATH".into(),
+        SourceError::CliUnsupported { version } => crate::setup::unsupported_cli_detail(version),
+        SourceError::DaemonUnreadable => Banner::DaemonUnreadable.text(),
         SourceError::DaemonUnavailable { message, .. } => message.clone(),
         SourceError::Cli { code, message, .. } => format!("{code}: {message}"),
     }

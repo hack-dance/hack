@@ -283,7 +283,10 @@ impl MainWindow {
                     projects,
                 );
             }
-            Phase::Empty | Phase::CliMissing | Phase::Error { .. } => {}
+            Phase::Empty
+            | Phase::CliMissing
+            | Phase::CliUnsupported { .. }
+            | Phase::Error { .. } => {}
         }
         let doctor_trailing: AnyElement = match (list.doctor_known, list.doctor_count) {
             (true, n) if n > 0 => count_pill(n, ui).into_any_element(),
@@ -335,6 +338,7 @@ impl MainWindow {
                     Some((Glyph::Power, "Start hackd")),
                 ),
                 Banner::DaemonMismatch { .. } => (BannerTone::Warn, b.text(), None),
+                Banner::DaemonUnreadable => (BannerTone::Warn, b.text(), None),
                 Banner::EngineDown { error } => (
                     BannerTone::Error,
                     format!("Docker is not reachable: {error}"),
@@ -576,11 +580,12 @@ impl MainWindow {
     }
 
     fn daemon_banner(&self) -> bool {
-        self.data
-            .list
-            .banners
-            .iter()
-            .any(|b| matches!(b, Banner::DaemonOff | Banner::DaemonMismatch { .. }))
+        self.data.list.banners.iter().any(|b| {
+            matches!(
+                b,
+                Banner::DaemonOff | Banner::DaemonUnreadable | Banner::DaemonMismatch { .. }
+            )
+        })
     }
 
     fn status_items(&self) -> Vec<(Option<Status>, String)> {
@@ -642,6 +647,14 @@ impl Render for MainWindow {
                 "Hack CLI not found",
                 "The app runs the hack command for everything. Install it, then reopen the app.",
                 Some("brew install hack-dance/tap/hack"),
+                &ui,
+            )
+            .into_any_element(),
+            Phase::CliUnsupported { version } => empty_pane(
+                Glyph::CircleAlert,
+                "Hack 5 required",
+                hack_desktop_core::setup::unsupported_cli_detail(version),
+                None,
                 &ui,
             )
             .into_any_element(),

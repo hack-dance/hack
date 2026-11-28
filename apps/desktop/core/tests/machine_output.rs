@@ -111,3 +111,14 @@ fn malformed_envelopes_cannot_fall_back_to_legacy_parsing() {
         assert!(parse_schema_result(&value.to_string(), "", Some(1), "hack.version.v1").is_err());
     }
 }
+
+#[test]
+fn version_envelope_accepts_additive_metadata() {
+    let text = r#"{"ok":true,"data":{"schema":"hack.version.v1","version":"5.0.0"},"meta":{"producer":"hack"}}"#;
+    let data = parse_schema_result(text, "", Some(0), "hack.version.v1").unwrap();
+    assert_eq!(data["version"], "5.0.0");
+    assert!(parse_schema_result(text, "", Some(1), "hack.version.v1").is_err());
+    let conflict =
+        r#"{"ok":true,"data":{"schema":"hack.version.v1","version":"5.0.0"},"error":{}}"#;
+    assert!(parse_schema_result(conflict, "", Some(0), "hack.version.v1").is_err());
+}

@@ -1,10 +1,16 @@
 //! Login service evidence and admission; unavailable managers must never reach install.
 use crate::setup::{Card, Remedy, Report, SafeAction, Status, boolean, card};
 
+pub(crate) const LOGIN: (&str, &str) = ("login", "Login service");
+
 /// Installation is a supported effect only with both manager availability and
 /// ownership of the ordinary home. Missing capability is never permission.
 pub fn qualify_login(report: &mut Report, daemon: Option<&serde_json::Value>) {
-    if let Some(card) = report.cards.iter_mut().find(|c| c.id == "login") {
+    if let Some(card) = report
+        .cards
+        .iter_mut()
+        .find(|c| c.id == LOGIN.0 && c.status != Status::Blocked)
+    {
         *card = login_card(daemon, report.context.as_ref());
     }
 }
@@ -69,10 +75,12 @@ pub(crate) fn login_card(
             "https://github.com/hack-dance/hack/blob/next/docs/architecture.md#daemon".into(),
         )
     };
-    if let Some(why) = refusal {
+    if state.0 == Status::Unknown && service.is_none() {
+        state.1 = "Couldn't check the login service.".into();
+    } else if let Some(why) = refusal {
         state.1 = format!("{}; {why}", state.1);
     }
-    card("login", "Login service", state, remedy)
+    card(LOGIN.0, LOGIN.1, state, remedy)
 }
 /// Recheck both explicit context and the CLI's effective socket home. A launcher
 /// can choose a private home even when HACK_HOME was absent in the app.

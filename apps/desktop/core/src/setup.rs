@@ -14,6 +14,8 @@ pub enum Status {
     Passed,
     NeedsAttention,
     Unknown,
+    /// A prerequisite did not pass, so this step could not run.
+    Blocked,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SafeAction {
@@ -30,11 +32,20 @@ impl SafeAction {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Remedy {
+    None,
     Copy(String),
     Admin(Vec<String>),
     Run(SafeAction),
     Doc(String),
 }
+/// One DNS check, including passing and unobserved pieces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Check {
+    pub id: String,
+    pub status: Status,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Card {
     pub id: String,
@@ -42,6 +53,7 @@ pub struct Card {
     pub status: Status,
     pub detail: String,
     pub remedy: Remedy,
+    pub checks: Vec<Check>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Report {
@@ -108,6 +120,7 @@ pub struct Pane {
     pub refresh_again: bool,
     pub pending_fix: bool,
     pub result: Option<String>,
+    pub dns_details_open: bool,
     pub skipped: std::collections::BTreeSet<String>,
     generation: u64,
     pub checked_at: Option<std::time::Instant>,
@@ -157,7 +170,13 @@ impl Pane {
     }
 
     pub fn skip(&mut self, id: &str) {
-        if id != "cli" && self.report.cards.iter().any(|c| c.id == id) {
+        if id != "cli"
+            && self
+                .report
+                .cards
+                .iter()
+                .any(|c| c.id == id && c.status != Status::Blocked)
+        {
             self.skipped.insert(id.into());
         }
     }
@@ -233,6 +252,7 @@ pub(crate) fn card(id: &str, title: &str, evidence: (Status, String), remedy: Re
         status: evidence.0,
         detail: evidence.1,
         remedy,
+        checks: Vec::new(),
     }
 }
 /// Docker readiness for the engine Setup itself checks: the machine Doctor
@@ -270,25 +290,45 @@ pub fn derive(
     runs: &[DoctorRun],
     platform: Platform,
 ) -> Report {
-    let cli_evidence = match cli {
+    const DAEMON: (&str, &str) = ("daemon", "hackd");
+    const DOCKER: (&str, &str) = ("docker", "Docker · Compose");
+    const ROUTING: (&str, &str) = ("routing", "Routing and DNS · Compose");
+    const TRUST: (&str, &str) = ("trust", "Certificate trust · Compose");
+    let (cli_status, detail) = match cli {
         Ok(v) if supported_cli(v) => (Status::Passed, format!("Hack {v}")),
+        Ok(v) => (Status::NeedsAttention, unsupported_cli_detail(v)),
         Err(why) => (
             Status::Unknown,
-            format!("{why}. Check again to confirm the required Hack CLI (5.x)"),
-        ),
-        Ok(version) => (
-            Status::Unknown,
-            format!("Unsupported CLI {version}; this preview requires 5.x"),
+            format!("Could not check the Hack CLI. {why}"),
         ),
     };
     let mut cards = vec![card(
         "cli",
         "Hack CLI · required",
-        cli_evidence,
+        (cli_status, detail),
         Remedy::Doc(
             "https://github.com/hack-dance/hack/blob/next/docs/versions/v5/install.md".into(),
         ),
     )];
+    if cli_status != Status::Passed {
+        cards.extend(
+            [DAEMON, DOCKER, ROUTING, TRUST, crate::setup_login::LOGIN]
+                .into_iter()
+                .map(|(id, title)| {
+                    card(
+                        id,
+                        title,
+                        (Status::Blocked, "Waits on step 1: Hack CLI".into()),
+                        Remedy::None,
+                    )
+                }),
+        );
+        return Report {
+            cards,
+            force_cli_gate: cli_status == Status::NeedsAttention,
+            ..Report::default()
+        };
+    }
     let native: Vec<_> = projects
         .into_iter()
         .flat_map(|p| &p.projects)
@@ -298,42 +338,6 @@ pub fn derive(
     // registry must never offer global install/trust, which refuse native projects.
     let compose =
         projects.is_none_or(|p| p.projects.is_empty() || p.projects.iter().any(|p| !p.is_native()));
-    if compose {
-        cards.push(card(
-            "docker",
-            "Docker · Compose",
-            docker_evidence(runs),
-            Remedy::Doc("https://docs.docker.com/engine/install/".into()),
-        ));
-    }
-    if projects.is_none()
-        && let Some(docker) = cards
-            .iter_mut()
-            .find(|c| c.id == "docker" && c.status == Status::Unknown)
-    {
-        docker.detail = "Could not read project or Docker status. Start a matching version of hackd, then check again.".into();
-    }
-    for p in &native {
-        let state = p
-            .native
-            .as_ref()
-            .filter(|_| p.status != "missing" && p.repo_root.is_some())
-            .map(|n| n.status.as_str())
-            .unwrap_or("unreadable or missing project");
-        cards.push(card(
-            &format!("native:{}", p.name),
-            &format!("Native runtime · {}", p.name),
-            (
-                if state == "observed" {
-                    Status::Passed
-                } else {
-                    Status::Unknown
-                },
-                format!("{state}; native setup documentation"),
-            ),
-            Remedy::Doc(NATIVE_DOC.into()),
-        ));
-    }
     let running = daemon.and_then(daemon_running);
     // The CLI's own answer for differing versions (`api_compatible`), as the
     // window uses it: compatible versions need nothing.
@@ -359,7 +363,7 @@ pub fn derive(
                 (
                     Status::Passed,
                     format!("hackd {v}, CLI {c}: compatible"),
-                    restart(),
+                    Remedy::None,
                 )
             } else {
                 match crate::source::UpdateSide::for_versions(v, c) {
@@ -379,31 +383,63 @@ pub fn derive(
         }
         (Some(true), _, _) if inconsistent || compatible == Some(false) => (
             Status::Unknown,
-            "Daemon reports starting, stale or incompatible; check again".into(),
-            restart(),
+            "Could not confirm that hackd is ready. Check again.".into(),
+            Remedy::None,
         ),
         (Some(true), Ok(_), Some(v)) if !v.is_empty() => {
-            (Status::Passed, format!("hackd {v}"), restart())
+            (Status::Passed, format!("hackd {v}"), Remedy::None)
         }
         (Some(false), _, _) => (
             Status::NeedsAttention,
-            "hackd off; status refreshes slowly".into(),
+            "hackd is not running".into(),
             Remedy::Run(SafeAction::StartDaemon),
         ),
         _ => (
             Status::Unknown,
-            "Could not confirm hackd and socket version".into(),
-            restart(),
+            "Could not check hackd. Check again.".into(),
+            Remedy::None,
         ),
     };
-    cards.push(card("daemon", "hackd", (status, detail), remedy));
+    cards.push(card(DAEMON.0, DAEMON.1, (status, detail), remedy));
     if compose {
         cards.push(card(
-            "routing",
-            "Routing and DNS · Compose",
-            routing(runs, projects, platform),
-            Remedy::Admin(vec!["global".into(), "install".into()]),
+            DOCKER.0,
+            DOCKER.1,
+            docker_evidence(runs),
+            Remedy::Doc("https://docs.docker.com/engine/install/".into()),
         ));
+    }
+    for p in &native {
+        let state = p
+            .native
+            .as_ref()
+            .filter(|_| p.status != "missing" && p.repo_root.is_some())
+            .map(|n| n.status.as_str())
+            .unwrap_or("unreadable or missing project");
+        cards.push(card(
+            &format!("native:{}", p.name),
+            &format!("Native runtime · {}", p.name),
+            (
+                if state == "observed" {
+                    Status::Passed
+                } else {
+                    Status::Unknown
+                },
+                format!("{state}; native setup documentation"),
+            ),
+            Remedy::Doc(NATIVE_DOC.into()),
+        ));
+    }
+    if compose {
+        let (status, detail, checks) = routing(runs, projects, platform);
+        let mut routing_card = card(
+            ROUTING.0,
+            ROUTING.1,
+            (status, detail),
+            Remedy::Admin(vec!["global".into(), "install".into()]),
+        );
+        routing_card.checks = checks;
+        cards.push(routing_card);
     }
     for p in &native {
         cards.push(card(
@@ -422,8 +458,8 @@ pub fn derive(
             );
         }
         cards.push(card(
-            "trust",
-            "Certificate trust · Compose",
+            TRUST.0,
+            TRUST.1,
             trust,
             Remedy::Admin(vec!["global".into(), "trust".into()]),
         ));
@@ -444,21 +480,21 @@ pub fn derive(
             .filter(|v| supported_cli(v))
             .map(|_| "/usr/local/bin/hack".into()),
         context: None,
-        force_cli_gate: cli.is_ok_and(|v| !supported_cli(v)),
+        force_cli_gate: false,
     }
 }
 fn routing(
     runs: &[DoctorRun],
     projects: Option<&ProjectsPayload>,
     platform: Platform,
-) -> (Status, String) {
+) -> (Status, String, Vec<Check>) {
     // Project host suffixes Doctor reported nothing for: it checks only the
     // default domain's resolver today (DESIGN.md R23), so their routing
     // cannot be confirmed and global install would not change that.
     let mut unobserved: std::collections::BTreeMap<String, String> = Default::default();
     let mut ids: Vec<String> = match platform {
         Platform::Linux => vec!["linux dns route".into()],
-        Platform::Other => return (Status::Unknown, "Unsupported platform".into()),
+        Platform::Other => return (Status::Unknown, "Unsupported platform".into(), Vec::new()),
         Platform::Mac => {
             let mut domains = std::collections::BTreeSet::from([
                 "hack".to_owned(),
@@ -503,39 +539,43 @@ fn routing(
         }
     };
     ids.sort();
-    let results: Vec<_> = ids
-        .iter()
+    let checks: Vec<_> = ids
+        .into_iter()
         .map(|id| {
-            let mut result = check(runs, None, id);
+            let (status, mut detail) = check(runs, None, &id);
             let domain = id
                 .strip_prefix("resolver:")
                 .or_else(|| id.strip_prefix("dnsmasq.conf:"));
-            if result.0 == Status::Unknown
+            if status == Status::Unknown
                 && let Some(host) = domain.and_then(|d| unobserved.get(d))
             {
-                result.1 = format!(
-                    "Doctor does not check this project domain yet (DESIGN.md R23), so routing for {host} is unconfirmed"
+                detail = format!(
+                    "Doctor does not check this project domain yet (DESIGN.md R23). Routing for {host} is unconfirmed. Global install cannot confirm this domain."
                 );
             }
-            (id, result)
+            Check { id, status, detail }
         })
         .collect();
-    if results.iter().all(|(_, (s, _))| *s == Status::Passed) {
-        return (Status::Passed, "All required DNS checks passed".into());
+    let total = checks.len();
+    let passed = checks.iter().filter(|c| c.status == Status::Passed).count();
+    if passed == total {
+        return (
+            Status::Passed,
+            format!("All {total} DNS pieces are set up"),
+            checks,
+        );
     }
-    let status = if results.iter().any(|(_, (s, _))| *s == Status::Unknown) {
-        Status::Unknown
-    } else {
-        Status::NeedsAttention
-    };
+    if checks.iter().any(|c| c.status == Status::Unknown) {
+        return (
+            Status::Unknown,
+            format!("Confirmed {passed} of {total} DNS pieces"),
+            checks,
+        );
+    }
     (
-        status,
-        results
-            .into_iter()
-            .filter(|(_, (s, _))| *s != Status::Passed)
-            .map(|(id, (_, d))| format!("{id}: {d}"))
-            .collect::<Vec<_>>()
-            .join("; "),
+        Status::NeedsAttention,
+        format!("{passed} of {total} DNS pieces are set up"),
+        checks,
     )
 }
 
@@ -563,14 +603,12 @@ pub fn fixture(
 }
 
 /// Explicit preview compatibility range: semver 5.x (including prereleases).
-fn supported_cli(version: &str) -> bool {
-    let core = version.split(['-', '+']).next().unwrap_or("");
-    let parts: Vec<_> = core.split('.').collect();
-    parts.len() == 3
-        && parts[0] == "5"
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+pub(crate) fn supported_cli(version: &str) -> bool {
+    semver::Version::parse(version).is_ok_and(|v| v.major == 5)
+}
+
+pub fn unsupported_cli_detail(version: &str) -> String {
+    format!("Hack {version} is installed. This app needs Hack 5.")
 }
 
 /// How old a shown Setup pane's checks may get before they run again.
@@ -612,7 +650,7 @@ pub use crate::setup_login::{installation_refusal, qualify_login};
 /// with `api_ok` or `api_reachable`) runs even without a tracked PID (one
 /// started outside the CLI's PID file, for example). `None` when the report
 /// says neither.
-fn daemon_running(d: &serde_json::Value) -> Option<bool> {
+pub(crate) fn daemon_running(d: &serde_json::Value) -> Option<bool> {
     let flag = |key: &str| d.get(key).and_then(serde_json::Value::as_bool);
     let api_answers = matches!(
         d.get("status").and_then(serde_json::Value::as_str),
@@ -656,10 +694,14 @@ mod routing_tests {
             }],
             ..ProjectsPayload::default()
         };
-        let (status, detail) = routing(&runs, Some(&projects), Platform::Mac);
+        let (status, detail, checks) = routing(&runs, Some(&projects), Platform::Mac);
         assert_eq!(status, Status::Unknown, "never green without evidence");
-        assert!(detail.contains("R23"), "{detail}");
-        assert!(detail.contains("shop.example.test"), "{detail}");
+        assert_eq!(detail, "Confirmed 8 of 10 DNS pieces");
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.detail.contains("R23") && c.detail.contains("shop.example.test"))
+        );
         // Without that project every check Doctor ran passes.
         assert_eq!(routing(&runs, None, Platform::Mac).0, Status::Passed);
     }

@@ -625,6 +625,7 @@ mod tests {
                     } else {
                         Remedy::Admin(vec!["global".into(), command.into()])
                     },
+                    checks: Vec::new(),
                 }
             };
             Report {
@@ -642,6 +643,7 @@ mod tests {
                         status: Status::Passed,
                         detail: "Hack 5".into(),
                         remedy: Remedy::Doc(String::new()),
+                        checks: Vec::new(),
                     },
                     checked("routing", "install"),
                     checked("trust", "trust"),

@@ -280,8 +280,18 @@ fn diagnostic(app: &HackApp, list: &ListView, banner: &Banner) -> Option<Notice>
             notice.evidence = error.clone();
             Some(notice)
         }
+        Banner::DaemonUnreadable => Some(Notice::new(
+            Kind::CouldNotCheck,
+            Mark::Unknown,
+            "Couldn’t check hackd",
+            "Check again.",
+            Action::None,
+        )),
         Banner::DaemonReadFailed { error } | Banner::Stale { error }
-            if !list.banners.contains(&Banner::DaemonOff) =>
+            if !list
+                .banners
+                .iter()
+                .any(|banner| matches!(banner, Banner::DaemonOff | Banner::DaemonUnreadable)) =>
         {
             let mut notice = Notice::new(
                 Kind::CouldNotCheck,
@@ -560,6 +570,8 @@ mod tests {
 
     #[test]
     fn a_new_daemon_failure_takes_priority_and_recovers_with_a_cached_pass() {
+        use hack_desktop_core::{source::SourceError, viewmodel::Event};
+
         let mut cx = HeadlessAppContext::with_platform(
             Arc::new(gpui_kit::NoopTextSystem::new()),
             Arc::new(hack_desktop_ui::icons::Assets),
@@ -615,6 +627,24 @@ mod tests {
                         let list = app.model.list();
                         reconcile(&mut app, &list);
                         assert!(app.health.follow_ups.visible(Kind::DaemonDown, &evidence));
+
+                        app.model
+                            .apply(Event::Refreshed(Err(SourceError::DaemonUnreadable)));
+                        let list = app.model.list();
+                        assert!(
+                            list.banners
+                                .iter()
+                                .any(|b| matches!(b, Banner::Stale { .. }))
+                        );
+                        let notices = observed(&app, &list);
+                        let checks: Vec<_> = notices
+                            .iter()
+                            .filter(|notice| notice.kind == Kind::CouldNotCheck)
+                            .collect();
+                        assert_eq!(checks.len(), 1);
+                        assert_eq!(checks[0].title, "Couldn’t check hackd");
+                        assert!(matches!(checks[0].action, Action::None));
+                        assert!(notices.iter().all(|notice| notice.kind != Kind::DaemonDown));
                         app
                     })
                 },

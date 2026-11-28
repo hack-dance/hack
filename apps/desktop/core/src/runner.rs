@@ -769,24 +769,47 @@ impl CliRunner {
         })
     }
 
-    /// Read the running CLI version through the schema-tagged JSON contract.
+    /// Read the running CLI version. Older installs either print plain text
+    /// directly or reject the JSON flag and need a second, plain version read.
     ///
     /// # Errors
-    /// Any [`RunError`], including an unsupported or missing schema.
+    /// Any [`RunError`], including a malformed version or invalid envelope.
     pub fn version(&self, timeout: Duration) -> Result<String, RunError> {
-        #[derive(serde::Deserialize)]
-        struct Version {
-            version: String,
+        let started = Instant::now();
+        let (stdout, stderr, code) = self.run_raw(&["version", "--json"], None, timeout)?;
+        if code == Some(0)
+            && let Some(version) = parse_version(&stdout)
+        {
+            return Ok(version);
         }
-        let report: Version =
-            self.run_schema_json(&["version", "--json"], None, timeout, "hack.version.v1")?;
-        if report.version.is_empty() {
-            return Err(RunError::BadJson {
-                error: "empty version".into(),
-                stdout_head: String::new(),
-            });
+        let invalid = || RunError::BadJson {
+            error: "expected a Hack version".into(),
+            stdout_head: head(&stdout),
+        };
+        match parse_schema_result(&stdout, &stderr, code, "hack.version.v1") {
+            Ok(data) => data["version"]
+                .as_str()
+                .filter(|v| semver::Version::parse(v).is_ok())
+                .map(str::to_owned)
+                .ok_or_else(invalid),
+            Err(RunError::Cli(error))
+                if error.code == "E_USAGE" && error.message.contains("--json") =>
+            {
+                let left = timeout.saturating_sub(started.elapsed());
+                if left.is_zero() {
+                    return Err(RunError::Timeout { after: timeout });
+                }
+                let (stdout, stderr, code) = self.run_raw(&["version"], None, left)?;
+                if code != Some(0) {
+                    return Err(RunError::Exit { code, stderr });
+                }
+                parse_version(&stdout).ok_or_else(|| RunError::BadJson {
+                    error: "expected a Hack version".into(),
+                    stdout_head: head(&stdout),
+                })
+            }
+            Err(error) => Err(error),
         }
-        Ok(report.version)
     }
 
     /// Start a long-running ndjson stream (`hack logs --json ...`).
@@ -1391,11 +1414,8 @@ pub fn parse_schema_result(
         stdout_head: head(stdout),
     };
     let value: Value = serde_json::from_str(stdout).map_err(|_| invalid())?;
-    if value.as_object().is_none_or(|object| object.len() != 2) {
-        return Err(invalid());
-    }
     match value.get("ok").and_then(Value::as_bool) {
-        Some(false) if code.is_some_and(|code| code != 0) => {
+        Some(false) if value.get("data").is_none() && code.is_some_and(|code| code != 0) => {
             let error = value.get("error").ok_or_else(invalid)?;
             if !error
                 .get("code")
@@ -1414,7 +1434,7 @@ pub fn parse_schema_result(
             }
             parse_result(stdout, stderr, code)
         }
-        Some(true) if code == Some(0) => {
+        Some(true) if value.get("error").is_none() && code == Some(0) => {
             let data = value.get("data").ok_or_else(invalid)?;
             if data.get("schema").and_then(Value::as_str) != Some(schema) {
                 return Err(invalid());
@@ -1428,10 +1448,12 @@ pub fn parse_schema_result(
 /// `hack v5.0.0` / `5.0.0-next.3` → the version string.
 #[must_use]
 pub fn parse_version(text: &str) -> Option<String> {
-    text.split_whitespace()
-        .map(|w| w.trim_start_matches('v'))
-        .find(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit()) && w.contains('.'))
-        .map(str::to_owned)
+    let text = text.trim();
+    let version = text.strip_prefix("hack ").unwrap_or(text);
+    let version = version.strip_prefix('v').unwrap_or(version);
+    semver::Version::parse(version)
+        .ok()
+        .map(|_| version.to_owned())
 }
 
 #[cfg(test)]
@@ -1801,6 +1823,11 @@ mod tests {
         let runner = runner.with_env("PATH", bin.to_str().unwrap());
         let clone = runner.clone();
         assert_eq!(clone.resolve_program().unwrap(), hack, "positive control");
+        // Keep first-launch executable validation outside the bounded checks.
+        clone
+            .run_raw(&["x"], None, Duration::from_secs(60))
+            .expect("trusted CLI runs before rediscovery");
+        std::fs::remove_file(&marker).expect("reset the fixture's run marker");
         // Another user can now replace it: rediscovery refuses it ...
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o777)).unwrap();
         assert!(matches!(runner.rediscover(), Err(RunError::Spawn(_))));
@@ -1850,6 +1877,10 @@ mod tests {
         let runner = CliRunner::selectable(&hack);
         let clone = runner.clone();
         assert_eq!(runner.rediscover().unwrap(), hack, "positive control");
+        clone
+            .run_raw(&["x"], None, Duration::from_secs(60))
+            .expect("trusted selected CLI runs before rediscovery");
+        std::fs::remove_file(&marker).expect("reset the fixture's run marker");
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o777)).unwrap();
         assert!(matches!(runner.rediscover(), Err(RunError::Spawn(_))));
         for r in [&runner, &clone] {

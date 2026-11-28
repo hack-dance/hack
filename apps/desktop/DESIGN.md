@@ -176,17 +176,18 @@ snapshot, only counts and nothing else.
 Shown on first launch when a check needs attention and the user has not yet
 selected an instance, opened Doctor or opened a terminal tab (a lost CLI shows
 it regardless), and from the Doctor row ("Run setup again"). One card per
-check, in order. Every check is read-only; every card offers **Check again**.
+check, in order. The pane offers **Check again** for its read-only checks.
+When the CLI check fails, the later steps show **Blocked** and offer no actions.
 
 ![Onboarding](diagrams/onboarding.svg) ([source](diagrams/onboarding.mmd))
 
 | Step | Read-only check | Fix | Admin | Skipped / unknown shows |
 |---|---|---|---|---|
-| CLI | `hack --version` (text; R1 for JSON) | `brew install hack-dance/tap/hack` (copy) | no | Cannot skip |
-| Docker (Compose projects) | `runtime_ok` from `/v1/projects` or `hack projects --json` (Docker only) | open Docker Desktop / Docker docs | no | "Docker not reachable" on Compose projects only |
+| CLI | `hack version --json`, with a plain-text fallback for older releases | Open the Hack 5 install guide | no | Cannot skip |
+| hackd | `hack daemon status --json` and the version from `/v1/status` | `hack daemon start` if confirmed off. Check again if unreadable. | no | Slower refresh when disconnected |
+| Docker (Compose projects) | The machine Doctor's `docker daemon` check | Docker docs | no | "Docker not reachable" on Compose projects only |
 | Native runtime (native projects) | native `ps` `data.status` per native project (`runtime_not_running` etc.) | native setup doc (HACK-2193) | no | that native project shows Unknown; Compose projects unaffected |
-| hackd | `hack daemon status --json` | `hack daemon start` | no | Status bar "hackd off"; slower refresh |
-| Routing and DNS (Compose) | macOS: doctor `resolver:<tld>`, `dnsmasq.conf:<tld>`, `dnsmasq:53` and `coredns forwarding` (all must pass). Linux: doctor `linux dns route`. Never `hack global status` (can start Docker) | `hack global install` | **yes** | URLs greyed "DNS not set up"; "unknown" when a check is missing |
+| Routing and DNS (Compose) | macOS: doctor `resolver:<tld>`, `dnsmasq.conf:<tld>`, `dnsmasq:53` and `coredns forwarding` (all must pass). Linux: doctor `linux dns route`. Never `hack global status` (can start Docker) | `hack global install` | **yes** | Count and individual results for all expected DNS pieces |
 | Routing and DNS (native) | `hack doctor --browser-url <project URL>` → `native host dns` (absent without `--browser-url`) | none from the app: `hack global install` refuses native; link to the native setup doc (HACK-2193) | — | "unknown" |
 | Certificate trust (Compose) | **Unknown** today: doctor `caddy local ca` checks the exported CA, not system or browser trust (R16) | `hack global trust` | **yes** | Lock icon on URLs: "browser may warn" |
 | Certificate trust (native) | doctor `native root trust` | none from the app: `hack global trust` refuses native; doc link | — | "unknown" |

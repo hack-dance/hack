@@ -4,9 +4,8 @@
 //! `hack-next` (on PATH, or `~/.hack-next/bin/hack-next`), and each of its
 //! versions keeps its own home, hackd and registry. The app runs one CLI at
 //! a time and reads the hackd that CLI reports, so it must know which CLI
-//! that is: it discovers both kinds, uses the one the user chose (saved in
-//! the app's own settings, never an environment variable), else stable,
-//! else the prerelease, and offers the other.
+//! that is: it discovers both kinds and prefers a supported version. A
+//! compatible saved choice wins, then stable, then the prerelease.
 //!
 //! Only installs no other user can change are offered.
 
@@ -49,6 +48,7 @@ pub struct Choice {
     pub selected: Option<Install>,
     /// CLIs found but refused: another user can change them.
     pub rejected: Vec<PathBuf>,
+    compatible: Vec<PathBuf>,
 }
 
 impl Choice {
@@ -65,8 +65,42 @@ impl Choice {
         let saved = settings_path().and_then(|p| read_saved(&p));
         Self {
             rejected,
-            ..Self::pick(installs, saved.as_deref())
+            ..Self::pick(installs, saved.as_deref()).prefer_supported(|install| {
+                crate::runner::CliRunner::new(&install.path)
+                    .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+                    .version(std::time::Duration::from_secs(5))
+                    .ok()
+            })
         }
+    }
+
+    /// Keep the normal preference order among compatible installs. If none
+    /// qualify, show the first known mismatch before an unreadable install.
+    fn prefer_supported(mut self, version: impl Fn(&Install) -> Option<String>) -> Self {
+        if self.installs.len() < 2 {
+            return self;
+        }
+        let mut compatible = Vec::new();
+        let mut mismatch = None;
+        for install in self.selected.iter().chain(self.others()) {
+            if let Some(found) = version(install) {
+                if crate::setup::supported_cli(&found) {
+                    compatible.push(install.path.clone());
+                } else {
+                    mismatch.get_or_insert(install);
+                }
+            }
+        }
+        if let Some(install) = self
+            .installs
+            .iter()
+            .find(|install| Some(&install.path) == compatible.first())
+            .or(mismatch)
+        {
+            self.selected = Some(install.clone());
+        }
+        self.compatible = compatible;
+        self
     }
 
     /// Choose among `installs`: the saved path when it is still one of them,
@@ -82,14 +116,20 @@ impl Choice {
             installs,
             selected,
             rejected: Vec::new(),
+            compatible: Vec::new(),
         }
     }
 
-    /// The installs the app could switch to.
+    /// The other installs found on this machine.
     pub fn others(&self) -> impl Iterator<Item = &Install> {
         self.installs
             .iter()
             .filter(move |i| Some(*i) != self.selected.as_ref())
+    }
+
+    /// Alternatives with a confirmed, compatible version.
+    pub fn compatible_alternatives(&self) -> impl Iterator<Item = &Install> {
+        self.others().filter(|i| self.compatible.contains(&i.path))
     }
 
     /// Select `path` (one of the installs) and save it as the choice.
@@ -283,6 +323,80 @@ mod tests {
         assert!(none.is_empty());
         assert_eq!(rejected, [home.join(".hack-next/bin/hack-next")]);
         std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    #[test]
+    fn a_switch_is_offered_only_to_a_confirmed_compatible_install() {
+        let stable = Install {
+            name: "hack".into(),
+            channel: Channel::Stable,
+            path: "/bin/hack".into(),
+        };
+        let next = Install {
+            name: "hack-next".into(),
+            channel: Channel::Prerelease,
+            path: "/bin/hack-next".into(),
+        };
+        let choice = |stable_version: Option<&str>| {
+            Choice::pick(vec![stable.clone(), next.clone()], Some(&next.path)).prefer_supported(
+                |install| {
+                    if install == &stable {
+                        stable_version
+                    } else {
+                        Some("5.0.0-next.24")
+                    }
+                    .map(str::to_owned)
+                },
+            )
+        };
+        assert_eq!(choice(Some("4.3.1")).compatible_alternatives().count(), 0);
+        assert_eq!(choice(None).compatible_alternatives().count(), 0);
+        assert_eq!(
+            choice(Some("5.0.0"))
+                .compatible_alternatives()
+                .collect::<Vec<_>>(),
+            [&stable],
+        );
+    }
+
+    #[test]
+    fn a_supported_install_wins_and_a_known_mismatch_is_the_fallback() {
+        let stable = Install {
+            name: "hack".into(),
+            channel: Channel::Stable,
+            path: "/bin/hack".into(),
+        };
+        let next = Install {
+            name: "hack-next".into(),
+            channel: Channel::Prerelease,
+            path: "/bin/hack-next".into(),
+        };
+        let choose =
+            |stable_version: Option<&str>, next_version: Option<&str>, saved: Option<&Path>| {
+                Choice::pick(vec![stable.clone(), next.clone()], saved)
+                    .prefer_supported(|i| {
+                        if i == &stable {
+                            stable_version
+                        } else {
+                            next_version
+                        }
+                        .map(str::to_owned)
+                    })
+                    .selected
+                    .unwrap()
+            };
+        assert_eq!(choose(Some("4.3.1"), Some("5.0.0-next.24"), None), next);
+        assert_eq!(
+            choose(Some("4.3.1"), Some("5.0.0-next.24"), Some(&stable.path)),
+            next
+        );
+        assert_eq!(choose(Some("5.0.0"), Some("5.0.0-next.24"), None), stable);
+        assert_eq!(
+            choose(Some("5.0.0"), Some("5.0.0-next.24"), Some(&next.path)),
+            next
+        );
+        assert_eq!(choose(Some("4.3.1"), None, None), stable);
+        assert_eq!(choose(None, Some("6.0.0"), None), next);
     }
 
     #[test]

@@ -42,7 +42,7 @@ in the Stats charts while the app is open.
 | Files tab | Browse a running Compose service's directories, preview files, copy container paths and open worktree files in an editor. | `hack files ls --json`, `hack files cat --json` |
 | Env tab | Variable names and values per overlay and scope. See below. | `hack env list`, `get`, `add` |
 | Terminal panel | Log and shell tabs inside the window. On Linux, only in a build with the `terminal` feature. | `hack logs --pretty`, shells |
-| Setup | One card per setup step: the CLI, the runtime, `hackd`, routing and DNS, certificate trust, the login service. | read-only checks |
+| Setup | One card per setup step: the CLI, `hackd`, the runtime, routing and DNS, certificate trust, the login service. | read-only checks |
 | Doctor | Machine checks once, and project checks for each registered checkout. | `hack doctor --json` |
 | hackd | Whether `hackd` runs and matches the CLI, and a summary of always-on projects. | `hack daemon status --json` |
 | Upgrade | The upgrade review pane. See below. | `hack upgrade check`, `review`, `snapshot`, `rollback` |
@@ -63,10 +63,13 @@ The app looks for two installs:
 - stable `hack` on your `PATH`;
 - the prerelease `hack-next`, on your `PATH` or at `~/.hack-next/bin/hack-next`.
 
-It offers only an install that no other user on the machine can change. It uses
-the one you chose last time; otherwise stable; otherwise the prerelease. The
-status bar names the CLI in use, for example
-`hack-next 5.0.0-next.19 · prerelease`, and one click switches to the other.
+It offers only an install that no other user on the machine can change. Among
+compatible Hack 5 installs, it prefers the one you chose last time, then stable,
+then the prerelease. If the installed CLI is too old, Setup names its version
+and shows the later steps as blocked. The status bar names the CLI in use, for
+example `hack-next 5.0.0-next.19 · prerelease`. It offers a switch when another
+compatible install was confirmed. If no CLI was found, use **Set up Hack** in
+the main pane to check your install.
 
 The app then asks that CLI where its `hackd` is (`hack daemon status --json`)
 and reads that one. This matters with a prerelease: `hack-next` keeps its own
@@ -78,6 +81,10 @@ Your choice is saved in the app's settings file
 `$XDG_CONFIG_HOME/hack-desktop/settings.json` elsewhere, by default under
 `~/.config`). No environment
 variable selects the CLI.
+
+When the app cannot check `hackd`, use **Check again** in Setup. The routing
+card shows how many DNS pieces are set up, such as **5 of 8**. Open **DNS
+details** to see each check's result and diagnostic.
 
 ## The Files tab
 

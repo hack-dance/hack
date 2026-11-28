@@ -122,6 +122,7 @@ fn report() -> Report {
         status,
         detail: detail.into(),
         remedy,
+        checks: Vec::new(),
     };
     let doc = |url: &str| Remedy::Doc(url.into());
     Report {

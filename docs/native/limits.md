@@ -123,6 +123,12 @@ Details and the exact checks:
   behind. This is a fault in the virtual machine's file share and is still present in
   the pinned SmolVM 1.35.4. Run the command again, remove the folder from the Mac, or
   keep that folder on a named volume.
+- **Large `hack exec` output.** Native `hack exec` can lose the end of its output,
+  from a few hundred KB upward, in about 1 in 4 runs. This is a fault in the pinned
+  virtual machine provider, and a fix is in progress. `hack run` is not affected.
+  For large output, redirect it to a file in the container and copy the file out,
+  or use `hack run`. See
+  [known issues](../guides/native-candidate.md#known-issues).
 - **Hot reload with a large checkout.** Normally an edit made on the Mac reaches
   services within about a tenth of a second and file watchers inside them fire.
   When the project folders shared into the virtual machine hold more than 100,000

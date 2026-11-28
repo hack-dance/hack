@@ -94,6 +94,18 @@ These limits still apply to a packaged candidate:
 - Downgrading onto newer state: an older candidate that refuses state written by
   a newer one is not a rollback. See [manual candidate upgrade and rollback](native-candidate.md#manual-candidate-upgrade-and-rollback).
 
+### Known issues
+
+- **Native exec output can lose its end (HACK-2766).** On the native VM's pinned
+  provider, native `hack exec` and a `docker exec` sent to the native engine can
+  lose the end of their output, from a few hundred KB upward, in about 1 in 4 runs.
+  `hack run` and `docker cp` are not affected. Releases that include HACK-2759 mark
+  the output truncated when the cut comes after the first 1 MiB of a stream, and
+  fail the exec as unconfirmed when it comes inside it; earlier releases can return
+  shortened output without saying so. For large output, redirect it to a file in
+  the container and copy the file out, or use `hack run`. A provider fix is in
+  progress. See [known issues](native-candidate.md#known-issues).
+
 ## Versions and artifacts
 
 Candidate versions have the form `BASE-next.N`, where `BASE` is the next

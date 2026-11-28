@@ -29,6 +29,7 @@ are its main sections:
 
 | Topic | Section |
 | --- | --- |
+| Known issues | [Known issues](../guides/native-candidate.md#known-issues) |
 | Which projects stay on Compose | [Compose projects that stay on the Compose backend](../guides/native-candidate.md#compose-projects-that-stay-on-the-compose-backend) |
 | Runtime setup, upgrade and rollback | [Manual candidate upgrade and rollback](../guides/native-candidate.md#manual-candidate-upgrade-and-rollback) |
 | How a Compose file is read | [Explicit normalized public Compose input](../guides/native-candidate.md#explicit-normalized-public-compose-input) |

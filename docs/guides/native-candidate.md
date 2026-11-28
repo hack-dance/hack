@@ -174,6 +174,31 @@ finalization checks still apply. Fresh and already branch-scoped graphs keep
 their normal branch namespace. This compatibility path does not authorize
 adopting an unrelated branch or project.
 
+## Known issues
+
+### Exec output can lose its end (HACK-2766)
+
+On the native VM's pinned provider, the stream that carries an exec's output can
+close before the output ends. It happens from a few hundred KB of output upward, in
+about 1 in 4 runs, and the provider gives no error. This affects native `hack exec` and a
+`docker exec` you send to the native engine yourself. `hack run`, Compose-backed
+`hack run` and `docker cp` are not affected. A provider fix is in progress.
+
+Releases that include HACK-2759 report the loss. If the cut comes after the first
+1 MiB of a stream, Hack writes that 1 MiB and marks the output truncated, as it
+does for any output over 1 MiB. If the cut comes inside the first 1 MiB, the exec
+fails and reports that completion is unconfirmed. It never reports the shortened
+output as complete. Earlier releases can return shortened output without saying so.
+
+For large output, do not read it through the exec stream:
+
+- Redirect the output to a file inside the container, then copy the file out. For
+  example, run `hack exec web -- sh -c 'npm test > /tmp/test.log 2>&1'`, then copy
+  `/tmp/test.log` with `docker cp`. A file written into a folder shared from your
+  Mac, such as the project source, is already on the Mac. The `sh -c` command
+  still exits with the command's own status.
+- Or run the command with `hack run`.
+
 ## Check a project before you start it
 
 `hack up` on the native backend checks a Compose project in two places and stops

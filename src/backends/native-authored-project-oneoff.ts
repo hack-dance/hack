@@ -7,6 +7,11 @@ import {
   parseNativeAuthoredReceipt,
 } from "./native-authored-graph-protocol.ts";
 import {
+  type NativeOutputDrops,
+  nativeCommandReplyKeys,
+  nativeOutputDrops,
+} from "./native-authored-project-exec.ts";
+import {
   type NativeAuthoredProjectRunScope,
   withNativeAuthoredProjectStatus,
 } from "./native-authored-project-run.ts";
@@ -47,6 +52,8 @@ export type NativeAuthoredOneOff = {
   readonly stdout: Uint8Array;
   readonly stderr: Uint8Array;
   readonly truncated: boolean;
+  /** Absent means nothing was reported dropped (HACK-2759). */
+  readonly dropped?: NativeOutputDrops;
 };
 function output(value: unknown): Uint8Array {
   if (typeof value !== "string" || value.length > 1_398_104) {
@@ -78,7 +85,7 @@ export function parseNativeAuthoredOneOff(
   if (
     !(
       isRecord(oneOff) &&
-      keys(
+      nativeCommandReplyKeys(
         oneOff,
         "container,exit_code,member,name,receipt,service,stderr_base64,stdout_base64,truncated"
       )
@@ -121,6 +128,7 @@ export function parseNativeAuthoredOneOff(
     stdout: output(oneOff.stdout_base64),
     stderr: output(oneOff.stderr_base64),
     truncated: oneOff.truncated,
+    dropped: nativeOutputDrops(oneOff, oneOff.truncated),
   };
 }
 /**

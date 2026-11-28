@@ -106,6 +106,13 @@ pub fn begin(
     state::write(&root.join("state.json"), &receipt)?;
     super::super::startup_failure::clear_after_started(&root)?;
     runtime.enroll_job(&engine, &mut receipt, &root, &selection.service, &service)?;
+    // HACK-2759: read the job's output from an attach opened right before its start,
+    // not from its rotating 1 MB log after it exits, which kept only the end. The
+    // bound covers the longest job (300 s) and its observation.
+    runtime.capture_output_of(
+        &service,
+        std::time::Instant::now() + Duration::from_secs(330),
+    );
     let mut session = Session {
         startup: Some(runtime),
         engine,
@@ -137,12 +144,14 @@ pub fn begin(
 
 /// Observe a bounded command without retaining the VM mutation lease between
 /// polls. Caller cancellation and timeout both proceed to exact owned cleanup.
-pub fn observe(
+pub(in crate::provider) fn observe(
     candidate: &Candidate,
     active: &ActiveJob,
     deadline: std::time::Instant,
     mut cancelled: impl FnMut() -> bool,
+    output: Option<std::thread::JoinHandle<Result<crate::provider::engine::Capture, ()>>>,
 ) -> Result<ServiceExecResult, CandidateError> {
+    let mut output = output;
     use base64::Engine as _;
     loop {
         if cancelled() || std::time::Instant::now() >= deadline {
@@ -164,8 +173,11 @@ pub fn observe(
                     .as_i64()
                     .filter(|v| (0..=255).contains(v))
                     .ok_or_else(refused)? as i32;
-                let (stdout, stderr, truncated) =
-                    engine.job_logs(resource.id.as_deref().ok_or_else(refused)?)?;
+                let (stdout, stderr, truncated) = match output.take() {
+                    Some(reader) => attached_output(reader)?,
+                    // No attach was opened (an engine that refused it): the log.
+                    None => engine.job_logs(resource.id.as_deref().ok_or_else(refused)?)?,
+                };
                 return Ok(ServiceExecResult {
                     exit_code: code,
                     stdout_base64: base64::engine::general_purpose::STANDARD.encode(stdout),
@@ -176,6 +188,36 @@ pub fn observe(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// How long an exited job's output reader may take to see its stream close.
+const OUTPUT_SETTLE: Duration = if cfg!(test) {
+    Duration::from_millis(100)
+} else {
+    Duration::from_secs(10)
+};
+/// The attached output of an exited job. Its stream closes when the job exits, so
+/// the reader ends promptly; one that does not, or failed, leaves the output
+/// unconfirmed rather than silently short (HACK-2759).
+fn attached_output(
+    reader: std::thread::JoinHandle<Result<crate::provider::engine::Capture, ()>>,
+) -> Result<(Vec<u8>, Vec<u8>, bool), CandidateError> {
+    let unread = || {
+        error(
+            "graph_one_off_failed",
+            "One-off output could not be read to its end; owned cleanup is required.",
+        )
+    };
+    let settle = std::time::Instant::now() + OUTPUT_SETTLE;
+    while !reader.is_finished() {
+        if std::time::Instant::now() >= settle {
+            return Err(unread());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let capture = reader.join().map_err(|_| unread())?.map_err(|_| unread())?;
+    let truncated = capture.truncated();
+    Ok((capture.stdout, capture.stderr, truncated))
 }
 
 /// Remove only the transient resource and its fresh private/dependency grants.
@@ -282,4 +324,45 @@ pub fn finish(
             .map_err(state::io)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+    use crate::provider::engine::Capture;
+
+    /// HACK-2759 (review M1): a Compose one-off's output comes from its attach
+    /// reader, with truncation from the dropped counts; a reader that failed or
+    /// never sees its stream close leaves the output unconfirmed, never short.
+    #[test]
+    fn a_compose_one_off_takes_its_attached_output_or_reports_it_unread() {
+        let reader = std::thread::spawn(|| {
+            let mut capture = Capture::default();
+            capture.stdout = b"kept".to_vec();
+            capture.stdout_dropped = 9_000_000;
+            Ok(capture)
+        });
+        let (stdout, stderr, truncated) = attached_output(reader).unwrap();
+        assert_eq!(
+            (stdout.as_slice(), stderr.len(), truncated),
+            (&b"kept"[..], 0, true)
+        );
+
+        let failed = std::thread::spawn(|| Err(()));
+        assert_eq!(
+            attached_output(failed).unwrap_err().code,
+            "graph_one_off_failed"
+        );
+
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let stuck = std::thread::spawn(move || {
+            let _ = wait.recv();
+            Ok(Capture::default())
+        });
+        assert_eq!(
+            attached_output(stuck).unwrap_err().code,
+            "graph_one_off_failed"
+        );
+        drop(release);
+    }
 }

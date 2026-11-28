@@ -99,6 +99,8 @@ pub struct HostRelayRuntime {
     selected_run: Option<String>,
     control_generation: String,
     startup_cancelled: Option<fn() -> bool>,
+    /// HACK-2759: a Compose one-off's output, attached right before its start.
+    output_capture: OutputCapture,
     /// The foreground owner's requests served while the start loop runs.
     startup_requests: Option<std::cell::RefCell<Box<dyn StartupRequests>>>,
     /// `graph serve --report-started`: print the `graph_foreground_started` line
@@ -114,6 +116,16 @@ pub struct HostRelayRuntime {
     rebind_unconfirmed: bool,
     // Dropped after the managed listeners: only verified cleanup releases capacity.
     dependency_reservation: Option<super::super::dependency_slots::Reservation>,
+}
+/// A Compose one-off's output capture (HACK-2759): requested before the job's
+/// start, attached right before it, and read on its own thread until the job exits.
+pub(in crate::provider::graph) enum OutputCapture {
+    None,
+    Requested {
+        service: String,
+        deadline: std::time::Instant,
+    },
+    Attached(std::thread::JoinHandle<Result<crate::provider::engine::Capture, ()>>),
 }
 fn refused() -> CandidateError {
     error(
@@ -696,6 +708,7 @@ impl HostRelayRuntime {
             selected_run: selected_run.map(str::to_owned),
             control_generation,
             startup_cancelled: None,
+            output_capture: OutputCapture::None,
             startup_requests: None,
             report_started: false,
             #[cfg(target_os = "macos")]
@@ -728,6 +741,26 @@ impl HostRelayRuntime {
         self.startup_requests = requests.map(std::cell::RefCell::new);
     }
     /// Armed only while the foreground initial startup runs, never during cleanup.
+    /// Attach to `service`'s output right before its start (a Compose one-off).
+    pub(in crate::provider::graph) fn capture_output_of(
+        &mut self,
+        service: &str,
+        deadline: std::time::Instant,
+    ) {
+        self.output_capture = OutputCapture::Requested {
+            service: service.to_owned(),
+            deadline,
+        };
+    }
+    /// The reader of the attached output, if the attach was opened.
+    pub(in crate::provider::graph) fn take_output(
+        &mut self,
+    ) -> Option<std::thread::JoinHandle<Result<crate::provider::engine::Capture, ()>>> {
+        match std::mem::replace(&mut self.output_capture, OutputCapture::None) {
+            OutputCapture::Attached(reader) => Some(reader),
+            _ => None,
+        }
+    }
     pub(in crate::provider::graph) fn set_startup_cancellation(
         &mut self,
         check: Option<fn() -> bool>,
@@ -1054,6 +1087,32 @@ fn announce_started(
 }
 
 impl Driver for HostRelayRuntime {
+    fn before_start(
+        &mut self,
+        engine: &Engine<'_>,
+        service: &str,
+        id: &str,
+    ) -> Result<(), CandidateError> {
+        if let OutputCapture::Requested {
+            service: wanted,
+            deadline,
+        } = &self.output_capture
+        {
+            if wanted == service {
+                let deadline = *deadline;
+                // Opening the attach is bounded on its own and watches the start
+                // loop's cancellation; `deadline` only bounds the output reader.
+                let (check, requests) = (self.startup_cancelled, self.startup_requests.as_ref());
+                let reader = engine
+                    .attach_output(id, deadline, &|| {
+                        startup_cancelled(check, requests).is_err()
+                    })
+                    .map_err(|error| startup_cancelled(check, requests).err().unwrap_or(error))?;
+                self.output_capture = OutputCapture::Attached(reader);
+            }
+        }
+        Ok(())
+    }
     #[cfg(target_os = "macos")]
     fn resume_publications(&mut self, receipt: &Receipt, services: &BTreeSet<String>) {
         if let Some(publications) = &mut self.early_publications {

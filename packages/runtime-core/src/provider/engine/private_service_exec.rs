@@ -274,10 +274,47 @@ const INSPECT_GRACE: Duration = Duration::from_secs(5);
 /// uncertain would tell the user a completed command may not have run. So once the deadline
 /// has passed, reading continues while bytes keep arriving, with `idle_grace` allowed
 /// between them and an absolute `ceiling` past the deadline. Only a stream that stays silent
-/// for `idle_grace`, or keeps going past `ceiling`, is uncertain. Total retained output stays
-/// bounded at 4 MiB.
+/// for `idle_grace`, or keeps going past `ceiling`, is uncertain. Retained output is the
+/// streaming capture's first 1 MiB of each stream; the rest is read and counted
+/// (HACK-2759: a 4 MiB bound on the raw stream failed a larger output as uncertain).
+fn read_capture(
+    stream: &UnixStream,
+    deadline: Instant,
+) -> Result<super::service_exec::Capture, CandidateError> {
+    let mut capture = super::service_exec::Capture::default();
+    read_output_within(
+        stream,
+        deadline,
+        OUTPUT_IDLE_GRACE,
+        OUTPUT_DRAIN_CEILING,
+        &mut |bytes| {
+            capture
+                .feed(bytes)
+                .map_err(|_| failed(Stage::Output, Reason::Protocol))
+        },
+    )?;
+    // A stream that ends inside a frame closed early; a malformed frame is a
+    // protocol failure. The two are reported apart (HACK-2759 review). A cut
+    // past the kept range is a lost tail, reported as truncation (`finish`).
+    capture
+        .finish()
+        .map_err(|_| failed(Stage::Output, Reason::Closed))
+}
+/// The raw bytes [`read_output_within`] reads, for the read-loop tests.
+#[cfg(test)]
 fn read_output(stream: &UnixStream, deadline: Instant) -> Result<Vec<u8>, CandidateError> {
-    read_output_within(stream, deadline, OUTPUT_IDLE_GRACE, OUTPUT_DRAIN_CEILING)
+    let mut raw = Vec::new();
+    read_output_within(
+        stream,
+        deadline,
+        OUTPUT_IDLE_GRACE,
+        OUTPUT_DRAIN_CEILING,
+        &mut |bytes| {
+            raw.extend_from_slice(bytes);
+            Ok(())
+        },
+    )?;
+    Ok(raw)
 }
 /// When the next output read gives up: never before `deadline`; after it, one `idle_grace`
 /// past the last byte (or the start of reading), but never past `deadline + ceiling`.
@@ -294,9 +331,9 @@ fn read_output_within(
     deadline: Instant,
     idle_grace: Duration,
     ceiling: Duration,
-) -> Result<Vec<u8>, CandidateError> {
+    sink: &mut dyn FnMut(&[u8]) -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
     let mut last_progress = Instant::now();
-    let mut raw = Vec::new();
     let mut buffer = [0u8; 8192];
     loop {
         let window = output_window(deadline, last_progress, idle_grace, ceiling);
@@ -304,36 +341,37 @@ fn read_output_within(
             Ok(n) => n,
             // The window passed while this host was not running. Whatever the peer had
             // already queued, including EOF, still counts (from #982); only a stream with
-            // nothing queued is uncertain. Draining never waits, and the 4 MiB bound holds.
-            Err(timeout) if Instant::now() >= window => return drain_queued(stream, raw, timeout),
+            // nothing queued is uncertain. Draining never waits; the sink bounds what it keeps.
+            Err(timeout) if Instant::now() >= window => return drain_queued(stream, sink, timeout),
             Err(error) => return Err(error),
         };
         if n == 0 {
-            return Ok(raw);
+            return Ok(());
         }
-        if raw.len() + n > 4 * 1024 * 1024 {
-            return Err(failed(Stage::Output, Reason::Protocol));
-        }
-        raw.extend_from_slice(&buffer[..n]);
+        sink(&buffer[..n])?;
         last_progress = Instant::now();
     }
 }
+/// The most a drain after the output window reads before it calls the stream unfinished.
+const DRAIN_LIMIT: usize = 4 * 1024 * 1024;
 /// Read what the peer already queued after the output window passed: the output if it
-/// reaches EOF, otherwise the window's own failure.
+/// reaches EOF, otherwise the window's own failure. A finished command leaves at most a
+/// socket buffer queued; a peer still writing past [`DRAIN_LIMIT`] has not finished, so the
+/// drain ends there instead of following it forever (HACK-2759).
 fn drain_queued(
     stream: &UnixStream,
-    mut raw: Vec<u8>,
+    sink: &mut dyn FnMut(&[u8]) -> Result<(), CandidateError>,
     timeout: CandidateError,
-) -> Result<Vec<u8>, CandidateError> {
+) -> Result<(), CandidateError> {
     let mut buffer = [0u8; 8192];
+    let mut drained = 0;
     loop {
         match super::exec_io::read_queued(stream, &mut buffer) {
-            Ok(0) => return Ok(raw),
+            Ok(0) => return Ok(()),
+            Ok(n) if drained + n > DRAIN_LIMIT => return Err(timeout),
             Ok(n) => {
-                if raw.len() + n > 4 * 1024 * 1024 {
-                    return Err(failed(Stage::Output, Reason::Protocol));
-                }
-                raw.extend_from_slice(&buffer[..n]);
+                drained += n;
+                sink(&buffer[..n])?;
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => return Err(timeout),
@@ -407,9 +445,7 @@ impl super::Engine<'_> {
             },
         )?;
         deliver(&mut stream, deadline_for_values, values)?;
-        let raw = read_output(&stream, deadline)?;
-        let (stdout, stderr, truncated) = super::service_exec::decode(&raw)
-            .map_err(|_| failed(Stage::Output, Reason::Protocol))?;
+        let output = read_capture(&stream, deadline)?;
         self.guest
             .verify()
             .map_err(|_| failed(Stage::Inspect, Reason::Io))?;
@@ -442,9 +478,12 @@ impl super::Engine<'_> {
             as i32;
         Ok(super::service_exec::ExecOutput {
             exit_code,
-            stdout,
-            stderr,
-            truncated,
+            truncated: output.truncated(),
+            tail_lost: output.tail_lost,
+            stdout: output.stdout,
+            stderr: output.stderr,
+            stdout_dropped: output.stdout_dropped,
+            stderr_dropped: output.stderr_dropped,
         })
     }
 }
@@ -705,6 +744,7 @@ mod tests {
             started,
             Duration::from_millis(100),
             Duration::from_secs(5),
+            &mut |_| Ok(()),
         )
         .unwrap_err();
         assert_eq!(error.code, "graph_service_exec_uncertain");
@@ -805,5 +845,94 @@ mod tests {
                 }
             );
         }
+    }
+    /// `total` bytes of one stream, multiplexed in engine-sized frames.
+    fn framed(stream: u8, total: usize) -> (Vec<u8>, Vec<u8>) {
+        let output: Vec<u8> = (0..total).map(|i| b'a' + (i % 23) as u8).collect();
+        let mut multiplexed = Vec::new();
+        for chunk in output.chunks(32 * 1024 + 7) {
+            multiplexed.extend_from_slice(&[stream, 0, 0, 0]);
+            multiplexed.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+            multiplexed.extend_from_slice(chunk);
+        }
+        (output, multiplexed)
+    }
+    /// HACK-2759 (review M2): a Compose exec with fresh values failed past 4 MiB of raw
+    /// output. At 1.35 MB, 4 MiB + 13 and 10 MB it keeps the first 1 MiB of each stream
+    /// and counts the rest.
+    #[test]
+    fn a_large_private_exec_output_keeps_its_beginning_and_counts_the_rest() {
+        for total in [1_350_880, 4 * 1024 * 1024 + 13, 10_000_000] {
+            let (host, mut guest) = UnixStream::pair().unwrap();
+            let (output, multiplexed) = framed(1, total);
+            let writer = std::thread::spawn(move || guest.write_all(&multiplexed).unwrap());
+            let capture = read_capture(&host, Instant::now() + Duration::from_secs(20)).unwrap();
+            writer.join().unwrap();
+            let limit = super::super::service_exec::OUTPUT_LIMIT;
+            assert_eq!(capture.stdout, output[..limit], "{total}");
+            assert_eq!(capture.stdout_dropped, (total - limit) as u64);
+            assert!(capture.stderr.is_empty());
+        }
+    }
+    /// HACK-2759 (VM captures): the private exec's stream closed inside a frame,
+    /// 64 to 128 KiB before its end. Past the kept 1 MiB that is a lost tail: the
+    /// kept bytes are exact and nothing is counted. Inside it, the output step
+    /// fails as closed.
+    #[test]
+    fn a_private_exec_stream_cut_inside_a_frame_loses_only_a_tail_past_the_kept_range() {
+        let limit = super::super::service_exec::OUTPUT_LIMIT;
+        let (output, multiplexed) = framed(1, 1_351_648);
+        for (cut, lost) in [(1_220_101, true), (700_000, false)] {
+            let (host, mut guest) = UnixStream::pair().unwrap();
+            let bytes = multiplexed[..cut].to_vec();
+            let writer = std::thread::spawn(move || guest.write_all(&bytes).unwrap());
+            let result = read_capture(&host, Instant::now() + Duration::from_secs(20));
+            writer.join().unwrap();
+            if lost {
+                let capture = result.unwrap();
+                assert_eq!(capture.stdout, output[..limit]);
+                assert!(capture.tail_lost && capture.truncated());
+                assert_eq!((capture.stdout_dropped, capture.stderr_dropped), (0, 0));
+            } else {
+                let error = result.err().unwrap();
+                assert_eq!(stage_of(&error)["stage"], "output");
+                assert_eq!(stage_of(&error)["reason"], "closed");
+            }
+        }
+    }
+    /// HACK-2759 (review L2): a command whose output never ends is not read forever.
+    /// The read gives up at its ceiling past the deadline, the queued drain at its own
+    /// bound, and the outcome is uncertain.
+    #[test]
+    fn a_writer_that_never_stops_ends_the_read_as_uncertain() {
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        let writer = std::thread::spawn(move || {
+            let (_, frame) = framed(1, 64 * 1024);
+            while guest.write_all(&frame).is_ok() {}
+        });
+        let started = Instant::now();
+        let mut capture = super::super::service_exec::Capture::default();
+        let error = read_output_within(
+            &host,
+            started,
+            Duration::from_millis(50),
+            Duration::from_millis(300),
+            &mut |bytes| {
+                capture
+                    .feed(bytes)
+                    .map_err(|_| failed(Stage::Output, Reason::Protocol))
+            },
+        )
+        .unwrap_err();
+        drop(host);
+        writer.join().unwrap();
+        assert_eq!(error.code, "graph_service_exec_uncertain");
+        assert_eq!(stage_of(&error)["stage"], "output");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(
+            capture.stdout.len(),
+            super::super::service_exec::OUTPUT_LIMIT
+        );
+        assert!(capture.stdout_dropped > 0);
     }
 }

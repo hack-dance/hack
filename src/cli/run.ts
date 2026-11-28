@@ -16,7 +16,7 @@ import {
 } from "../lib/missing-project-error.ts";
 import { nativeDetachedUpFailure } from "../lib/native-detached-up.ts";
 import { canPrintPathSelector } from "../lib/printed-shell-command.ts";
-import { logger } from "../ui/logger.ts";
+import { logger, setLoggerBackendOverride } from "../ui/logger.ts";
 import {
   startRefusalBlocker,
   writeStartBlocker,
@@ -287,6 +287,15 @@ export async function handleRunCliError(opts: {
     return 1;
   }
 
+  // HACK-2759: `hack exec` and `hack run` write the command's own output to
+  // stdout, so their errors go to stderr. The UI logger cannot be used as is:
+  // clack writes errors to stdout.
+  const commandOutput =
+    opts.handlerPath?.[0] === "exec" || opts.handlerPath?.[0] === "run";
+  if (commandOutput) {
+    setLoggerBackendOverride({ backend: "console" });
+  }
+
   if (error instanceof HackCliError) {
     writeCodedRefusal(error, opts.handlerPath, opts.startSelector);
     if (error.detail !== undefined) {
@@ -313,7 +322,11 @@ export async function handleRunCliError(opts: {
 
   // Unexpected exceptions keep their stack: it is the only lead to the bug.
   const message = error instanceof Error ? error.message : "Unknown error";
-  cancel(message);
+  if (commandOutput) {
+    process.stderr.write(`ERROR: ${message}\n`);
+  } else {
+    cancel(message);
+  }
   if (error instanceof Error && error.stack) {
     logger.error({ message: error.stack });
   }

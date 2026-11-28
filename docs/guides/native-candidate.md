@@ -176,28 +176,34 @@ adopting an unrelated branch or project.
 
 ## Known issues
 
-### Exec output can lose its end (HACK-2766)
+### Command output can lose its end (HACK-2766)
 
-On the native VM's pinned provider, the stream that carries an exec's output can
-close before the output ends. It happens from a few hundred KB of output upward, in
-about 1 in 4 runs, and the provider gives no error. This affects native `hack exec` and a
-`docker exec` you send to the native engine yourself. `hack run`, Compose-backed
-`hack run` and `docker cp` are not affected. A provider fix is in progress.
+On the native VM's pinned provider, the stream that carries a command's output can
+close before the output ends, and the provider gives no error. The cause is in the
+provider's socket proxy: it closes the stream's Mac side while output from the
+virtual machine is still queued. It affects:
 
-Releases that include HACK-2759 report the loss. If the cut comes after the first
-1 MiB of a stream, Hack writes that 1 MiB and marks the output truncated, as it
-does for any output over 1 MiB. If the cut comes inside the first 1 MiB, the exec
-fails and reports that completion is unconfirmed. It never reports the shortened
-output as complete. Earlier releases can return shortened output without saying so.
+- **Exec streams:** native `hack exec` and a `docker exec` you send to the native
+  engine yourself. From a few hundred KB of output upward, about 1 in 4 runs lose
+  their end.
+- **Attach streams, when the Mac reads slowly:** `hack run`, Compose-backed
+  `hack run` and `docker run`. At normal read speed they were not cut; a slow
+  reader lost the end every time.
 
-For large output, do not read it through the exec stream:
+`docker cp` is not affected. A provider fix is verified; it ships with a new
+provider pin.
 
-- Redirect the output to a file inside the container, then copy the file out. For
-  example, run `hack exec web -- sh -c 'npm test > /tmp/test.log 2>&1'`, then copy
-  `/tmp/test.log` with `docker cp`. A file written into a folder shared from your
-  Mac, such as the project source, is already on the Mac. The `sh -c` command
-  still exits with the command's own status.
-- Or run the command with `hack run`.
+Releases that include HACK-2759 report the loss instead of returning shortened
+output as complete. If the cut comes after the first 1 MiB of a stream, Hack writes
+that 1 MiB and marks the output truncated, as it does for any output over 1 MiB. If
+the cut comes inside the first 1 MiB, the command fails; an exec reports that
+completion is unconfirmed. Earlier releases can return shortened output without
+saying so.
+
+For large output, do not read it through the command's output stream. Redirect it
+to a file inside the container, then copy the file out with `docker cp`. For
+example, run `hack exec web -- sh -c 'npm test > /tmp/test.log 2>&1'`, then copy
+`/tmp/test.log`. The `sh -c` command still exits with the command's own status.
 
 ## Check a project before you start it
 

@@ -30,6 +30,8 @@ import {
   JOURNAL_FORMAT_VERSION,
   JournalWriter,
   journalPaths,
+  newCommandId,
+  newGeneration,
   parseCursor,
   parseEventLines,
   readEvents,
@@ -80,13 +82,19 @@ import { HackCliError } from "../src/lib/cli-result.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
 let root = "";
+let pendingAdmissionCheck: Promise<void> | undefined;
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "hack-bg-journal-"));
 });
 
 afterEach(async () => {
-  await rm(root, { recursive: true, force: true });
+  const fixtureRoot = root;
+  const admissionCheck = pendingAdmissionCheck;
+  pendingAdmissionCheck = undefined;
+  // Bun can time out the test while its admission calls still own the fixture.
+  await admissionCheck?.catch(() => undefined);
+  await rm(fixtureRoot, { recursive: true, force: true });
 });
 
 /** ps stand-in: nothing in `alive` means "every recorded process is gone". */
@@ -128,6 +136,78 @@ async function expectCode(promise: Promise<unknown>, code: string) {
   );
   expect(error).toBeInstanceOf(HackCliError);
   expect((error as HackCliError).code).toBe(code as HackCliError["code"]);
+}
+
+async function checkAdmissionLimits(root: string): Promise<void> {
+  const now = new Date();
+  const owner = { pid: 100_000, birth: "b", processGroupId: 100_000 };
+  const alive = [owner];
+  const observe = fakeObserve(alive);
+  const start = (caller: string) =>
+    acceptCommand({ input: input({ caller }), root, now, observe });
+
+  const first = await start("session-a");
+  await writeFile(
+    first.paths.owner,
+    JSON.stringify({ ...owner, sessionId: owner.pid, newSession: true }),
+    { mode: 0o600 }
+  );
+  const [accepted] = await readEvents(first.paths);
+  if (accepted?.type !== "command.accepted") {
+    throw new Error("Expected the first command's acceptance event");
+  }
+
+  // Seed commands still in their owner-start grace period. Real admissions
+  // fill the last slot at each limit and recover the journal with a lost owner.
+  const seedStartingCommand = async (caller: string) => {
+    const meta = {
+      ...first.meta,
+      caller,
+      commandId: newCommandId(),
+      generation: newGeneration(),
+    };
+    const paths = journalPaths({ root, commandId: meta.commandId });
+    const event = buildEnvelope({
+      meta,
+      seq: accepted.seq,
+      type: accepted.type,
+      payload: accepted.payload,
+      time: now,
+    });
+    await mkdir(paths.dir, { mode: 0o700 });
+    await writeFile(paths.meta, JSON.stringify(meta), { mode: 0o600 });
+    await writeFile(paths.events, `${JSON.stringify(event)}\n`, {
+      mode: 0o600,
+    });
+  };
+
+  for (let index = 1; index < CALLER_ACTIVE_LIMIT - 1; index += 1) {
+    await seedStartingCommand("session-a");
+  }
+  await start("session-a");
+  await expect(start("session-a")).rejects.toMatchObject({
+    code: "E_ADMISSION_LIMIT",
+    message: expect.stringContaining("This session"),
+  });
+  for (
+    let index = CALLER_ACTIVE_LIMIT;
+    index < HOME_ACTIVE_LIMIT - 1;
+    index += 1
+  ) {
+    await seedStartingCommand(`session-${index}`);
+  }
+  await start("session-last");
+  await expect(start("session-new")).rejects.toMatchObject({
+    code: "E_ADMISSION_LIMIT",
+    message: expect.stringContaining("This Hack home"),
+  });
+
+  alive.length = 0;
+  await start("session-new");
+  expect((await readEvents(first.paths)).at(-1)).toMatchObject({
+    type: "command.ended",
+    payload: { outcome: "unknown" },
+  });
 }
 
 describe("journal events and cursors", () => {
@@ -376,48 +456,9 @@ describe("request keys and admission", () => {
     expect(await listCommandIds(root)).toEqual([]);
   });
 
-  test("admission limits are per caller session and per Hack home", async () => {
-    const now = new Date();
-    // A live supervisor for every journal: the ps stand-in reports the pid alive.
-    const alive: ObservedIdentity[] = [];
-    const observe = fakeObserve(alive);
-    const startOne = async (caller: string) => {
-      const accepted = await acceptCommand({
-        input: input({ caller }),
-        root,
-        now,
-        observe,
-      });
-      const pid = 100_000 + alive.length;
-      alive.push({ pid, birth: "b", processGroupId: pid });
-      await writeFile(
-        accepted.paths.owner,
-        JSON.stringify({
-          pid,
-          birth: "b",
-          processGroupId: pid,
-          sessionId: pid,
-          newSession: true,
-        }),
-        { mode: 0o600 }
-      );
-      return accepted;
-    };
-    for (let index = 0; index < CALLER_ACTIVE_LIMIT; index += 1) {
-      await startOne("session-a");
-    }
-    await expectCode(startOne("session-a"), "E_ADMISSION_LIMIT");
-    for (
-      let index = CALLER_ACTIVE_LIMIT;
-      index < HOME_ACTIVE_LIMIT;
-      index += 1
-    ) {
-      await startOne(`session-${index}`);
-    }
-    await expectCode(startOne("session-new"), "E_ADMISSION_LIMIT");
-    // A supervisor that died frees its slot: it is finalized as unknown.
-    alive.splice(0, 1);
-    await startOne("session-new");
+  test("admission limits are per caller session and per Hack home", () => {
+    pendingAdmissionCheck = checkAdmissionLimits(root);
+    return pendingAdmissionCheck;
   });
 });
 

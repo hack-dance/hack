@@ -129,6 +129,10 @@ export const PUBLISHED_RELEASES: Readonly<
     manager: "90bf732b23d413df314352632b8808cc191e3681543746ce2e81ccbf0ad4d894",
     archive: "d85593a034f19043fd3c91894f7b28a91a9116fe2e63c0d3968aa359fc173af9",
   },
+  "5.0.0-next.29": {
+    manager: "cb5fe2ca7ce491bdd3ade6708ad39dfeea395cd182fb232d9e9d1955b24463e0",
+    archive: "ea85a932a229a3a9d5e735c9edbb6ed22c506b6bee0d81ac01178f704e26f766",
+  },
 };
 
 /**
@@ -232,6 +236,20 @@ export const PUBLISHED_LINUX_RELEASES: Readonly<
         "6f9c44bd3fb8c251aa8dad45105ac97609c37a6ac8ad9e1dadea58713c42c8bc",
       archive:
         "7c85dc734b4a3178ec3cb33d13908c71925160f4fa3074451289eed5c77d58f0",
+    },
+  },
+  "5.0.0-next.29": {
+    "linux-x86_64": {
+      manager:
+        "9f1579c35c2f20a6a0e741ebac39e326e0c22f4f38167fa950351b7473c72220",
+      archive:
+        "14a753aae962c12678580f93dce86aa53077f6c18bf4267a8b8c68d64ed1e24e",
+    },
+    "linux-arm64": {
+      manager:
+        "772d719cdcb048f5eb67a6a36151970962cbc2595a357f064a57991fb12099ab",
+      archive:
+        "848752215a51317462d7432f5b8bc7184d14eb29238a22faae4507d2b215a5d1",
     },
   },
 };

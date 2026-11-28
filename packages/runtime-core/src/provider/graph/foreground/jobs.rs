@@ -195,10 +195,15 @@ pub(super) fn handle(
         },
     );
     runtime.set_startup_cancellation(None);
+    let output = runtime.take_output();
     let result = match active {
-        Ok(active) => one_off::runtime::observe(candidate, &active, deadline, || {
-            signals::startup_pending() || watch.disconnected() || pending_cleanup()
-        })
+        Ok(active) => one_off::runtime::observe(
+            candidate,
+            &active,
+            deadline,
+            || signals::startup_pending() || watch.disconnected() || pending_cleanup(),
+            output,
+        )
         .map(|output| (active.job, output)),
         Err(error) => Err(error),
     };

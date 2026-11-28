@@ -2000,7 +2000,20 @@ must check `plan.enrollment_compatible` and `plan.diagnostics` before proceeding
 parse, input and transport failures still exit non-zero in JSON mode.
 Exec requires a running service and returns Base64 stdout/stderr to preserve arbitrary
 bytes, an exit code, and a truncation flag. The CLI also exits with the command's exit
-code. Retained exec output is limited to 1 MiB per stream.
+code. Retained exec output is limited to 1 MiB per stream: the beginning of each
+stream is kept, and the rest is read to its end and dropped, so output size alone
+never makes the outcome unconfirmed. When anything was dropped, `hack exec` and
+`hack run` write the kept output and say on stderr that the output is incomplete and,
+when known, how many bytes of each stream were dropped. The exit status stays the command's own, so a
+passing command with a large output still passes. The engine connection can lose the last
+frames of a large output. When the cut comes after a stream's kept 1 MiB, the kept bytes
+are still that stream's exact beginning, and the exit status comes from the engine's own
+record. The command then reports the output as incomplete without byte counts, saying at
+most the first 1 MiB of each stream was written. After such a cut, either stream may be
+missing its end, stderr included: anything written to stderr after the cut is lost even
+when it would have fit in its own 1 MiB. A cut inside the kept range leaves the outcome
+unconfirmed. Errors of `hack exec` and `hack run` go to stderr, so stdout carries only
+the command's output.
 
 Exec is noninteractive: stdin is closed, no TTY is allocated, and arguments are passed
 literally without an implicit shell. The default wait is 30 seconds, configurable up
@@ -5535,7 +5548,7 @@ and the command says `nothing ran` with `Holder: unavailable.` and `Retry hack e
 once the holder finishes.` A pending Ctrl-C of the owner, its `hack down`, or a
 changed owner publication ends the owner's wait at once; the owner then answers
 `graph_authored_command_not_started`, and the command says it did not start, that
-nothing ran, and to check `hack ps` and retry once the project is up. The command says the same when the owner exits while the command is still waiting for the lock, for example during the project's own `hack down`: nothing has been sent at that point. The owner accepts each command with one byte before it does anything for it, and it drops a command it cannot accept. So the command also says nothing ran when the owner closed the connection without even that byte: for example, the request reached the owner's queue but the owner ended through that `hack down` without taking it, or the owner refused the request. Once the owner has accepted a command, every failure keeps "unconfirmed". A command's answer carries up to 1 MiB of output on each stream. A project started by an earlier prerelease keeps working after you upgrade: its owner does not advertise acceptance, so commands are sent to it as before, without this proof, and a failure after sending stays unconfirmed. Any other
+nothing ran, and to check `hack ps` and retry once the project is up. The command says the same when the owner exits while the command is still waiting for the lock, for example during the project's own `hack down`: nothing has been sent at that point. The owner accepts each command with one byte before it does anything for it, and it drops a command it cannot accept. So the command also says nothing ran when the owner closed the connection without even that byte: for example, the request reached the owner's queue but the owner ended through that `hack down` without taking it, or the owner refused the request. Once the owner has accepted a command, every failure keeps "unconfirmed". A command's answer carries the first 1 MiB of each output stream; a one-off's output is read from the start of the container, not from its logs. A project started by an earlier prerelease keeps working after you upgrade: its owner does not advertise acceptance, so commands are sent to it as before, without this proof, and a failure after sending stays unconfirmed. Any other
 authored failure keeps its report, "completion is unconfirmed" included. An authored
 one-off runs in a fresh container without the service's mounts, so `hack run` of a
 service that mounts persistent storage, or in a project with a live source, is

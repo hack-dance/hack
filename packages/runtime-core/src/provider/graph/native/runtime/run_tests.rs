@@ -141,7 +141,7 @@ impl Backend for Running<'_> {
         }
         let id = self.register(name, config);
         self.one_offs.borrow_mut().remove(name);
-        Ok((id, 17, vec![0, 255], b"err\n".to_vec(), false))
+        Ok((id, 17, vec![0, 255], b"err\n".to_vec(), Default::default()))
     }
 }
 fn selected() -> run::RunSelection {

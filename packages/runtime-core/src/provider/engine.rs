@@ -29,6 +29,9 @@ mod private_service_exec;
 #[cfg(any(target_os = "macos", test))]
 pub(super) mod relay_exec;
 mod service_exec;
+// Read by the macOS-only Compose one-off job path.
+#[cfg_attr(not(target_os = "macos"), allow(unused_imports))]
+pub(in crate::provider) use service_exec::Capture;
 mod stop;
 pub(in crate::provider) use stop::StopBatchFailure;
 #[cfg(test)]

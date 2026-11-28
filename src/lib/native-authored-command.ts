@@ -67,6 +67,7 @@ import { logger } from "../ui/logger.ts";
 import { psServiceState, renderPs } from "../ui/ps-output.ts";
 import { emitCliResult, HackCliError, okResult } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
+import { nativeCommandTruncatedMessage } from "./native-command-output.ts";
 import type { NativeComposeCommandOptions } from "./native-compose-command.ts";
 import type { NativeComposeSelection } from "./native-compose-selection.ts";
 import { nativeDetachedUpReady } from "./native-detached-up.ts";
@@ -1205,7 +1206,6 @@ function assertCommandOptions(
   }
 }
 type CommandContract = {
-  readonly truncated: string;
   readonly unconfirmed: string;
   /** Closed refusals when no Ready generation is saved; nothing was sent. */
   readonly notStarted: string;
@@ -1213,7 +1213,6 @@ type CommandContract = {
 };
 const COMMAND_CONTRACTS: Readonly<Record<"exec" | "run", CommandContract>> = {
   exec: {
-    truncated: "Native exec output was truncated.\n",
     unconfirmed:
       "Native authored exec completion is unconfirmed; command effects may have occurred. Values omitted. No request was replayed.",
     notStarted:
@@ -1222,7 +1221,6 @@ const COMMAND_CONTRACTS: Readonly<Record<"exec" | "run", CommandContract>> = {
       "Native project startup is pending and has not reached Ready; nothing was executed. Check `hack ps` before retrying.",
   },
   run: {
-    truncated: "Native run output was truncated.\n",
     unconfirmed:
       "Native authored run completion is unconfirmed; command effects may have occurred and its one-off container may remain until down. Values omitted. No request was replayed.",
     notStarted:
@@ -1300,6 +1298,8 @@ type CommandCompletion = {
   readonly stdout: Uint8Array;
   readonly stderr: Uint8Array;
   readonly truncated: boolean;
+  /** Bytes of each stream past the 1 MiB cap; absent from an owner that predates them. */
+  readonly dropped?: { readonly stdout: number; readonly stderr: number };
 };
 /** One owner-mediated command whose validated completion is written in order; cancellation stops further writes. */
 async function runAuthoredCommand(input: {
@@ -1359,7 +1359,12 @@ async function runAuthoredCommand(input: {
       return 130;
     }
     if (result.truncated) {
-      process.stderr.write(COMMAND_CONTRACTS[input.operation].truncated);
+      process.stderr.write(
+        nativeCommandTruncatedMessage({
+          operation: input.operation,
+          dropped: result.dropped,
+        })
+      );
     }
     return controller.signal.aborted ? 130 : result.exitCode;
   } catch (error: unknown) {

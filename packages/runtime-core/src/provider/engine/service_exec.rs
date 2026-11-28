@@ -3,11 +3,34 @@ use super::*;
 use serde_json::json;
 use std::time::Instant;
 
+/// The most of each output stream an exec or one-off keeps: its beginning
+/// (HACK-2759). The rest is read to the end and only counted.
+pub(in crate::provider) const OUTPUT_LIMIT: usize = 1024 * 1024;
+
 pub(in crate::provider) struct ExecOutput {
     pub exit_code: i32,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub truncated: bool,
+    /// Bytes of each stream past [`OUTPUT_LIMIT`], read and dropped. Only the
+    /// authored reply carries them; a Compose exec reports `truncated` alone.
+    #[cfg_attr(
+        not(all(feature = "native-config-plan", target_os = "macos")),
+        allow(dead_code)
+    )]
+    pub stdout_dropped: u64,
+    #[cfg_attr(
+        not(all(feature = "native-config-plan", target_os = "macos")),
+        allow(dead_code)
+    )]
+    pub stderr_dropped: u64,
+    /// The end of the output was lost past the kept range ([`Capture::finish`]);
+    /// `truncated` is set and both counts are zero.
+    #[cfg_attr(
+        not(all(feature = "native-config-plan", target_os = "macos")),
+        allow(dead_code)
+    )]
+    pub tail_lost: bool,
 }
 
 fn uncertain() -> CandidateError {
@@ -16,6 +39,441 @@ fn uncertain() -> CandidateError {
         "Service exec completion is uncertain; the command may still be running. No request was replayed. Inspect the service before retrying.",
     )
 }
+
+/// Where an exec's completion became uncertain (HACK-2759 review): each step has
+/// its own fixed message, so a report names the step without any value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    Connect,
+    Upgrade,
+    Format,
+    Read,
+    Identity,
+    Running,
+}
+fn uncertain_at(step: Step) -> CandidateError {
+    CandidateError::new(
+        "graph_service_exec_uncertain",
+        match step {
+            Step::Connect => {
+                "Service exec completion is uncertain: its output stream could not be opened. No request was replayed. Inspect the service before retrying."
+            }
+            Step::Upgrade => {
+                "Service exec completion is uncertain: the engine did not open the exec's output stream. No request was replayed. Inspect the service before retrying."
+            }
+            Step::Format => {
+                "Service exec completion is uncertain: its output was not in the engine's stream format. No request was replayed. Inspect the service before retrying."
+            }
+            Step::Read => {
+                "Service exec completion is uncertain: its output stream failed or passed its deadline. No request was replayed. Inspect the service before retrying."
+            }
+            Step::Identity => {
+                "Service exec completion is uncertain: the exec's identity changed. No request was replayed. Inspect the service before retrying."
+            }
+            Step::Running => {
+                "Service exec completion is uncertain; the command may still be running. No request was replayed. Inspect the service before retrying."
+            }
+        },
+    )
+}
+/// Why reading an output stream failed: its framing, or the stream itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::provider) enum ReadFailure {
+    Format,
+    Stream,
+}
+
+/// One multiplexed engine output stream read to its end (HACK-2759). The first
+/// [`OUTPUT_LIMIT`] bytes of stdout and of stderr are kept and the rest is only
+/// counted, so the size of a command's output never fails the read and memory
+/// stays bounded whatever a single frame claims.
+#[derive(Default)]
+pub(in crate::provider) struct Capture {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub stdout_dropped: u64,
+    pub stderr_dropped: u64,
+    /// The stream ended partway through a frame whose stream had already filled
+    /// its kept range (see [`Capture::finish`]). How much was lost is unknown, so
+    /// the dropped counts are cleared rather than understated.
+    pub tail_lost: bool,
+    header: Vec<u8>,
+    frame: Option<(u8, usize)>,
+}
+impl Capture {
+    pub(super) fn feed(&mut self, mut bytes: &[u8]) -> Result<(), ()> {
+        while !bytes.is_empty() {
+            match self.frame {
+                None => {
+                    let take = (8 - self.header.len()).min(bytes.len());
+                    self.header.extend_from_slice(&bytes[..take]);
+                    bytes = &bytes[take..];
+                    if self.header.len() == 8 {
+                        let header = &self.header;
+                        if ![1, 2].contains(&header[0]) || header[1..4] != [0, 0, 0] {
+                            return Err(());
+                        }
+                        let size =
+                            u32::from_be_bytes(header[4..8].try_into().map_err(|_| ())?) as usize;
+                        self.frame = (size > 0).then_some((header[0], size));
+                        self.header.clear();
+                    }
+                }
+                Some((stream, left)) => {
+                    let take = left.min(bytes.len());
+                    let (kept, dropped) = if stream == 1 {
+                        (&mut self.stdout, &mut self.stdout_dropped)
+                    } else {
+                        (&mut self.stderr, &mut self.stderr_dropped)
+                    };
+                    let keep = take.min(OUTPUT_LIMIT - kept.len());
+                    kept.extend_from_slice(&bytes[..keep]);
+                    *dropped += (take - keep) as u64;
+                    bytes = &bytes[take..];
+                    self.frame = (left > take).then_some((stream, left - take));
+                }
+            }
+        }
+        Ok(())
+    }
+    /// The stream ended. A stream that ends inside a frame closed early, which
+    /// fails the read, with one exception (HACK-2759): the provider's engine
+    /// socket can close before it delivers the last 64 to 128 KiB of a large
+    /// output. When the cut frame's stream already holds its full kept range,
+    /// the bytes it lost lie past what is kept, so the kept bytes are still that
+    /// stream's exact beginning. The read then succeeds as truncated with
+    /// [`Capture::tail_lost`] set. Frames after the cut are unknown (either
+    /// stream), so neither stream is claimed complete and the dropped counts are
+    /// cleared. A cut inside the kept range, or inside a frame header (its
+    /// stream is unknown) before both streams are full, still fails.
+    pub(super) fn finish(mut self) -> Result<Self, ()> {
+        let full = |kept: &Vec<u8>| kept.len() == OUTPUT_LIMIT;
+        let past_kept = match self.frame {
+            None if self.header.is_empty() => return Ok(self),
+            None => full(&self.stdout) && full(&self.stderr),
+            Some((1, _)) => full(&self.stdout),
+            Some(_) => full(&self.stderr),
+        };
+        if !past_kept {
+            return Err(());
+        }
+        self.tail_lost = true;
+        self.stdout_dropped = 0;
+        self.stderr_dropped = 0;
+        Ok(self)
+    }
+    /// Whether any output was not kept: past the cap, or lost at the end.
+    pub(in crate::provider) fn truncated(&self) -> bool {
+        self.tail_lost || self.stdout_dropped + self.stderr_dropped > 0
+    }
+}
+
+/// [`Capture`] of a complete multiplexed body. Its readers (job logs, private
+/// exec) are macOS only.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(super) fn capture(bytes: &[u8]) -> Result<Capture, CandidateError> {
+    let mut capture = Capture::default();
+    capture.feed(bytes).map_err(|_| uncertain())?;
+    // A whole response body never loses its tail in transport: a cut frame
+    // here is malformed, whatever was kept.
+    capture
+        .finish()
+        .ok()
+        .filter(|capture| !capture.tail_lost)
+        .ok_or_else(uncertain)
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(super) fn decode(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>, bool), CandidateError> {
+    let capture = capture(bytes)?;
+    let truncated = capture.truncated();
+    Ok((capture.stdout, capture.stderr, truncated))
+}
+
+/// An engine output stream opened before the command starts (HACK-2759): an
+/// exec's upgraded start, or a one-off's attach before its start.
+///
+/// The stream is read from the moment its headers arrive, on a thread of its
+/// own, and joined afterwards. Nothing (a caller's selection check, the
+/// one-off's start request) runs between the upgrade and the first read: a
+/// reader that falls behind a fast command leaves its output queued in the
+/// provider's engine socket, which can drop that queue when the engine closes
+/// the stream (HACK-2759 captures: the last 64 to 128 KiB).
+pub(in crate::provider) enum Attached {
+    Reading(std::thread::JoinHandle<Result<Capture, ReadFailure>>),
+    #[cfg(test)]
+    Recorded(Vec<u8>),
+}
+impl Attached {
+    /// Start reading `stream` to its end within `deadline`.
+    pub(in crate::provider) fn read(
+        mut stream: std::os::unix::net::UnixStream,
+        deadline: Instant,
+    ) -> Result<Self, ()> {
+        std::thread::Builder::new()
+            .name("engine-output".into())
+            .spawn(move || read_capture(&mut stream, deadline))
+            .map(Self::Reading)
+            .map_err(|_| ())
+    }
+    fn capture(self) -> Result<Capture, ReadFailure> {
+        match self {
+            Self::Reading(reader) => reader.join().unwrap_or(Err(ReadFailure::Stream)),
+            #[cfg(test)]
+            Self::Recorded(bytes) => {
+                let mut capture = Capture::default();
+                capture.feed(&bytes).map_err(|_| ReadFailure::Format)?;
+                capture.finish().map_err(|_| ReadFailure::Format)
+            }
+        }
+    }
+}
+
+/// Wait until `stream` is ready for `events` within `deadline`. The deadline
+/// is kept by `poll`: on macOS, changing a socket timeout after the peer
+/// closed fails with EINVAL even while output is still buffered.
+fn ready(
+    stream: &std::os::unix::net::UnixStream,
+    events: i16,
+    deadline: Instant,
+) -> Result<(), ()> {
+    use std::os::fd::AsRawFd;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+            .ok_or(())?;
+        let mut entry = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events,
+            revents: 0,
+        };
+        let milliseconds = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+        // SAFETY: one initialized entry for a descriptor the stream owns.
+        let count = unsafe { libc::poll(&mut entry, 1, milliseconds) };
+        if count > 0 {
+            return if entry.revents & libc::POLLNVAL == 0 {
+                Ok(())
+            } else {
+                Err(())
+            };
+        }
+        if count < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return Err(());
+        }
+    }
+}
+
+/// One nonblocking receive within `deadline`; `Ok(0)` is the end of the stream.
+fn receive(
+    stream: &std::os::unix::net::UnixStream,
+    bytes: &mut [u8],
+    deadline: Instant,
+) -> Result<usize, ()> {
+    use std::os::fd::AsRawFd;
+    loop {
+        ready(stream, libc::POLLIN, deadline)?;
+        // SAFETY: the buffer is writable for its length and the stream owns the FD.
+        let count = unsafe {
+            libc::recv(
+                stream.as_raw_fd(),
+                bytes.as_mut_ptr().cast(),
+                bytes.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if count >= 0 {
+            return Ok(count as usize);
+        }
+        if !matches!(
+            std::io::Error::last_os_error().kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+        ) {
+            return Err(());
+        }
+    }
+}
+
+/// Send all of `bytes` within `deadline`.
+fn send_all(
+    stream: &std::os::unix::net::UnixStream,
+    mut bytes: &[u8],
+    deadline: Instant,
+) -> Result<(), ()> {
+    use std::os::fd::AsRawFd;
+    #[cfg(target_os = "linux")]
+    let flags = libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL;
+    #[cfg(not(target_os = "linux"))]
+    let flags = libc::MSG_DONTWAIT;
+    while !bytes.is_empty() {
+        ready(stream, libc::POLLOUT, deadline)?;
+        // SAFETY: the slice is readable for its length and the stream owns the FD.
+        let count = unsafe {
+            libc::send(
+                stream.as_raw_fd(),
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                flags,
+            )
+        };
+        if count > 0 {
+            bytes = &bytes[count as usize..];
+        } else if count == 0
+            || !matches!(
+                std::io::Error::last_os_error().kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            )
+        {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+/// Send one HTTP request that upgrades `stream` to a raw output stream, and
+/// read exactly its response headers, so no stream byte is consumed here.
+#[cfg(test)]
+fn upgrade(
+    stream: &mut std::os::unix::net::UnixStream,
+    path: &str,
+    body: Option<&str>,
+    deadline: Instant,
+) -> Result<(), ()> {
+    upgrade_until(stream, path, body, deadline, &|| false)
+}
+
+/// How long opening an upgraded stream (connect, request, response headers) may
+/// take. The engine answers the upgrade before the command produces output, so
+/// this is short and separate from the reader's deadline, which spans the
+/// command (HACK-2759 review: a stalled attach held the owner's loop and its
+/// lease for the 330-second output deadline).
+const ESTABLISH_LIMIT: Duration = if cfg!(test) {
+    Duration::from_millis(300)
+} else {
+    Duration::from_secs(10)
+};
+/// While no response byte arrives, `cancelled` is checked this often.
+const CANCEL_POLL: Duration = Duration::from_millis(100);
+
+/// Wait until `stream` is readable within `deadline`, checking `cancelled`
+/// whenever a [`CANCEL_POLL`] slice passes with nothing to read.
+fn readable(
+    stream: &std::os::unix::net::UnixStream,
+    deadline: Instant,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), ()> {
+    loop {
+        if ready(
+            stream,
+            libc::POLLIN,
+            deadline.min(Instant::now() + CANCEL_POLL),
+        )
+        .is_ok()
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline || cancelled() {
+            return Err(());
+        }
+    }
+}
+
+/// The upgrade request, which also stops when `cancelled` reports true while
+/// it waits for the response.
+fn upgrade_until(
+    stream: &mut std::os::unix::net::UnixStream,
+    path: &str,
+    body: Option<&str>,
+    deadline: Instant,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), ()> {
+    let body = body.unwrap_or("");
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: hack-local\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    send_all(stream, request.as_bytes(), deadline)?;
+    let mut header = Vec::new();
+    while !header.ends_with(b"\r\n\r\n") {
+        if header.len() >= 8192 {
+            return Err(());
+        }
+        let mut byte = [0];
+        readable(stream, deadline, cancelled)?;
+        if receive(stream, &mut byte, deadline)? != 1 {
+            return Err(());
+        }
+        header.push(byte[0]);
+    }
+    let text = std::str::from_utf8(&header).map_err(|_| ())?;
+    let mut lines = text.split("\r\n");
+    if !lines
+        .next()
+        .is_some_and(|status| status.starts_with("HTTP/1.1 101 "))
+    {
+        return Err(());
+    }
+    let (mut upgraded, mut connection) = (false, false);
+    for line in lines.filter(|line| !line.is_empty()) {
+        let (key, value) = line.split_once(':').ok_or(())?;
+        match key.to_ascii_lowercase().as_str() {
+            "upgrade" => upgraded = value.trim().eq_ignore_ascii_case("tcp"),
+            "connection" => connection = value.trim().eq_ignore_ascii_case("upgrade"),
+            "content-length" | "transfer-encoding" => return Err(()),
+            _ => {}
+        }
+    }
+    if upgraded && connection {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+/// Read an upgraded output stream to its end within `deadline`.
+fn read_capture(
+    stream: &mut std::os::unix::net::UnixStream,
+    deadline: Instant,
+) -> Result<Capture, ReadFailure> {
+    let mut capture = Capture::default();
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        match receive(stream, &mut buffer, deadline).map_err(|_| ReadFailure::Stream)? {
+            0 => return capture.finish().map_err(|_| ReadFailure::Format),
+            count => capture
+                .feed(&buffer[..count])
+                .map_err(|_| ReadFailure::Format)?,
+        }
+    }
+}
+
+/// When opening an upgraded stream must finish: [`ESTABLISH_LIMIT`] from now,
+/// never past the reader's `deadline`, a mutation's `admission` deadline or the
+/// transport's `observation` deadline, as for an ordinary engine POST.
+fn establish_by(
+    deadline: Instant,
+    admission: Option<Instant>,
+    observation: Option<Instant>,
+) -> Instant {
+    admission
+        .into_iter()
+        .chain(observation)
+        .fold(deadline.min(Instant::now() + ESTABLISH_LIMIT), Instant::min)
+}
+
+/// How long an exec may still be reported running after its output stream
+/// ended: the engine can publish the exit a moment after the stream closes
+/// (HACK-2759). Polled, then the outcome stays uncertain.
+const EXIT_SETTLE: Duration = if cfg!(test) {
+    Duration::from_millis(40)
+} else {
+    Duration::from_secs(2)
+};
+const EXIT_POLL: Duration = if cfg!(test) {
+    Duration::from_millis(1)
+} else {
+    Duration::from_millis(25)
+};
 
 impl Engine<'_> {
     pub(in crate::provider) fn service_exec(
@@ -43,6 +501,66 @@ impl Engine<'_> {
         })
     }
 
+    /// Attach to a created container's output before it starts, and read it to its
+    /// end on a thread of its own (HACK-2759). The thread ends when the container
+    /// exits (or is removed) and its stream closes, or at `deadline`. Opening the
+    /// attach has its own short bound ([`establish_by`]) and stops early when
+    /// `cancelled` reports true.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(in crate::provider) fn attach_output(
+        &self,
+        id: &str,
+        deadline: Instant,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<std::thread::JoinHandle<Result<Capture, ()>>, CandidateError> {
+        let mut stream = self
+            .upgraded_until(
+                &format!("/v1.53/containers/{id}/attach?stream=1&stdout=1&stderr=1"),
+                None,
+                deadline,
+                cancelled,
+            )
+            .map_err(|_| failure("Cannot attach to the one-off's output."))?;
+        std::thread::Builder::new()
+            .name("one-off-output".into())
+            .spawn(move || read_capture(&mut stream, deadline).map_err(|_| ()))
+            .map_err(|_| failure("Cannot read the one-off's output."))
+    }
+
+    /// Open an upgraded output stream on a fresh engine connection: the effect
+    /// guard runs first, as for any POST.
+    fn upgraded(
+        &self,
+        path: &str,
+        body: Option<&str>,
+        deadline: Instant,
+    ) -> Result<std::os::unix::net::UnixStream, Step> {
+        self.upgraded_until(path, body, deadline, &|| false)
+    }
+    /// [`Engine::upgraded`], stopping early when `cancelled` reports true.
+    /// `deadline` is the reader's; opening the stream is bounded by
+    /// [`establish_by`] instead.
+    fn upgraded_until(
+        &self,
+        path: &str,
+        body: Option<&str>,
+        deadline: Instant,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<std::os::unix::net::UnixStream, Step> {
+        self.guest.verify().map_err(|_| Step::Connect)?;
+        self.guest.before_effect().map_err(|_| Step::Connect)?;
+        let establish = establish_by(
+            deadline,
+            self.transport.admission_deadline,
+            self.transport.observation_deadline,
+        );
+        let socket = self.guest.engine_socket().map_err(|_| Step::Connect)?;
+        let mut stream =
+            crate::provider::agent::connect_until(&socket, establish).map_err(|_| Step::Connect)?;
+        upgrade_until(&mut stream, path, body, establish, cancelled).map_err(|_| Step::Upgrade)?;
+        Ok(stream)
+    }
+
     fn service_exec_observed(
         &self,
         container: &str,
@@ -54,22 +572,34 @@ impl Engine<'_> {
         if self.cleanup_only {
             return Err(failure("A cleanup connection cannot execute commands."));
         }
-        execute_guarded(container, argv, workdir, fresh, |method, path, body| {
-            self.guest.verify()?;
-            if method == Method::POST {
-                self.guest.before_effect()?;
-            }
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .filter(|d| !d.is_zero())
-                .ok_or_else(uncertain)?;
-            let transport = Transport::new(&self.guest.engine_socket()?, remaining)?;
-            let bytes = transport
-                .request_bytes(method, path, body)
-                .map_err(|_| uncertain())?;
-            self.guest.verify().map_err(|_| uncertain())?;
-            Ok(bytes)
-        })
+        execute_guarded(
+            container,
+            argv,
+            workdir,
+            fresh,
+            |method, path, body| {
+                self.guest.verify()?;
+                if method == Method::POST {
+                    self.guest.before_effect()?;
+                }
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .filter(|d| !d.is_zero())
+                    .ok_or_else(uncertain)?;
+                let transport = Transport::new(&self.guest.engine_socket()?, remaining)?;
+                let bytes = transport
+                    .request_bytes(method, path, body)
+                    .map_err(|_| uncertain())?;
+                self.guest.verify().map_err(|_| uncertain())?;
+                Ok(bytes)
+            },
+            |path, body| {
+                let stream = self
+                    .upgraded(path, Some(body), deadline)
+                    .map_err(uncertain_at)?;
+                Attached::read(stream, deadline).map_err(|()| uncertain_at(Step::Read))
+            },
+        )
     }
 }
 
@@ -80,7 +610,15 @@ pub(in crate::provider) struct OneOffOutput {
     pub exit_code: i32,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
-    pub truncated: bool,
+    /// Bytes of each stream past [`OUTPUT_LIMIT`], read and dropped.
+    pub stdout_dropped: u64,
+    pub stderr_dropped: u64,
+    /// The end of the output was lost past the kept range ([`Capture::finish`]).
+    #[cfg_attr(
+        not(all(feature = "native-config-plan", target_os = "macos")),
+        allow(dead_code)
+    )]
+    pub tail_lost: bool,
 }
 
 #[cfg(any(all(feature = "native-config-plan", target_os = "macos"), test))]
@@ -93,7 +631,7 @@ fn one_off_uncertain() -> CandidateError {
 
 #[cfg(all(feature = "native-config-plan", any(target_os = "macos", test)))]
 impl Engine<'_> {
-    /// One create, start, wait, completion inspection, bounded log read and forced
+    /// One create, attach, start, read, wait, completion inspection and forced
     /// removal of a named one-off container. Caller-owned identity checks share the
     /// original observation deadline; nothing is replayed after an uncertain step.
     pub(in crate::provider) fn service_one_off_until(
@@ -118,28 +656,39 @@ impl Engine<'_> {
         if self.cleanup_only {
             return Err(failure("A cleanup connection cannot execute commands."));
         }
-        one_off_guarded(name, config, fresh, |method, path, body| {
-            self.guest.verify()?;
-            if method == Method::POST {
-                self.guest.before_effect()?;
-            }
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .filter(|d| !d.is_zero())
-                .ok_or_else(one_off_uncertain)?;
-            let transport = Transport::new(&self.guest.engine_socket()?, remaining)?;
-            let bytes = transport
-                .request_bytes(method, path, body)
-                .map_err(|error| {
-                    if error.code == "engine_not_found" {
-                        error
-                    } else {
-                        one_off_uncertain()
-                    }
-                })?;
-            self.guest.verify().map_err(|_| one_off_uncertain())?;
-            Ok(bytes)
-        })
+        one_off_guarded(
+            name,
+            config,
+            fresh,
+            |method, path, body| {
+                self.guest.verify()?;
+                if method == Method::POST {
+                    self.guest.before_effect()?;
+                }
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .filter(|d| !d.is_zero())
+                    .ok_or_else(one_off_uncertain)?;
+                let transport = Transport::new(&self.guest.engine_socket()?, remaining)?;
+                let bytes = transport
+                    .request_bytes(method, path, body)
+                    .map_err(|error| {
+                        if error.code == "engine_not_found" {
+                            error
+                        } else {
+                            one_off_uncertain()
+                        }
+                    })?;
+                self.guest.verify().map_err(|_| one_off_uncertain())?;
+                Ok(bytes)
+            },
+            |path| {
+                let stream = self
+                    .upgraded(path, None, deadline)
+                    .map_err(|_| one_off_uncertain())?;
+                Attached::read(stream, deadline).map_err(|()| one_off_uncertain())
+            },
+        )
     }
 }
 
@@ -149,20 +698,37 @@ fn one_off_guarded(
     config: &Value,
     fresh: &dyn Fn() -> Result<(), CandidateError>,
     mut request: impl FnMut(Method, &str, Option<&Value>) -> Result<Vec<u8>, CandidateError>,
+    mut attach: impl FnMut(&str) -> Result<Attached, CandidateError>,
 ) -> Result<OneOffOutput, CandidateError> {
-    one_off(name, config, |method, path, body| {
-        fresh()?;
-        let result = request(method, path, body)?;
-        fresh().map_err(|_| one_off_uncertain())?;
-        Ok(result)
-    })
+    one_off(
+        name,
+        config,
+        |method, path, body| {
+            fresh()?;
+            let result = request(method, path, body)?;
+            fresh().map_err(|_| one_off_uncertain())?;
+            Ok(result)
+        },
+        |path| {
+            fresh()?;
+            let result = attach(path)?;
+            fresh().map_err(|_| one_off_uncertain())?;
+            Ok(result)
+        },
+    )
 }
 
+/// HACK-2759: the one-off's output is read from an attach opened before its
+/// start, not from its logs afterwards. The service's log options (a rotating
+/// 1 MB json-file) kept only the end of a large output, so the beginning was
+/// lost without any truncation signal; the logs body was also bounded by the
+/// transport's 4 MiB.
 #[cfg(any(all(feature = "native-config-plan", target_os = "macos"), test))]
 fn one_off(
     name: &str,
     config: &Value,
     mut request: impl FnMut(Method, &str, Option<&Value>) -> Result<Vec<u8>, CandidateError>,
+    mut attach: impl FnMut(&str) -> Result<Attached, CandidateError>,
 ) -> Result<OneOffOutput, CandidateError> {
     if name.is_empty()
         || name.len() > 128
@@ -182,7 +748,13 @@ fn one_off(
         .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
         .ok_or_else(one_off_uncertain)?
         .to_owned();
+    let attached = attach(&format!(
+        "/v1.53/containers/{id}/attach?stream=1&stdout=1&stderr=1"
+    ))?;
     request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
+    // The attach ends when the container exits; read it before the wait, so a
+    // full output pipe never stalls the command.
+    let output = attached.capture().map_err(|_| one_off_uncertain())?;
     let waited = request(Method::POST, &format!("/v1.53/containers/{id}/wait"), None)?;
     let waited: Value = serde_json::from_slice(&waited).map_err(|_| one_off_uncertain())?;
     let status = waited["StatusCode"]
@@ -200,12 +772,6 @@ fn one_off(
     {
         return Err(one_off_uncertain());
     }
-    let stream = request(
-        Method::GET,
-        &format!("/v1.53/containers/{id}/logs?stdout=true&stderr=true&tail=all"),
-        None,
-    )?;
-    let (stdout, stderr, truncated) = decode(&stream).map_err(|_| one_off_uncertain())?;
     request(
         Method::DELETE,
         &format!("/v1.53/containers/{id}?force=true&v=true"),
@@ -218,9 +784,11 @@ fn one_off(
     Ok(OneOffOutput {
         container: id,
         exit_code: status as i32,
-        stdout,
-        stderr,
-        truncated,
+        stdout: output.stdout,
+        stderr: output.stderr,
+        stdout_dropped: output.stdout_dropped,
+        stderr_dropped: output.stderr_dropped,
+        tail_lost: output.tail_lost,
     })
 }
 
@@ -231,13 +799,25 @@ fn execute_guarded(
     workdir: Option<&str>,
     fresh: &dyn Fn() -> Result<(), CandidateError>,
     mut request: impl FnMut(Method, &str, Option<&Value>) -> Result<Vec<u8>, CandidateError>,
+    mut start: impl FnMut(&str, &str) -> Result<Attached, CandidateError>,
 ) -> Result<ExecOutput, CandidateError> {
-    execute(container, argv, workdir, |method, path, body| {
-        fresh()?;
-        let result = request(method, path, body)?;
-        fresh().map_err(|_| uncertain())?;
-        Ok(result)
-    })
+    execute(
+        container,
+        argv,
+        workdir,
+        |method, path, body| {
+            fresh()?;
+            let result = request(method, path, body)?;
+            fresh().map_err(|_| uncertain())?;
+            Ok(result)
+        },
+        |path, body| {
+            fresh()?;
+            let result = start(path, body)?;
+            fresh().map_err(|_| uncertain())?;
+            Ok(result)
+        },
+    )
 }
 
 fn execute(
@@ -245,6 +825,7 @@ fn execute(
     argv: &[String],
     workdir: Option<&str>,
     mut request: impl FnMut(Method, &str, Option<&Value>) -> Result<Vec<u8>, CandidateError>,
+    mut start: impl FnMut(&str, &str) -> Result<Attached, CandidateError>,
 ) -> Result<ExecOutput, CandidateError> {
     if container.len() != 64 || !container.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(failure("Invalid exec container identity."));
@@ -262,61 +843,52 @@ fn execute(
     let id = created["Id"]
         .as_str()
         .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or_else(uncertain)?;
-    let stream = request(
-        Method::POST,
+        .ok_or_else(uncertain)?
+        .to_owned();
+    // HACK-2759: the started exec's output is read as a stream to its end, not
+    // as one bounded response body, so its size never makes the outcome
+    // uncertain.
+    let output = start(
         &format!("/v1.53/exec/{id}/start"),
-        Some(&json!({"Detach":false,"Tty":false})),
-    )?;
-    let (stdout, stderr, truncated) = decode(&stream)?;
-    let inspected = request(Method::GET, &format!("/v1.53/exec/{id}/json"), None)?;
-    let inspected: Value = serde_json::from_slice(&inspected).map_err(|_| uncertain())?;
-    if inspected["ID"] != id
-        || inspected["ContainerID"] != container
-        || inspected["Running"] != false
-    {
-        return Err(uncertain());
-    }
-    let exit_code = inspected["ExitCode"]
-        .as_i64()
-        .filter(|n| (0..=255).contains(n))
-        .ok_or_else(uncertain)? as i32;
+        r#"{"Detach":false,"Tty":false}"#,
+    )?
+    .capture()
+    .map_err(|failure| {
+        uncertain_at(match failure {
+            ReadFailure::Format => Step::Format,
+            ReadFailure::Stream => Step::Read,
+        })
+    })?;
+    // The engine can report the exec running for a moment after its stream
+    // ended; poll for its exit within a short bound before calling it uncertain.
+    let settle = Instant::now() + EXIT_SETTLE;
+    let exit_code = loop {
+        let inspected = request(Method::GET, &format!("/v1.53/exec/{id}/json"), None)?;
+        let inspected: Value = serde_json::from_slice(&inspected).map_err(|_| uncertain())?;
+        if inspected["ID"] != id.as_str() || inspected["ContainerID"] != container {
+            return Err(uncertain_at(Step::Identity));
+        }
+        if inspected["Running"] == false {
+            break inspected["ExitCode"]
+                .as_i64()
+                .filter(|n| (0..=255).contains(n))
+                .ok_or_else(uncertain)? as i32;
+        }
+        if inspected["Running"] != true || Instant::now() >= settle {
+            return Err(uncertain_at(Step::Running));
+        }
+        std::thread::sleep(EXIT_POLL);
+    };
+    let truncated = output.truncated();
     Ok(ExecOutput {
         exit_code,
-        stdout,
-        stderr,
+        stdout: output.stdout,
+        stderr: output.stderr,
         truncated,
+        stdout_dropped: output.stdout_dropped,
+        stderr_dropped: output.stderr_dropped,
+        tail_lost: output.tail_lost,
     })
-}
-
-pub(super) fn decode(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>, bool), CandidateError> {
-    const LIMIT: usize = 1024 * 1024;
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let mut truncated = false;
-    let mut remaining = bytes;
-    while !remaining.is_empty() {
-        if remaining.len() < 8 || ![1, 2].contains(&remaining[0]) || remaining[1..4] != [0, 0, 0] {
-            return Err(uncertain());
-        }
-        let stream = remaining[0];
-        let size =
-            u32::from_be_bytes(remaining[4..8].try_into().map_err(|_| uncertain())?) as usize;
-        remaining = &remaining[8..];
-        if size > remaining.len() {
-            return Err(uncertain());
-        }
-        let target = if stream == 1 {
-            &mut stdout
-        } else {
-            &mut stderr
-        };
-        let keep = size.min(LIMIT - target.len());
-        target.extend_from_slice(&remaining[..keep]);
-        truncated |= keep < size;
-        remaining = &remaining[size..];
-    }
-    Ok((stdout, stderr, truncated))
 }
 
 #[cfg(test)]
@@ -327,6 +899,21 @@ mod tests {
         result.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
         result.extend_from_slice(bytes);
         result
+    }
+    /// `total` bytes of a recognisable pattern on one stream, in engine-sized frames.
+    fn frames(stream: u8, total: usize) -> (Vec<u8>, Vec<u8>) {
+        let output: Vec<u8> = (0..total).map(|i| b'a' + (i % 23) as u8).collect();
+        let mut multiplexed = Vec::new();
+        for chunk in output.chunks(32 * 1024 + 7) {
+            multiplexed.extend(frame(stream, chunk));
+        }
+        (output, multiplexed)
+    }
+    fn no_start(_: &str, _: &str) -> Result<Attached, CandidateError> {
+        panic!("started")
+    }
+    fn no_attach(_: &str) -> Result<Attached, CandidateError> {
+        panic!("attached")
     }
     #[test]
     fn caller_selection_loss_after_create_never_starts_or_replays() {
@@ -351,6 +938,7 @@ mod tests {
                     assert!(path.ends_with("/exec"));
                     Ok(serde_json::to_vec(&json!({"Id":"b".repeat(64)})).unwrap())
                 },
+                no_start,
             );
             assert!(result.is_err());
             assert_eq!(calls, if lose_at == 1 { 0 } else { 1 });
@@ -380,147 +968,334 @@ mod tests {
             assert!(decode(&bad).is_err());
         }
     }
+    /// The streaming capture agrees with a one-shot reference decode for random
+    /// frame sizes (empty frames included), both streams, and random read splits.
+    #[test]
+    fn the_capture_agrees_with_a_reference_decode_for_any_split() {
+        fn reference(bytes: &[u8]) -> Option<(Vec<u8>, Vec<u8>, u64, u64)> {
+            let (mut out, mut err, mut dout, mut derr) = (Vec::new(), Vec::new(), 0u64, 0u64);
+            let mut rest = bytes;
+            while !rest.is_empty() {
+                if rest.len() < 8 || ![1, 2].contains(&rest[0]) || rest[1..4] != [0, 0, 0] {
+                    return None;
+                }
+                let kind = rest[0];
+                let size = u32::from_be_bytes(rest[4..8].try_into().unwrap()) as usize;
+                rest = &rest[8..];
+                if size > rest.len() {
+                    return None;
+                }
+                let (kept, dropped) = if kind == 1 {
+                    (&mut out, &mut dout)
+                } else {
+                    (&mut err, &mut derr)
+                };
+                let keep = size.min(OUTPUT_LIMIT - kept.len());
+                kept.extend_from_slice(&rest[..keep]);
+                *dropped += (size - keep) as u64;
+                rest = &rest[size..];
+            }
+            Some((out, err, dout, derr))
+        }
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+        for _ in 0..200 {
+            let mut stream = Vec::new();
+            let mut total = 0;
+            while total < 3 * 1024 * 1024 {
+                let size = match next(4) {
+                    0 => 0,
+                    1 => next(8) as usize,
+                    _ => next(70_000) as usize,
+                };
+                let kind = 1 + next(2) as u8;
+                stream.push(kind);
+                stream.extend_from_slice(&[0, 0, 0]);
+                stream.extend_from_slice(&(size as u32).to_be_bytes());
+                stream.extend((0..size).map(|i| (i % 251) as u8));
+                total += size;
+            }
+            let expected = reference(&stream).unwrap();
+            let mut capture = Capture::default();
+            let mut at = 0;
+            while at < stream.len() {
+                let step = (1 + next(70_000) as usize).min(stream.len() - at);
+                capture.feed(&stream[at..at + step]).unwrap();
+                at += step;
+            }
+            let capture = capture.finish().unwrap();
+            assert_eq!(
+                (
+                    capture.stdout,
+                    capture.stderr,
+                    capture.stdout_dropped,
+                    capture.stderr_dropped
+                ),
+                expected
+            );
+        }
+    }
+    /// HACK-2759: at 1.35 MB, past 4 MiB and at 10 MB, fed in arbitrary chunks,
+    /// the capture keeps exactly the first 1 MiB of each stream, counts every
+    /// dropped byte and never fails on size.
+    #[test]
+    fn a_large_output_keeps_its_beginning_and_counts_the_rest() {
+        for total in [1_350_880, 4 * 1024 * 1024 + 13, 10_000_000] {
+            let (output, multiplexed) = frames(1, total);
+            let (errors, error_frames) = frames(2, total / 3);
+            let mut capture = Capture::default();
+            for chunk in [multiplexed, error_frames].concat().chunks(4093) {
+                capture.feed(chunk).unwrap();
+            }
+            let capture = capture.finish().unwrap();
+            assert_eq!(capture.stdout, output[..OUTPUT_LIMIT], "{total}");
+            assert_eq!(capture.stdout_dropped, (total - OUTPUT_LIMIT) as u64);
+            let kept = errors.len().min(OUTPUT_LIMIT);
+            assert_eq!(capture.stderr, errors[..kept], "{total}");
+            assert_eq!(capture.stderr_dropped, (errors.len() - kept) as u64);
+            assert!(capture.truncated());
+        }
+    }
     #[test]
     fn creates_and_starts_once_with_eof_and_returns_nonzero_exit() {
         let container = "a".repeat(64);
         let id = "b".repeat(64);
         let argv = vec!["tool".into(), "$literal; value".into()];
         let mut calls = 0;
-        let result = execute(&container, &argv, Some("/app"), |method, path, body| {
-            calls += 1;
-            match calls {
-                1 => {
-                    assert_eq!(method, Method::POST);
-                    assert_eq!(path, format!("/v1.53/containers/{container}/exec"));
-                    let body = body.unwrap();
-                    assert_eq!(body["Cmd"], json!(argv));
-                    assert_eq!(body["AttachStdin"], false);
-                    assert_eq!(body["Tty"], false);
-                    assert_eq!(body["Privileged"], false);
-                    assert!(body.get("Env").is_none());
-                    assert!(body.get("User").is_none());
-                    assert_eq!(body["WorkingDir"], "/app");
-                    Ok(serde_json::to_vec(&json!({"Id":id})).unwrap())
+        let mut started = 0;
+        let result = execute(
+            &container,
+            &argv,
+            Some("/app"),
+            |method, path, body| {
+                calls += 1;
+                match calls {
+                    1 => {
+                        assert_eq!(method, Method::POST);
+                        assert_eq!(path, format!("/v1.53/containers/{container}/exec"));
+                        let body = body.unwrap();
+                        assert_eq!(body["Cmd"], json!(argv));
+                        assert_eq!(body["AttachStdin"], false);
+                        assert_eq!(body["Tty"], false);
+                        assert_eq!(body["Privileged"], false);
+                        assert!(body.get("Env").is_none());
+                        assert!(body.get("User").is_none());
+                        assert_eq!(body["WorkingDir"], "/app");
+                        Ok(serde_json::to_vec(&json!({"Id":id})).unwrap())
+                    }
+                    2 => {
+                        assert_eq!(method, Method::GET);
+                        Ok(serde_json::to_vec(
+                            &json!({"ID":id,"ContainerID":container,"Running":false,"ExitCode":23}),
+                        )
+                        .unwrap())
+                    }
+                    _ => panic!("request replayed"),
                 }
-                2 => {
-                    assert_eq!(path, format!("/v1.53/exec/{id}/start"));
-                    assert_eq!(body.unwrap(), &json!({"Detach":false,"Tty":false}));
-                    Ok(frame(2, b"failed"))
-                }
-                3 => {
-                    assert_eq!(method, Method::GET);
-                    Ok(serde_json::to_vec(
-                        &json!({"ID":id,"ContainerID":container,"Running":false,"ExitCode":23}),
-                    )
-                    .unwrap())
-                }
-                _ => panic!("request replayed"),
-            }
-        })
+            },
+            |path, body| {
+                started += 1;
+                assert_eq!(path, format!("/v1.53/exec/{id}/start"));
+                assert_eq!(
+                    serde_json::from_str::<Value>(body).unwrap(),
+                    json!({"Detach":false,"Tty":false})
+                );
+                Ok(Attached::Recorded(frame(2, b"failed")))
+            },
+        )
         .unwrap();
-        assert_eq!(calls, 3);
+        assert_eq!((calls, started), (2, 1));
         assert_eq!(result.exit_code, 23);
         assert_eq!(result.stderr, b"failed");
+        assert!(!result.truncated);
     }
     #[test]
     fn interrupted_start_never_replays_or_claims_completion() {
         let mut calls = 0;
-        let error = execute(&"a".repeat(64), &["tool".into()], None, |_, _, _| {
-            calls += 1;
-            if calls == 1 {
+        let error = execute(
+            &"a".repeat(64),
+            &["tool".into()],
+            None,
+            |_, _, _| {
+                calls += 1;
                 Ok(serde_json::to_vec(&json!({"Id":"b".repeat(64)})).unwrap())
-            } else {
-                Err(uncertain())
-            }
-        })
+            },
+            |_, _| Err(uncertain()),
+        )
         .err()
         .unwrap();
-        assert_eq!(calls, 2);
+        assert_eq!(calls, 1);
         assert_eq!(error.code, "graph_service_exec_uncertain");
     }
     #[test]
     fn refuses_changed_exec_identity_or_unfinished_process() {
-        for changed in [
-            json!({"ID":"c".repeat(64),"ContainerID":"a".repeat(64),"Running":false,"ExitCode":0}),
-            json!({"ID":"b".repeat(64),"ContainerID":"c".repeat(64),"Running":false,"ExitCode":0}),
-            json!({"ID":"b".repeat(64),"ContainerID":"a".repeat(64),"Running":true,"ExitCode":0}),
+        for (changed, settles) in [
+            (
+                json!({"ID":"c".repeat(64),"ContainerID":"a".repeat(64),"Running":false,"ExitCode":0}),
+                false,
+            ),
+            (
+                json!({"ID":"b".repeat(64),"ContainerID":"c".repeat(64),"Running":false,"ExitCode":0}),
+                false,
+            ),
+            // Still running past the settle bound: uncertain, after polling.
+            (
+                json!({"ID":"b".repeat(64),"ContainerID":"a".repeat(64),"Running":true,"ExitCode":0}),
+                true,
+            ),
         ] {
             let mut calls = 0;
             assert!(
-                execute(&"a".repeat(64), &["true".into()], None, |_, _, _| {
-                    calls += 1;
-                    Ok(match calls {
-                        1 => serde_json::to_vec(&json!({"Id":"b".repeat(64)})).unwrap(),
-                        2 => vec![],
-                        _ => serde_json::to_vec(&changed).unwrap(),
-                    })
-                })
+                execute(
+                    &"a".repeat(64),
+                    &["true".into()],
+                    None,
+                    |_, _, _| {
+                        calls += 1;
+                        Ok(match calls {
+                            1 => serde_json::to_vec(&json!({"Id":"b".repeat(64)})).unwrap(),
+                            _ => serde_json::to_vec(&changed).unwrap(),
+                        })
+                    },
+                    |_, _| Ok(Attached::Recorded(vec![])),
+                )
                 .is_err()
             );
-            assert_eq!(calls, 3);
+            if settles {
+                assert!(calls > 2, "{calls}");
+            } else {
+                assert_eq!(calls, 2);
+            }
         }
+    }
+    /// HACK-2759: the exec's exit can be published a moment after its output
+    /// stream ends. A bounded poll waits for it instead of reporting the exec
+    /// as uncertain.
+    #[test]
+    fn an_exec_still_reported_running_after_its_stream_is_polled_to_its_exit() {
+        let container = "a".repeat(64);
+        let id = "b".repeat(64);
+        let mut calls = 0;
+        let result = execute(
+            &container,
+            &["tool".into()],
+            None,
+            |_, _, _| {
+                calls += 1;
+                Ok(serde_json::to_vec(&match calls {
+                    1 => json!({"Id":id}),
+                    2 | 3 => json!({"ID":id,"ContainerID":container,"Running":true,"ExitCode":0}),
+                    _ => json!({"ID":id,"ContainerID":container,"Running":false,"ExitCode":0}),
+                })
+                .unwrap())
+            },
+            |_, _| Ok(Attached::Recorded(frame(1, b"done"))),
+        )
+        .unwrap();
+        assert_eq!(calls, 4);
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, b"done");
     }
     fn one_off_config() -> Value {
         json!({"Image":format!("sha256:{}", "d".repeat(64)),"Cmd":["tool"],"HostConfig":{"NetworkMode":format!("container:{}", "a".repeat(64)),"AutoRemove":false}})
     }
-    #[test]
-    fn one_off_creates_starts_waits_inspects_reads_and_removes_once_with_nonzero_exit() {
-        let name = format!("hkn-{}-oneoff-{}", "b".repeat(32), "c".repeat(32));
-        let id = "e".repeat(64);
+    /// The calls of a one-off whose output arrives on its attach.
+    fn completed_one_off(
+        name: &str,
+        id: &str,
+        output: Vec<u8>,
+    ) -> Result<(OneOffOutput, usize), CandidateError> {
         let config = one_off_config();
         let mut calls = 0;
-        let result = one_off(&name, &config, |method, path, body| {
-            calls += 1;
-            match calls {
-                1 => {
-                    assert_eq!(method, Method::POST);
-                    assert_eq!(path, format!("/v1.53/containers/create?name={name}"));
-                    assert_eq!(body.unwrap(), &config);
-                    Ok(serde_json::to_vec(&json!({"Id":id})).unwrap())
+        let attached = std::cell::Cell::new(false);
+        let result = one_off(
+            name,
+            &config,
+            |method, path, body| {
+                calls += 1;
+                match calls {
+                    1 => {
+                        assert_eq!(method, Method::POST);
+                        assert_eq!(path, format!("/v1.53/containers/create?name={name}"));
+                        assert_eq!(body.unwrap(), &config);
+                        Ok(serde_json::to_vec(&json!({"Id":id})).unwrap())
+                    }
+                    2 => {
+                        // The attach was opened before the start.
+                        assert!(attached.get());
+                        assert_eq!(method, Method::POST);
+                        assert_eq!(path, format!("/v1.53/containers/{id}/start"));
+                        assert!(body.is_none());
+                        Ok(vec![])
+                    }
+                    3 => {
+                        assert_eq!(method, Method::POST);
+                        assert_eq!(path, format!("/v1.53/containers/{id}/wait"));
+                        Ok(serde_json::to_vec(&json!({"StatusCode":3,"Error":null})).unwrap())
+                    }
+                    4 => {
+                        assert_eq!(method, Method::GET);
+                        assert_eq!(path, format!("/v1.53/containers/{id}/json"));
+                        Ok(serde_json::to_vec(&json!({"Id":id,"Name":format!("/{name}"),"State":{"Running":false,"ExitCode":3}})).unwrap())
+                    }
+                    5 => {
+                        assert_eq!(method, Method::DELETE);
+                        assert_eq!(path, format!("/v1.53/containers/{id}?force=true&v=true"));
+                        Ok(vec![])
+                    }
+                    6 => {
+                        assert_eq!(method, Method::GET);
+                        Err(CandidateError::new("engine_not_found", "absent"))
+                    }
+                    _ => panic!("request replayed"),
                 }
-                2 => {
-                    assert_eq!(method, Method::POST);
-                    assert_eq!(path, format!("/v1.53/containers/{id}/start"));
-                    assert!(body.is_none());
-                    Ok(vec![])
-                }
-                3 => {
-                    assert_eq!(method, Method::POST);
-                    assert_eq!(path, format!("/v1.53/containers/{id}/wait"));
-                    Ok(serde_json::to_vec(&json!({"StatusCode":3,"Error":null})).unwrap())
-                }
-                4 => {
-                    assert_eq!(method, Method::GET);
-                    assert_eq!(path, format!("/v1.53/containers/{id}/json"));
-                    Ok(serde_json::to_vec(&json!({"Id":id,"Name":format!("/{name}"),"State":{"Running":false,"ExitCode":3}})).unwrap())
-                }
-                5 => {
-                    assert_eq!(method, Method::GET);
-                    assert_eq!(
-                        path,
-                        format!("/v1.53/containers/{id}/logs?stdout=true&stderr=true&tail=all")
-                    );
-                    Ok([frame(1, b"ok\n\xff"), frame(2, b"\0warn")].concat())
-                }
-                6 => {
-                    assert_eq!(method, Method::DELETE);
-                    assert_eq!(path, format!("/v1.53/containers/{id}?force=true&v=true"));
-                    Ok(vec![])
-                }
-                7 => {
-                    assert_eq!(method, Method::GET);
-                    Err(CandidateError::new("engine_not_found", "absent"))
-                }
-                _ => panic!("request replayed"),
-            }
-        })
+            },
+            |path| {
+                assert!(!attached.replace(true));
+                assert_eq!(
+                    path,
+                    format!("/v1.53/containers/{id}/attach?stream=1&stdout=1&stderr=1")
+                );
+                Ok(Attached::Recorded(output.clone()))
+            },
+        )?;
+        Ok((result, calls))
+    }
+    #[test]
+    fn one_off_creates_attaches_starts_reads_waits_inspects_and_removes_once_with_nonzero_exit() {
+        let name = format!("hkn-{}-oneoff-{}", "b".repeat(32), "c".repeat(32));
+        let id = "e".repeat(64);
+        let (result, calls) = completed_one_off(
+            &name,
+            &id,
+            [frame(1, b"ok\n\xff"), frame(2, b"\0warn")].concat(),
+        )
         .unwrap();
-        assert_eq!(calls, 7);
+        assert_eq!(calls, 6);
         assert_eq!(result.container, id);
         assert_eq!(result.exit_code, 3);
         assert_eq!(result.stdout, b"ok\n\xff");
         assert_eq!(result.stderr, b"\0warn");
-        assert!(!result.truncated);
+        assert_eq!((result.stdout_dropped, result.stderr_dropped), (0, 0));
+    }
+    /// HACK-2759: a one-off's large output keeps its beginning (it was read from
+    /// rotated logs, which kept only the end), and the drop is reported.
+    #[test]
+    fn a_one_off_large_output_keeps_its_beginning_and_reports_the_drop() {
+        let name = format!("hkn-{}-oneoff-{}", "b".repeat(32), "c".repeat(32));
+        let id = "e".repeat(64);
+        for total in [1_350_880, 4 * 1024 * 1024 + 13, 10_000_000] {
+            let (output, multiplexed) = frames(1, total);
+            let (result, _) = completed_one_off(&name, &id, multiplexed).unwrap();
+            assert_eq!(result.stdout, output[..OUTPUT_LIMIT], "{total}");
+            assert_eq!(result.stdout_dropped, (total - OUTPUT_LIMIT) as u64);
+            assert_eq!(result.stderr_dropped, 0);
+        }
     }
     #[test]
     fn one_off_caller_selection_loss_never_starts_or_replays() {
@@ -545,6 +1320,7 @@ mod tests {
                     assert!(path.contains("/create?name="));
                     Ok(serde_json::to_vec(&json!({"Id":"e".repeat(64)})).unwrap())
                 },
+                |_| Err(one_off_uncertain()),
             );
             assert!(result.is_err());
             assert_eq!(calls, if lose_at == 1 { 0 } else { 1 });
@@ -573,21 +1349,25 @@ mod tests {
                 4,
                 json!({"Id":id,"Name":format!("/{name}"),"State":{"Running":false,"ExitCode":1}}),
             ),
-            (7, inspected.clone()),
+            (6, inspected.clone()),
         ] {
             let mut calls = 0;
-            let error = one_off(&name, &one_off_config(), |_, _, _| {
-                calls += 1;
-                Ok(match calls {
-                    1 => serde_json::to_vec(&json!({"Id":id})).unwrap(),
-                    2 | 6 => vec![],
-                    3 => serde_json::to_vec(&json!({"StatusCode":0})).unwrap(),
-                    4 if stage == 4 => serde_json::to_vec(&changed).unwrap(),
-                    4 => serde_json::to_vec(&inspected).unwrap(),
-                    5 => vec![],
-                    _ => serde_json::to_vec(&changed).unwrap(),
-                })
-            })
+            let error = one_off(
+                &name,
+                &one_off_config(),
+                |_, _, _| {
+                    calls += 1;
+                    Ok(match calls {
+                        1 => serde_json::to_vec(&json!({"Id":id})).unwrap(),
+                        2 | 5 => vec![],
+                        3 => serde_json::to_vec(&json!({"StatusCode":0})).unwrap(),
+                        4 if stage == 4 => serde_json::to_vec(&changed).unwrap(),
+                        4 => serde_json::to_vec(&inspected).unwrap(),
+                        _ => serde_json::to_vec(&changed).unwrap(),
+                    })
+                },
+                |_| Ok(Attached::Recorded(vec![])),
+            )
             .err()
             .unwrap();
             assert_eq!(calls, stage);
@@ -597,39 +1377,34 @@ mod tests {
         config["HostConfig"]["AutoRemove"] = json!(true);
         let mut calls = 0;
         assert!(
-            one_off(&name, &config, |_, _, _| {
-                calls += 1;
-                Ok(vec![])
-            })
+            one_off(
+                &name,
+                &config,
+                |_, _, _| {
+                    calls += 1;
+                    Ok(vec![])
+                },
+                no_attach,
+            )
             .is_err()
         );
         assert_eq!(calls, 0);
     }
-    #[test]
-    fn real_unix_transport_delivers_multiplexed_binary_command_output() {
+    /// A fake engine socket: each accepted connection reads one request and
+    /// writes its response. A 101 answer is an upgraded stream, written on its
+    /// own thread as an engine does, so a one-off can start while attached.
+    fn serve(
+        path: std::path::PathBuf,
+        responses: Vec<(u16, Vec<u8>)>,
+    ) -> std::thread::JoinHandle<()> {
         use std::io::{Read, Write};
         use std::os::unix::net::UnixListener;
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "hce-{}-{}.sock",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
         let listener = UnixListener::bind(&path).unwrap();
         listener.set_nonblocking(true).unwrap();
-        let container = "a".repeat(64);
-        let id = "b".repeat(64);
-        let responses = [
-            serde_json::to_vec(&json!({"Id":id})).unwrap(),
-            [frame(1, b"out\xff"), frame(2, b"err\0")].concat(),
-            serde_json::to_vec(
-                &json!({"ID":id,"ContainerID":container,"Running":false,"ExitCode":7}),
-            )
-            .unwrap(),
-        ];
-        let worker = std::thread::spawn(move || {
-            for (index, response) in responses.into_iter().enumerate() {
-                let deadline = Instant::now() + Duration::from_secs(3);
+        std::thread::spawn(move || {
+            let mut streams = Vec::new();
+            for (status, response) in responses {
+                let deadline = Instant::now() + Duration::from_secs(5);
                 let mut socket = loop {
                     match listener.accept() {
                         Ok((socket, _)) => break socket,
@@ -643,7 +1418,7 @@ mod tests {
                 // macOS may inherit the listener's nonblocking flag on accept.
                 socket.set_nonblocking(false).unwrap();
                 socket
-                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
                 let mut request = Vec::new();
                 let mut byte = [0];
@@ -653,7 +1428,6 @@ mod tests {
                     assert!(request.len() < 8192);
                 }
                 let headers = String::from_utf8(request).unwrap();
-                assert!(headers.starts_with(if index == 2 { "GET " } else { "POST " }));
                 let length = headers
                     .lines()
                     .find_map(|l| {
@@ -664,24 +1438,399 @@ mod tests {
                     .unwrap_or(0);
                 let mut body = vec![0; length];
                 socket.read_exact(&mut body).unwrap();
-                write!(
-                    socket,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    response.len()
-                )
-                .unwrap();
+                if status == 101 {
+                    assert!(headers.contains("Upgrade: tcp"), "{headers}");
+                    socket
+                        .write_all(b"HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
+                        .unwrap();
+                    streams.push(std::thread::spawn(move || {
+                        socket.write_all(&response).unwrap();
+                    }));
+                    continue;
+                } else {
+                    write!(
+                        socket,
+                        "HTTP/1.1 {status} Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        response.len()
+                    )
+                    .unwrap();
+                }
                 socket.write_all(&response).unwrap();
             }
+            for stream in streams {
+                stream.join().unwrap();
+            }
+        })
+    }
+    fn socket_path() -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        std::env::temp_dir().join(format!(
+            "hce-{}-{}.sock",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
+    }
+    /// The real Unix transport and upgraded start, at small and at 10 MB of
+    /// output (past the 4 MiB response bound that made a large exec uncertain).
+    #[test]
+    fn real_unix_transport_delivers_multiplexed_binary_command_output() {
+        let container = "a".repeat(64);
+        let id = "b".repeat(64);
+        let (large, large_frames) = frames(1, 10_000_000);
+        for (stream, expected_stdout, dropped) in [
+            (
+                [frame(1, b"out\xff"), frame(2, b"err\0")].concat(),
+                b"out\xff".to_vec(),
+                0,
+            ),
+            (
+                large_frames,
+                large[..OUTPUT_LIMIT].to_vec(),
+                (10_000_000 - OUTPUT_LIMIT) as u64,
+            ),
+        ] {
+            let path = socket_path();
+            let worker = serve(
+                path.clone(),
+                vec![
+                    (200, serde_json::to_vec(&json!({"Id":id})).unwrap()),
+                    (101, stream),
+                    (
+                        200,
+                        serde_json::to_vec(
+                            &json!({"ID":id,"ContainerID":container,"Running":false,"ExitCode":7}),
+                        )
+                        .unwrap(),
+                    ),
+                ],
+            );
+            let transport = Transport::new(&path, Duration::from_secs(5)).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let result = execute(
+                &container,
+                &["tool".into()],
+                None,
+                |method, path, body| transport.request_bytes(method, path, body),
+                |path_, body| {
+                    let mut stream = crate::provider::agent::connect_until(&path, deadline)?;
+                    upgrade(&mut stream, path_, Some(body), deadline).map_err(|_| uncertain())?;
+                    Ok(Attached::read(stream, deadline).unwrap())
+                },
+            );
+            worker.join().unwrap();
+            std::fs::remove_file(&path).unwrap();
+            let result = result.unwrap();
+            assert_eq!(result.exit_code, 7);
+            assert_eq!(result.stdout, expected_stdout);
+            assert_eq!(result.stdout_dropped, dropped);
+            assert_eq!(result.truncated, dropped > 0);
+        }
+    }
+    /// HACK-2759 (VM captures): the provider's engine socket closed exec streams
+    /// 64 to 128 KiB before their end, inside a stdout frame. A fake engine that
+    /// closes the same way: past the kept 1 MiB the exec completes with its own
+    /// exit status, truncated, kept bytes exact and no counts claimed; inside the
+    /// kept range it stays uncertain at the format step.
+    #[test]
+    fn an_engine_that_closes_inside_a_frame_loses_only_a_tail_past_the_kept_range() {
+        let container = "a".repeat(64);
+        let id = "b".repeat(64);
+        let (output, multiplexed) = frames(1, 1_351_648);
+        // Cuts inside a frame, as observed: 1,286,624 of 1,351,648 and 600,000.
+        for (cut, lost) in [(1_286_624, true), (600_000, false)] {
+            let path = socket_path();
+            let mut responses = vec![
+                (200, serde_json::to_vec(&json!({"Id":id})).unwrap()),
+                (101, multiplexed[..cut].to_vec()),
+            ];
+            if lost {
+                responses.push((
+                    200,
+                    serde_json::to_vec(
+                        &json!({"ID":id,"ContainerID":container,"Running":false,"ExitCode":3}),
+                    )
+                    .unwrap(),
+                ));
+            }
+            let worker = serve(path.clone(), responses);
+            let transport = Transport::new(&path, Duration::from_secs(5)).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let result = execute(
+                &container,
+                &["tool".into()],
+                None,
+                |method, path, body| transport.request_bytes(method, path, body),
+                |path_, body| {
+                    let mut stream = crate::provider::agent::connect_until(&path, deadline)?;
+                    upgrade(&mut stream, path_, Some(body), deadline).map_err(|_| uncertain())?;
+                    Ok(Attached::read(stream, deadline).unwrap())
+                },
+            );
+            worker.join().unwrap();
+            std::fs::remove_file(&path).unwrap();
+            if lost {
+                let result = result.unwrap();
+                assert_eq!(result.exit_code, 3);
+                assert_eq!(result.stdout, output[..OUTPUT_LIMIT]);
+                assert!(result.truncated && result.tail_lost);
+                assert_eq!((result.stdout_dropped, result.stderr_dropped), (0, 0));
+            } else {
+                let error = result.err().unwrap();
+                assert_eq!(error.message, uncertain_at(Step::Format).message);
+            }
+        }
+    }
+    /// HACK-2759: the exec's output is read from the moment its start returns,
+    /// not after the caller's selection check. Here the check waits for the
+    /// engine to finish writing 4 MiB, which a socket buffer only holds if the
+    /// output is already being read.
+    #[test]
+    fn exec_output_is_read_while_the_callers_check_runs() {
+        use std::io::Write;
+        let container = "a".repeat(64);
+        let id = "b".repeat(64);
+        let (host, mut guest) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (output, multiplexed) = frames(1, 4 * 1024 * 1024);
+        let (written, wrote) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            guest.write_all(&multiplexed).unwrap();
+            written.send(()).unwrap();
         });
-        let transport = Transport::new(&path, Duration::from_secs(2)).unwrap();
-        let result = execute(&container, &["tool".into()], None, |method, path, body| {
-            transport.request_bytes(method, path, body)
+        let checks = std::cell::Cell::new(0);
+        let mut host = Some(host);
+        let result = execute_guarded(
+            &container,
+            &["tool".into()],
+            None,
+            &|| {
+                checks.set(checks.get() + 1);
+                // The check right after the start returns.
+                if checks.get() == 4 {
+                    wrote
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|_| uncertain())?;
+                }
+                Ok(())
+            },
+            |_, path, _| {
+                Ok(serde_json::to_vec(&if path.ends_with("/exec") {
+                    json!({"Id":id})
+                } else {
+                    json!({"ID":id,"ContainerID":container,"Running":false,"ExitCode":0})
+                })
+                .unwrap())
+            },
+            |_, _| {
+                Ok(Attached::read(
+                    host.take().unwrap(),
+                    Instant::now() + Duration::from_secs(10),
+                )
+                .unwrap())
+            },
+        )
+        .unwrap();
+        writer.join().unwrap();
+        assert_eq!(result.stdout, output[..OUTPUT_LIMIT]);
+        assert!(result.truncated && !result.tail_lost);
+    }
+    /// The lost-tail rule itself: only a cut whose stream already filled its
+    /// kept range succeeds; a cut header needs both streams full; a whole
+    /// response body never accepts a cut.
+    #[test]
+    fn a_cut_frame_is_a_lost_tail_only_past_its_streams_kept_range() {
+        let past = [frame(2, b"err"), frames(1, OUTPUT_LIMIT + 100).1].concat();
+        let cut = past.len() - 50;
+        let mut capture = Capture::default();
+        capture.feed(&past[..cut]).unwrap();
+        let capture = capture.finish().unwrap();
+        assert!(capture.tail_lost && capture.truncated());
+        assert_eq!((capture.stdout_dropped, capture.stderr_dropped), (0, 0));
+        assert_eq!(capture.stderr, b"err");
+        // The same bytes as one response body are malformed.
+        assert!(super::capture(&past[..cut]).is_err());
+        // A cut stderr frame while only stdout is full: its loss is inside
+        // stderr's kept range.
+        let stderr_cut = [frames(1, OUTPUT_LIMIT).1, frame(2, b"late stderr")].concat();
+        let mut capture = Capture::default();
+        capture.feed(&stderr_cut[..stderr_cut.len() - 4]).unwrap();
+        assert!(capture.finish().is_err());
+        // A cut header: its stream is unknown, and stderr is not full.
+        let header_cut = [frames(1, OUTPUT_LIMIT).1, frame(1, b"x")[..5].to_vec()].concat();
+        let mut capture = Capture::default();
+        capture.feed(&header_cut).unwrap();
+        assert!(capture.finish().is_err());
+        // Inside the kept range.
+        let mut capture = Capture::default();
+        capture.feed(&past[..OUTPUT_LIMIT / 2]).unwrap();
+        assert!(capture.finish().is_err());
+    }
+    /// HACK-2759 (review L2): an output stream that never ends is read only until the
+    /// deadline, then the read fails and the exec is uncertain.
+    #[test]
+    fn an_output_that_never_ends_stops_at_the_deadline_as_uncertain() {
+        use std::io::Write;
+        let (mut host, mut guest) = std::os::unix::net::UnixStream::pair().unwrap();
+        let writer = std::thread::spawn(move || {
+            let (_, frames) = frames(1, 64 * 1024);
+            while guest.write_all(&frames).is_ok() {}
         });
+        let started = Instant::now();
+        assert!(read_capture(&mut host, started + Duration::from_millis(200)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let error = execute(
+            &"a".repeat(64),
+            &["tool".into()],
+            None,
+            |_, _, _| Ok(serde_json::to_vec(&json!({"Id":"b".repeat(64)})).unwrap()),
+            |_, _| {
+                Ok(Attached::read(
+                    host.try_clone().unwrap(),
+                    Instant::now() + Duration::from_millis(100),
+                )
+                .unwrap())
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code, "graph_service_exec_uncertain");
+        drop(host);
+        writer.join().unwrap();
+    }
+    /// HACK-2759: the one-off over a real Unix socket. Its attach is an upgraded
+    /// connection opened before the start, and 10 MB of output keeps its beginning.
+    #[test]
+    fn real_unix_transport_attaches_a_one_off_before_its_start() {
+        let name = format!("hkn-{}-oneoff-{}", "b".repeat(32), "c".repeat(32));
+        let id = "e".repeat(64);
+        let (output, multiplexed) = frames(1, 10_000_000);
+        let path = socket_path();
+        let worker = serve(
+            path.clone(),
+            vec![
+                (200, serde_json::to_vec(&json!({"Id":id})).unwrap()),
+                (101, multiplexed),
+                (200, vec![]),
+                (200, serde_json::to_vec(&json!({"StatusCode":0})).unwrap()),
+                (
+                    200,
+                    serde_json::to_vec(&json!({"Id":id,"Name":format!("/{name}"),"State":{"Running":false,"ExitCode":0}}))
+                        .unwrap(),
+                ),
+                (204, vec![]),
+                (404, br#"{"message":"No such container"}"#.to_vec()),
+            ],
+        );
+        let transport = Transport::new(&path, Duration::from_secs(5)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let result = one_off(
+            &name,
+            &one_off_config(),
+            |method, path_, body| transport.request_bytes(method, path_, body),
+            |path_| {
+                let mut stream = crate::provider::agent::connect_until(&path, deadline)?;
+                upgrade(&mut stream, path_, None, deadline).map_err(|_| one_off_uncertain())?;
+                Ok(Attached::read(stream, deadline).unwrap())
+            },
+        );
         worker.join().unwrap();
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(&path).unwrap();
         let result = result.unwrap();
-        assert_eq!(result.exit_code, 7);
-        assert_eq!(result.stdout, b"out\xff");
-        assert_eq!(result.stderr, b"err\0");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, output[..OUTPUT_LIMIT]);
+        assert_eq!(result.stdout_dropped, (10_000_000 - OUTPUT_LIMIT) as u64);
+    }
+    /// HACK-2759 review: an uncertain exec names its step. A malformed stream and an
+    /// engine that answers the exec start without upgrading it are told apart.
+    #[test]
+    fn an_uncertain_exec_names_the_step_that_failed() {
+        let created = || serde_json::to_vec(&json!({"Id":"b".repeat(64)})).unwrap();
+        let format = execute(
+            &"a".repeat(64),
+            &["tool".into()],
+            None,
+            |_, _, _| Ok(created()),
+            |_, _| Ok(Attached::Recorded(vec![9, 0, 0, 0, 0, 0, 0, 1, b'x'])),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(format.code, "graph_service_exec_uncertain");
+        assert_eq!(format.message, uncertain_at(Step::Format).message);
+
+        // A plain 200 answer to the upgraded start: the stream was never opened.
+        let path = socket_path();
+        let worker = serve(path.clone(), vec![(200, b"{}".to_vec())]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut stream = crate::provider::agent::connect_until(&path, deadline).unwrap();
+        assert!(upgrade(&mut stream, "/v1.53/exec/x/start", Some("{}"), deadline).is_err());
+        worker.join().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_ne!(
+            uncertain_at(Step::Upgrade).message,
+            uncertain_at(Step::Format).message
+        );
+    }
+    /// HACK-2759 review (P2): opening an upgraded stream is bounded on its own.
+    /// The bound is the establishment limit, the reader's deadline, the admission
+    /// deadline or the observation deadline, whichever comes first, never the
+    /// reader's long output deadline.
+    #[test]
+    fn opening_an_upgraded_stream_has_its_own_short_bound() {
+        let now = Instant::now();
+        let output = now + Duration::from_secs(330);
+        let bound = establish_by(output, None, None);
+        assert!(bound <= Instant::now() + ESTABLISH_LIMIT && bound < output);
+        let admission = now + Duration::from_millis(50);
+        assert_eq!(establish_by(output, Some(admission), None), admission);
+        let observation = now + Duration::from_millis(20);
+        assert_eq!(
+            establish_by(output, Some(admission), Some(observation)),
+            observation
+        );
+        let soon = now + Duration::from_millis(5);
+        assert_eq!(establish_by(soon, Some(admission), None), soon);
+    }
+    /// HACK-2759 review (P2): an engine that accepts the attach but never answers
+    /// the upgrade. With the one-off's 330-second output deadline, opening the
+    /// stream still ends at its own bound, and sooner once cancellation is seen.
+    #[test]
+    fn a_stalled_upgrade_ends_at_its_bound_or_at_cancellation() {
+        use std::os::unix::net::UnixListener;
+        let path = socket_path();
+        let listener = UnixListener::bind(&path).unwrap();
+        let held = std::thread::spawn(move || {
+            // Accept twice and hold both connections open without answering.
+            let first = listener.accept().unwrap();
+            let second = listener.accept().unwrap();
+            (first, second)
+        });
+        let output = Instant::now() + Duration::from_secs(330);
+        let attach = "/v1.53/containers/x/attach?stream=1&stdout=1&stderr=1";
+
+        let started = Instant::now();
+        let establish = establish_by(output, None, None);
+        let mut stream = crate::provider::agent::connect_until(&path, establish).unwrap();
+        assert!(upgrade_until(&mut stream, attach, None, establish, &|| false).is_err());
+        let waited = started.elapsed();
+        assert!(
+            waited >= ESTABLISH_LIMIT - Duration::from_millis(50),
+            "{waited:?}"
+        );
+        assert!(
+            waited < ESTABLISH_LIMIT + Duration::from_secs(2),
+            "{waited:?}"
+        );
+
+        let checks = std::cell::Cell::new(0);
+        let started = Instant::now();
+        let mut stream = crate::provider::agent::connect_until(&path, output).unwrap();
+        let cancelled = || {
+            checks.set(checks.get() + 1);
+            checks.get() >= 2
+        };
+        assert!(upgrade_until(&mut stream, attach, None, output, &cancelled).is_err());
+        assert_eq!(checks.get(), 2);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        drop(held.join().unwrap());
+        std::fs::remove_file(&path).unwrap();
     }
 }

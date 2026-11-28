@@ -55,7 +55,58 @@ export type NativeAuthoredExec = {
   readonly stdout: Uint8Array;
   readonly stderr: Uint8Array;
   readonly truncated: boolean;
+  /** Absent means nothing was reported dropped (HACK-2759). */
+  readonly dropped?: NativeOutputDrops;
 };
+/**
+ * Bytes of each stream past the owner's 1 MiB cap, read to the end and dropped
+ * (HACK-2759). The kept bytes are the beginning. An owner that predates the
+ * counts, or dropped nothing, sends none.
+ */
+export type NativeOutputDrops = {
+  readonly stdout: number;
+  readonly stderr: number;
+};
+const DROPPED_KEYS: readonly string[] = ["stderr_dropped", "stdout_dropped"];
+/** The record's keys, other than the optional dropped counts, are exactly `expected`. */
+export function nativeCommandReplyKeys(
+  value: Record<string, unknown>,
+  expected: string
+): boolean {
+  return (
+    Object.keys(value)
+      .filter((key) => !DROPPED_KEYS.includes(key))
+      .sort()
+      .join(",") === expected
+  );
+}
+/** The optional dropped counts of a command reply; counts imply truncation. */
+export function nativeOutputDrops(
+  value: Record<string, unknown>,
+  truncated: boolean
+): NativeOutputDrops {
+  const count = (entry: unknown): number => {
+    if (entry === undefined) {
+      return 0;
+    }
+    if (
+      typeof entry !== "number" ||
+      !Number.isSafeInteger(entry) ||
+      entry < 1
+    ) {
+      return refused();
+    }
+    return entry;
+  };
+  const dropped = {
+    stdout: count(value.stdout_dropped),
+    stderr: count(value.stderr_dropped),
+  };
+  if (!truncated && dropped.stdout + dropped.stderr > 0) {
+    return refused();
+  }
+  return dropped;
+}
 function output(value: unknown): Uint8Array {
   if (typeof value !== "string" || value.length > 1_398_104) {
     return refused();
@@ -86,7 +137,7 @@ export function parseNativeAuthoredExec(
   if (
     !(
       isRecord(exec) &&
-      keys(
+      nativeCommandReplyKeys(
         exec,
         "container,exit_code,receipt,service,stderr_base64,stdout_base64,truncated"
       )
@@ -121,6 +172,7 @@ export function parseNativeAuthoredExec(
     stdout: output(exec.stdout_base64),
     stderr: output(exec.stderr_base64),
     truncated: exec.truncated,
+    dropped: nativeOutputDrops(exec, exec.truncated),
   };
 }
 /** One finite noninteractive command through the live owner; no input acquisition or fallback. */
@@ -199,6 +251,7 @@ export async function nativeAuthoredProjectExec(input: {
       stdout: new Uint8Array(),
       stderr: new Uint8Array(),
       truncated: false,
+      dropped: { stdout: 0, stderr: 0 },
     };
   }
   const result = await withStatus(scope, async (saved) => {

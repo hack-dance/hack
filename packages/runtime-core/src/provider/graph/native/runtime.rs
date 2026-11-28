@@ -23,9 +23,29 @@ pub(super) use run::RunSelection;
 pub(super) use run::ServiceRun;
 #[cfg(target_os = "macos")]
 pub(super) use run::execute as service_run;
-/// Engine identity, exit code, bounded stdout/stderr and truncation of one reaped one-off.
+/// Bytes of an exec's or one-off's stdout and stderr past the per-stream output
+/// cap, read to the end and dropped (HACK-2759). The kept bytes are the beginning.
+/// `lost` is an output whose end the engine socket lost past the kept range: the
+/// output is incomplete by an unknown amount, so both counts are zero.
 #[cfg(any(target_os = "macos", test))]
-type OneOffCompletion = (String, i32, Vec<u8>, Vec<u8>, bool);
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Dropped {
+    pub stdout: u64,
+    pub stderr: u64,
+    pub lost: bool,
+}
+#[cfg(any(target_os = "macos", test))]
+impl Dropped {
+    pub(super) fn any(self) -> bool {
+        self.lost || self.stdout + self.stderr > 0
+    }
+}
+/// Exit code, bounded stdout/stderr and dropped bytes of one service exec.
+#[cfg(any(target_os = "macos", test))]
+type ExecCompletion = (i32, Vec<u8>, Vec<u8>, Dropped);
+/// Engine identity, exit code, bounded stdout/stderr and dropped bytes of one reaped one-off.
+#[cfg(any(target_os = "macos", test))]
+type OneOffCompletion = (String, i32, Vec<u8>, Vec<u8>, Dropped);
 
 /// Status has no mutation, guest-program or storage-witness capability.
 trait ReadBackend {
@@ -45,7 +65,7 @@ trait Backend {
         _selected: &ExecSelection,
         _deadline: Instant,
         _fresh: &dyn Fn() -> Result<(), CandidateError>,
-    ) -> Result<(i32, Vec<u8>, Vec<u8>, bool), CandidateError> {
+    ) -> Result<ExecCompletion, CandidateError> {
         Err(refused())
     }
     /// Create, start, await, read and remove one named one-off container; the
@@ -131,7 +151,7 @@ impl<B: Backend> Backend for GuardedBackend<'_, B> {
         selected: &ExecSelection,
         deadline: Instant,
         fresh: &dyn Fn() -> Result<(), CandidateError>,
-    ) -> Result<(i32, Vec<u8>, Vec<u8>, bool), CandidateError> {
+    ) -> Result<ExecCompletion, CandidateError> {
         let check = || {
             check_startup(self.guard)?;
             fresh()
@@ -252,7 +272,7 @@ impl Backend for OwnedBackend<'_> {
         selected: &ExecSelection,
         deadline: Instant,
         fresh: &dyn Fn() -> Result<(), CandidateError>,
-    ) -> Result<(i32, Vec<u8>, Vec<u8>, bool), CandidateError> {
+    ) -> Result<ExecCompletion, CandidateError> {
         self.engine
             .service_exec_until(
                 id,
@@ -261,7 +281,14 @@ impl Backend for OwnedBackend<'_> {
                 deadline,
                 fresh,
             )
-            .map(|v| (v.exit_code, v.stdout, v.stderr, v.truncated))
+            .map(|v| {
+                let dropped = Dropped {
+                    stdout: v.stdout_dropped,
+                    stderr: v.stderr_dropped,
+                    lost: v.tail_lost,
+                };
+                (v.exit_code, v.stdout, v.stderr, dropped)
+            })
     }
     #[cfg(any(target_os = "macos", test))]
     fn one_off(
@@ -273,7 +300,14 @@ impl Backend for OwnedBackend<'_> {
     ) -> Result<OneOffCompletion, CandidateError> {
         self.engine
             .service_one_off_until(name, config, deadline, fresh)
-            .map(|v| (v.container, v.exit_code, v.stdout, v.stderr, v.truncated))
+            .map(|v| {
+                let dropped = Dropped {
+                    stdout: v.stdout_dropped,
+                    stderr: v.stderr_dropped,
+                    lost: v.tail_lost,
+                };
+                (v.container, v.exit_code, v.stdout, v.stderr, dropped)
+            })
     }
     #[cfg(any(target_os = "macos", test))]
     fn logs(&self, id: &str, tail: u16) -> Result<(String, String, bool), CandidateError> {

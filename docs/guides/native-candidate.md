@@ -193,12 +193,13 @@ virtual machine is still queued. It affects:
 `docker cp` is not affected. A provider fix is verified; it ships with a new
 provider pin.
 
-Releases that include HACK-2759 report the loss instead of returning shortened
-output as complete. If the cut comes after the first 1 MiB of a stream, Hack writes
-that 1 MiB and marks the output truncated, as it does for any output over 1 MiB. If
-the cut comes inside the first 1 MiB, the command fails; an exec reports that
-completion is unconfirmed. Earlier releases can return shortened output without
-saying so.
+From the first prerelease after 5.0.0-next.28 (HACK-2759), Hack reports the loss
+instead of returning shortened output as complete. If the cut comes after a
+stream's first 1 MiB, `hack exec` and `hack run` write that 1 MiB, keep the
+command's exit status and say on stderr that the output is incomplete. Either
+stream may then be missing its end, stderr included. If the cut comes inside the
+first 1 MiB, the outcome is unconfirmed. 5.0.0-next.28 and earlier can return
+shortened output without saying so.
 
 For large output, do not read it through the command's output stream. Redirect it
 to a file inside the container, then copy the file out with `docker cp`. For

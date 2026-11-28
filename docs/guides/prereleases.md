@@ -101,10 +101,11 @@ These limits still apply to a packaged candidate:
   (native `hack exec`, and a `docker exec` sent to the native engine) lose their
   end from a few hundred KB upward, in about 1 in 4 runs. Attach streams (`hack run`,
   Compose-backed `hack run` and `docker run`) lose it when the Mac reads slowly.
-  `docker cp` is not affected. Releases that include HACK-2759 mark the output
-  truncated when the cut comes after the first 1 MiB of a stream, and fail the
-  command when it comes inside it; earlier releases can return shortened output
-  without saying so. For large output, redirect it to a file in the container and
+  `docker cp` is not affected. From the first prerelease after 5.0.0-next.28
+  (HACK-2759), Hack says the output is incomplete when the cut comes after a
+  stream's first 1 MiB, and reports the outcome as unconfirmed when it comes inside
+  it; 5.0.0-next.28 and earlier can return shortened output without saying so.
+  For large output, redirect it to a file in the container and
   copy the file out with `docker cp`. A provider fix is verified; it ships with a
   new provider pin. See [known issues](native-candidate.md#known-issues).
 

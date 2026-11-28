@@ -174,6 +174,38 @@ finalization checks still apply. Fresh and already branch-scoped graphs keep
 their normal branch namespace. This compatibility path does not authorize
 adopting an unrelated branch or project.
 
+## Known issues
+
+### Command output can lose its end (HACK-2766)
+
+On the native VM's pinned provider, the stream that carries a command's output can
+close before the output ends, and the provider gives no error. The cause is in the
+provider's socket proxy: it closes the stream's Mac side while output from the
+virtual machine is still queued. It affects:
+
+- **Exec streams:** native `hack exec` and a `docker exec` you send to the native
+  engine yourself. From a few hundred KB of output upward, about 1 in 4 runs lose
+  their end.
+- **Attach streams, when the Mac reads slowly:** `hack run`, Compose-backed
+  `hack run` and `docker run`. At normal read speed they were not cut; a slow
+  reader lost the end every time.
+
+`docker cp` is not affected. A provider fix is verified; it ships with a new
+provider pin.
+
+From the first prerelease after 5.0.0-next.28 (HACK-2759), Hack reports the loss
+instead of returning shortened output as complete. If the cut comes after a
+stream's first 1 MiB, `hack exec` and `hack run` write that 1 MiB, keep the
+command's exit status and say on stderr that the output is incomplete. Either
+stream may then be missing its end, stderr included. If the cut comes inside the
+first 1 MiB, the outcome is unconfirmed. 5.0.0-next.28 and earlier can return
+shortened output without saying so.
+
+For large output, do not read it through the command's output stream. Redirect it
+to a file inside the container, then copy the file out with `docker cp`. For
+example, run `hack exec web -- sh -c 'npm test > /tmp/test.log 2>&1'`, then copy
+`/tmp/test.log`. The `sh -c` command still exits with the command's own status.
+
 ## Check a project before you start it
 
 `hack up` on the native backend checks a Compose project in two places and stops

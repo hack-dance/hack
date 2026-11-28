@@ -94,6 +94,21 @@ These limits still apply to a packaged candidate:
 - Downgrading onto newer state: an older candidate that refuses state written by
   a newer one is not a rollback. See [manual candidate upgrade and rollback](native-candidate.md#manual-candidate-upgrade-and-rollback).
 
+### Known issues
+
+- **Native command output can lose its end (HACK-2766).** On the native VM's
+  pinned provider, an output stream can close before the output ends. Exec streams
+  (native `hack exec`, and a `docker exec` sent to the native engine) lose their
+  end from a few hundred KB upward, in about 1 in 4 runs. Attach streams (`hack run`,
+  Compose-backed `hack run` and `docker run`) lose it when the Mac reads slowly.
+  `docker cp` is not affected. From the first prerelease after 5.0.0-next.28
+  (HACK-2759), Hack says the output is incomplete when the cut comes after a
+  stream's first 1 MiB, and reports the outcome as unconfirmed when it comes inside
+  it; 5.0.0-next.28 and earlier can return shortened output without saying so.
+  For large output, redirect it to a file in the container and
+  copy the file out with `docker cp`. A provider fix is verified; it ships with a
+  new provider pin. See [known issues](native-candidate.md#known-issues).
+
 ## Versions and artifacts
 
 Candidate versions have the form `BASE-next.N`, where `BASE` is the next
